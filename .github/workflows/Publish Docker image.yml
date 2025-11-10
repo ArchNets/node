@@ -12,9 +12,6 @@ on:
       - 'v*'
   release:
     types: [published]
-  pull_request:
-    branches:
-      - 'master'
 
 permissions:
   contents: read

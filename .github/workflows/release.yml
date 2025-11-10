@@ -8,16 +8,8 @@ on:
         required: false
         type: string
   push:
-    branches:
-      - master
-      - develop
     tags:
       - 'v*'
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/*.yml"
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
