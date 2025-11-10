@@ -1,4 +1,4 @@
-module github.com/perfect-panel/ppanel-node
+module github.com/archnets/node
 
 go 1.25
 

@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/common/counter"
-	"github.com/perfect-panel/ppanel-node/common/rate"
-	"github.com/perfect-panel/ppanel-node/limiter"
+	"github.com/archnets/node/common/counter"
+	"github.com/archnets/node/common/rate"
+	"github.com/archnets/node/limiter"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"

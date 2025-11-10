@@ -4,10 +4,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/serverstatus"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	vCore "github.com/perfect-panel/ppanel-node/core"
+	"github.com/archnets/node/api/panel"
+	"github.com/archnets/node/common/serverstatus"
+	"github.com/archnets/node/common/task"
+	vCore "github.com/archnets/node/core"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,9 +23,9 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Execute:  c.reportUserTrafficTask,
 	}
 	_ = c.userListMonitorPeriodic.Start(false)
-	log.WithField("节点", c.tag).Info("用户列表监控任务已启动")
+	log.WithField("node", c.tag).Info("User list monitor task started")
 	_ = c.userReportPeriodic.Start(false)
-	log.WithField("节点", c.tag).Info("用户流量报告任务已启动")
+	log.WithField("node", c.tag).Info("User traffic report task started")
 	var security string
 	switch node.Type {
 	case "vless":
@@ -52,7 +52,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 				Interval: time.Hour * 24,
 				Execute:  c.renewCertTask,
 			}
-			log.WithField("节点", c.tag).Info("证书定期更新任务已启动")
+			log.WithField("node", c.tag).Info("Certificate periodic renewal task started")
 			// delay to start renewCert
 			_ = c.renewCertPeriodic.Start(true)
 		}
@@ -127,8 +127,8 @@ func (c *Controller) userListMonitor() (err error) {
 	}
 	c.userList = newU
 	if len(added)+len(deleted) != 0 {
-		log.WithField("节点", c.tag).
-			Infof("删除 %d 个用户，新增 %d 个用户", len(deleted), len(added))
+		log.WithField("node", c.tag).
+			Infof("Deleted %d users, added %d users", len(deleted), len(added))
 	}
 	return nil
 }
@@ -147,7 +147,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 				"err": err,
 			}).Info("Report user traffic failed")
 		} else {
-			log.WithField("节点", c.tag).Infof("已上报 %d 名用户消耗流量", len(userTraffic))
+			log.WithField("node", c.tag).Infof("Reported traffic for %d users", len(userTraffic))
 		}
 	}
 
@@ -174,7 +174,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 				"err": err,
 			}).Info("Report online users failed")
 		} else {
-			log.WithField("节点", c.tag).Infof("总计 %d 名在线用户, %d 名已上报", len(*onlineDevice), len(result))
+			log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(*onlineDevice), len(result))
 		}
 	}
 

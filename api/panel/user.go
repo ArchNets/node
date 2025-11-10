@@ -40,7 +40,7 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 		SetDoNotParseResponse(true).
 		Get(p)
 	if r == nil || r.RawResponse == nil {
-		return nil, fmt.Errorf("服务端响应为空")
+		return nil, fmt.Errorf("server response is empty")
 	}
 	defer r.RawResponse.Body.Close()
 
@@ -49,18 +49,18 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), err)
+		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
 	}
 	if r.StatusCode() >= 400 {
 		body := r.Body()
-		return nil, fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
+		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
 	}
 	userlist := &UserListBody{}
 	dec := jsontext.NewDecoder(r.RawResponse.Body)
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
-			return nil, fmt.Errorf("解码用户列表失败: %w", err)
+			return nil, fmt.Errorf("failed to decode user list: %w", err)
 		}
 		if tok.Kind() == '"' && tok.String() == "users" {
 			break
@@ -68,19 +68,19 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 	}
 	tok, err := dec.ReadToken()
 	if err != nil {
-		return nil, fmt.Errorf("解码用户列表失败: %w", err)
+		return nil, fmt.Errorf("failed to decode user list: %w", err)
 	}
 	if tok.Kind() != '[' {
-		return nil, fmt.Errorf(`解码用户列表失败: "users"非数组`)
+		return nil, fmt.Errorf(`failed to decode user list: "users" is not an array`)
 	}
 	for dec.PeekKind() != ']' {
 		val, err := dec.ReadValue()
 		if err != nil {
-			return nil, fmt.Errorf("解码用户列表失败: 读取用户对象失败: %w", err)
+			return nil, fmt.Errorf("failed to decode user list: read user object failed: %w", err)
 		}
 		var u UserInfo
 		if err := json.Unmarshal(val, &u); err != nil {
-			return nil, fmt.Errorf("解码用户列表失败: 读取用户对象失败: %w", err)
+			return nil, fmt.Errorf("failed to decode user list: read user object failed: %w", err)
 		}
 		userlist.Users = append(userlist.Users, u)
 	}
@@ -139,11 +139,11 @@ func (c *ClientV1) ReportUserTraffic(userTraffic *[]UserTraffic) error {
 		ForceContentType("application/json").
 		Post(p)
 	if err != nil {
-		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), err)
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
 	}
 	if r.StatusCode() >= 400 {
 		body := r.Body()
-		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
 	}
 
 	return nil
@@ -159,11 +159,11 @@ func (c *ClientV1) ReportNodeOnlineUsers(data *[]OnlineUser) error {
 		ForceContentType("application/json").
 		Post(p)
 	if err != nil {
-		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), err)
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
 	}
 	if r.StatusCode() >= 400 {
 		body := r.Body()
-		return fmt.Errorf("访问 %s 失败: %s", path.Join(c.APIHost+p), string(body))
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
 	}
 
 	return nil

@@ -7,7 +7,7 @@ import (
 )
 
 var command = &cobra.Command{
-	Use: "ppnode",
+	Use: "node",
 }
 
 func Run() {

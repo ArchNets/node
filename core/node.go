@@ -3,7 +3,7 @@ package core
 import (
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
+	"github.com/archnets/node/api/panel"
 )
 
 func (v *XrayCore) AddNode(tag string, info *panel.NodeInfo) error {

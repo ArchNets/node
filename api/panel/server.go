@@ -109,11 +109,11 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 	c.responseBodyHash = newBodyHash
 	c.ServerConfigEtag = r.Header().Get("ETag")
 	if err != nil {
-		return nil, fmt.Errorf("访问 %s 失败: %v", client.BaseURL+path, err.Error())
+		return nil, fmt.Errorf("failed to access %s: %v", client.BaseURL+path, err.Error())
 	}
 	if r.StatusCode() >= 400 {
 		body := r.Body()
-		return nil, fmt.Errorf("访问 %s 失败: %s", client.BaseURL+path, string(body))
+		return nil, fmt.Errorf("failed to access %s: %s", client.BaseURL+path, string(body))
 	}
 	if r != nil {
 		defer func() {
@@ -122,15 +122,15 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 			}
 		}()
 	} else {
-		return nil, fmt.Errorf("服务端返回为空")
+		return nil, fmt.Errorf("server returned empty response")
 	}
 	resp := &ServerConfigResponse{}
 	err = json.Unmarshal(r.Body(), resp)
 	if err != nil {
-		return nil, fmt.Errorf("解码响应体失败: %s", err)
+		return nil, fmt.Errorf("failed to decode response body: %s", err)
 	}
 	if resp.Data.Protocols == nil {
-		return nil, fmt.Errorf("协议配置为空")
+		return nil, fmt.Errorf("protocol configuration is empty")
 	}
 	return resp, nil
 }

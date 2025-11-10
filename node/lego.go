@@ -21,10 +21,10 @@ import (
 	"github.com/go-acme/lego/v4/providers/dns"
 	"github.com/go-acme/lego/v4/registration"
 
+	"github.com/archnets/node/api/panel"
+	"github.com/archnets/node/common/file"
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/lego"
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/file"
 )
 
 type Lego struct {
@@ -33,12 +33,12 @@ type Lego struct {
 }
 
 func NewLego(info *panel.NodeInfo) (*Lego, error) {
-	certFile := filepath.Join("/etc/PPanel-node/", info.Type+strconv.Itoa(info.Id)+".cer")
-	//keyFile := filepath.Join("/etc/PPanel-node/", info.Type+strconv.Itoa(info.Id)+".key")
+	certFile := filepath.Join("/etc/archnets/", info.Type+strconv.Itoa(info.Id)+".cer")
+	//keyFile := filepath.Join("/etc/archnets/", info.Type+strconv.Itoa(info.Id)+".key")
 	user, err := NewLegoUser(path.Join(path.Dir(certFile),
 		"user",
-		fmt.Sprintf("user-%s.json", "ppnode@ppanel.dev")),
-		"ppnode@ppanel.dev")
+		fmt.Sprintf("user-%s.json", "node@archnets.com")),
+		"node@archnets.com")
 	if err != nil {
 		return nil, fmt.Errorf("create user error: %s", err)
 	}
@@ -118,8 +118,8 @@ func (l *Lego) CreateCert() (err error) {
 }
 
 func (l *Lego) RenewCert() error {
-	certFile := filepath.Join("/etc/PPanel-node/", l.info.Type+strconv.Itoa(l.info.Id)+".cer")
-	//keyFile := filepath.Join("/etc/PPanel-node/", info.Type+strconv.Itoa(info.Id)+".key")
+	certFile := filepath.Join("/etc/archnets/", l.info.Type+strconv.Itoa(l.info.Id)+".cer")
+	//keyFile := filepath.Join("/etc/archnets/", info.Type+strconv.Itoa(info.Id)+".key")
 	file, err := os.ReadFile(certFile)
 	if err != nil {
 		return fmt.Errorf("read cert file error: %s", err)
@@ -156,8 +156,8 @@ func (l *Lego) CheckCert(file []byte) (bool, error) {
 }
 
 func (l *Lego) writeCert(certificates *certificate.Resource) error {
-	certFile := filepath.Join("/etc/PPanel-node/", l.info.Type+strconv.Itoa(l.info.Id)+".cer")
-	keyFile := filepath.Join("/etc/PPanel-node/", l.info.Type+strconv.Itoa(l.info.Id)+".key")
+	certFile := filepath.Join("/etc/archnets/", l.info.Type+strconv.Itoa(l.info.Id)+".cer")
+	keyFile := filepath.Join("/etc/archnets/", l.info.Type+strconv.Itoa(l.info.Id)+".key")
 	err := checkPath(certFile)
 	if err != nil {
 		return fmt.Errorf("check path error: %s", err)

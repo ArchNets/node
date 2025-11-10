@@ -6,11 +6,11 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/conf"
-	"github.com/perfect-panel/ppanel-node/core"
-	"github.com/perfect-panel/ppanel-node/limiter"
-	"github.com/perfect-panel/ppanel-node/node"
+	"github.com/archnets/node/api/panel"
+	"github.com/archnets/node/conf"
+	"github.com/archnets/node/core"
+	"github.com/archnets/node/limiter"
+	"github.com/archnets/node/node"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -22,7 +22,7 @@ var (
 
 var serverCommand = cobra.Command{
 	Use:   "server",
-	Short: "Run ppnode server",
+	Short: "Run node server",
 	Run:   serverHandle,
 	Args:  cobra.NoArgs,
 }
@@ -30,7 +30,7 @@ var serverCommand = cobra.Command{
 func init() {
 	serverCommand.PersistentFlags().
 		StringVarP(&config, "config", "c",
-			"/etc/PPanel-node/config.yml", "config file path")
+			"/etc/archnets/config.yml", "config file path")
 	serverCommand.PersistentFlags().
 		BoolVarP(&watch, "watch", "w",
 			true, "watch file path change")
@@ -47,7 +47,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		PadLevelText:     false,
 	})
 	if err != nil {
-		log.WithField("err", err).Error("读取配置文件失败")
+		log.WithField("err", err).Error("failed to read config file")
 		return
 	}
 	switch c.LogConfig.Level {
@@ -63,7 +63,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	if c.LogConfig.Output != "" {
 		f, err := os.OpenFile(c.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
-			log.WithField("err", err).Error("打开日志文件失败，使用stdout替代")
+			log.WithField("err", err).Error("failed to open log file, using stdout instead")
 		}
 		log.SetOutput(f)
 	}
@@ -71,7 +71,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	p := panel.NewClientV2(&c.ApiConfig)
 	serverconfig, err := panel.GetServerConfig(p)
 	if err != nil {
-		log.WithField("err", err).Error("获取服务端配置失败")
+		log.WithField("err", err).Error("failed to get server configuration")
 		return
 	}
 	var reloadCh = make(chan struct{}, 1)
@@ -79,21 +79,21 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	xraycore.ReloadCh = reloadCh
 	err = xraycore.Start(serverconfig)
 	if err != nil {
-		log.WithField("err", err).Error("启动Xray核心失败")
+		log.WithField("err", err).Error("failed to start Xray core")
 		return
 	}
 	defer xraycore.Close()
 	nodes, err := node.New(xraycore, c, serverconfig)
 	if err != nil {
-		log.WithField("err", err).Error("获取节点配置失败")
+		log.WithField("err", err).Error("failed to get node configuration")
 		return
 	}
 	err = nodes.Start()
 	if err != nil {
-		log.WithField("err", err).Error("启动节点失败")
+		log.WithField("err", err).Error("failed to start nodes")
 		return
 	}
-	log.Infof("已启动 %d 个节点", serverconfig.Data.Total)
+	log.Infof("started %d nodes", serverconfig.Data.Total)
 	if watch {
 		// On file change, just signal reload; do not run reload concurrently here
 		err = c.Watch(config, func() {
@@ -120,9 +120,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			_ = xraycore.Close()
 			return
 		case <-reloadCh:
-			log.Info("收到重启信号，正在重新加载配置...")
+			log.Info("received reload signal, reloading configuration...")
 			if err := reload(config, &nodes, &xraycore); err != nil {
-				log.WithField("err", err).Error("重启失败")
+				log.WithField("err", err).Error("reload failed")
 			}
 		}
 	}
@@ -148,7 +148,7 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore) error {
 	p := panel.NewClientV2(&newConf.ApiConfig)
 	serverconfig, err := panel.GetServerConfig(p)
 	if err != nil {
-		log.WithField("err", err).Error("获取服务端配置失败")
+		log.WithField("err", err).Error("failed to get server configuration")
 		return err
 	}
 
@@ -168,7 +168,7 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore) error {
 
 	*nodes = newNodes
 	*xcore = newCore
-	log.Infof("%d 个节点重启成功", serverconfig.Data.Total)
+	log.Infof("%d nodes reloaded successfully", serverconfig.Data.Total)
 	runtime.GC()
 	return nil
 }

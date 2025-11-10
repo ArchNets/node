@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/common/file"
+	"github.com/archnets/node/common/file"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -32,8 +32,8 @@ func (c *Controller) renewCertTask() error {
 }
 
 func (c *Controller) requestCert() error {
-	certFile := filepath.Join("/etc/PPanel-node/", c.info.Type+strconv.Itoa(c.info.Id)+".cer")
-	keyFile := filepath.Join("/etc/PPanel-node/", c.info.Type+strconv.Itoa(c.info.Id)+".key")
+	certFile := filepath.Join("/etc/archnets/", c.info.Type+strconv.Itoa(c.info.Id)+".cer")
+	keyFile := filepath.Join("/etc/archnets/", c.info.Type+strconv.Itoa(c.info.Id)+".key")
 	switch c.info.Protocol.CertMode {
 	case "none", "", "file":
 	case "dns", "http":

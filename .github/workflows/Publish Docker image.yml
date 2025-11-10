@@ -7,9 +7,14 @@ on:
   pull_request:
     branches:
       - 'master'
+
+permissions:
+  contents: read
+  packages: write
+
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/ppnode
+  IMAGE_NAME: ${{ github.repository_owner }}/node
 
 jobs:
   build:

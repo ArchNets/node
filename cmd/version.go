@@ -8,8 +8,8 @@ import (
 
 var (
 	version  = "TempVersion" //use ldflags replace
-	codename = "PPanel-node"
-	intro    = "A PPanel backend based on multi core"
+	codename = "ArchNet-node"
+	intro    = "A ArchNet backend based on multi core"
 )
 
 var versionCommand = cobra.Command{
@@ -25,13 +25,11 @@ func init() {
 }
 
 func showVersion() {
-	fmt.Println(`
-	______ ______                    _ 
-	| ___ \| ___ \                  | |
-	| |_/ /| |_/ /__ _  _ __    ___ | |
-	|  __/ |  __// _  ||  _ \  / _ \| |
-	| |    | |  | (_| || | | ||  __/| |
-	\_|    \_|   \__,_||_| |_| \___||_|
-	`)
+	fmt.Println("  ___           _       _   _      _   \n" +
+		" / _ \\         | |     | \\ | |    | |  \n" +
+		"/ /_\\ \\_ __ ___| |__   |  \\| | ___| |_ \n" +
+		"|  _  | '__/ __| '_ \\  | . ` |/ _ \\ __|\n" +
+		"| | | | | | (__| | | | | |\\  |  __/ |_ \n" +
+		"\\_| |_/_|  \\___|_| |_| \\_| \\_/\\___|\\__|\n")
 	fmt.Printf("%s %s (%s) \n", codename, version, intro)
 }

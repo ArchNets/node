@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
+	"github.com/archnets/node/api/panel"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
@@ -101,8 +101,8 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
-						CertFile: filepath.Join("/etc/PPanel-node/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".cer"),
-						KeyFile:  filepath.Join("/etc/PPanel-node/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".key"),
+						CertFile: filepath.Join("/etc/archnets/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".cer"),
+						KeyFile:  filepath.Join("/etc/archnets/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".key"),
 					},
 				},
 			}

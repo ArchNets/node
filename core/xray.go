@@ -4,11 +4,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	"github.com/perfect-panel/ppanel-node/conf"
-	"github.com/perfect-panel/ppanel-node/core/app/dispatcher"
-	_ "github.com/perfect-panel/ppanel-node/core/distro/all"
+	"github.com/archnets/node/api/panel"
+	"github.com/archnets/node/common/task"
+	"github.com/archnets/node/conf"
+	"github.com/archnets/node/core/app/dispatcher"
+	_ "github.com/archnets/node/core/distro/all"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
@@ -150,11 +150,11 @@ func (c *XrayCore) startTasks(serverconfig *panel.ServerConfigResponse) {
 func (c *XrayCore) ServerConfigMonitor() (err error) {
 	newServerConfig, err := panel.GetServerConfig(c.Client)
 	if err != nil {
-		log.WithField("err", err).Error("获取服务端配置失败")
+		log.WithField("err", err).Error("failed to get server configuration")
 		return nil
 	}
 	if newServerConfig != nil {
-		log.Error("检测到服务端配置变更，正在重启节点...")
+		log.Error("server configuration changed, restarting nodes...")
 		// Non-blocking signal to avoid goroutine stuck when channel is full or nil
 		if c.ReloadCh != nil {
 			select {

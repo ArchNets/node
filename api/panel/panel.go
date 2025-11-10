@@ -9,8 +9,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/archnets/node/conf"
 	"github.com/go-resty/resty/v2"
-	"github.com/perfect-panel/ppanel-node/conf"
 )
 
 type ClientV1 struct {

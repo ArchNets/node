@@ -21,6 +21,10 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
 
   build:
@@ -125,18 +129,18 @@ jobs:
         run: |
           echo "version: $version"
           mkdir -p build_assets
-          GOEXPERIMENT=jsonv2 go build -v -o build_assets/ppnode -trimpath -ldflags "-X 'github.com/perfect-panel/ppanel-node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 go build -v -o build_assets/node -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=$version' -s -w -buildid="
 
       - name: Build Mips softfloat
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
         run: |
           echo "version: $version"
-          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/ppnode_softfloat -trimpath -ldflags "-X 'github.com/perfect-panel/ppanel-node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/ppnode_softfloat -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=$version' -s -w -buildid="
       - name: Rename Windows
         if: matrix.goos == 'windows'
         run: |
           cd ./build_assets || exit 1
-          mv ppnode ppnode.exe
+          mv node node.exe
       - name: Prepare to release
         run: |
           cp ${GITHUB_WORKSPACE}/README.md ./build_assets/README.md
@@ -154,9 +158,9 @@ jobs:
         run: |
           pushd build_assets || exit 1
           touch -mt $(date +%Y01010000) *
-          zip -9vr ../ppanel-node-$ASSET_NAME.zip .
+          zip -9vr ../archnets-$ASSET_NAME.zip .
           popd || exit 1
-          FILE=./ppanel-node-$ASSET_NAME.zip
+          FILE=./archnets-$ASSET_NAME.zip
           DGST=$FILE.dgst
           for METHOD in {"md5","sha1","sha256","sha512"}
           do
@@ -164,18 +168,18 @@ jobs:
           done
       - name: Change the name
         run: |
-          mv build_assets ppanel-node-$ASSET_NAME
+          mv build_assets archnets-$ASSET_NAME
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ppanel-node-${{ steps.get_filename.outputs.ASSET_NAME }}
+          name: archnets-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: |
-            ./ppanel-node-${{ steps.get_filename.outputs.ASSET_NAME }}/*
+            ./archnets-${{ steps.get_filename.outputs.ASSET_NAME }}/*
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./ppanel-node-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
+          file: ./archnets-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
           tag: ${{ github.ref }}
           file_glob: true

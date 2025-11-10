@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/perfect-panel/ppanel-node/cmd"
+	"github.com/archnets/node/cmd"
 )
 
 func main() {

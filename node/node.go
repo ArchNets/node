@@ -3,9 +3,9 @@ package node
 import (
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/conf"
-	vCore "github.com/perfect-panel/ppanel-node/core"
+	"github.com/archnets/node/api/panel"
+	"github.com/archnets/node/conf"
+	vCore "github.com/archnets/node/core"
 )
 
 type Node struct {
@@ -52,7 +52,7 @@ func (n *Node) Start() error {
 	for i := range n.controllers {
 		err := n.controllers[i].Start()
 		if err != nil {
-			return fmt.Errorf("启动节点 [%s-%s-%d] 失败: %s",
+			return fmt.Errorf("Failed to start node [%s-%s-%d]: %s",
 				n.controllers[i].apiClient.APIHost,
 				n.controllers[i].info.Type,
 				n.controllers[i].info.Id,

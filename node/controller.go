@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/perfect-panel/ppanel-node/api/panel"
-	"github.com/perfect-panel/ppanel-node/common/task"
-	vCore "github.com/perfect-panel/ppanel-node/core"
-	"github.com/perfect-panel/ppanel-node/limiter"
+	"github.com/archnets/node/api/panel"
+	"github.com/archnets/node/common/task"
+	vCore "github.com/archnets/node/core"
+	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
 )
 
