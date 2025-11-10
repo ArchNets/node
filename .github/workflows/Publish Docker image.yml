@@ -2,6 +2,14 @@ name: Publish Docker image
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (leave empty for branch)'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
   release:
     types: [published]
   pull_request:

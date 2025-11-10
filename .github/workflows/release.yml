@@ -2,10 +2,17 @@ name: Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (leave empty for branch)'
+        required: false
+        type: string
   push:
     branches:
       - master
       - develop
+    tags:
+      - 'v*'
     paths:
       - "**/*.go"
       - "go.mod"
