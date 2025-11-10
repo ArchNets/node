@@ -152,14 +152,35 @@ jobs:
             echo -e "Downloading ${DOWNLOAD_URL}..."
             curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
           done
+      - name: Add config template
+        run: |
+          cat > build_assets/config.yml <<'EOF'
+          Log:
+            # Log level; options: debug, info, warn (warning), error
+            Level: warn
+            # Log output path; can be a file path. Leave empty to use "stdout" (standard output).
+            Output: 
+            # Access log path, e.g. logs/access.log; set to "none" to disable access logs
+            Access: none
+
+          Api:
+            # Backend API address, e.g. "https://api.example.com"
+            ApiHost: https://api.example.com
+            # Server unique identifier
+            ServerID: 1
+            # Secret key used to verify request legitimacy
+            SecretKey: your_secret_key_here
+            # Request timeout (seconds)
+            Timeout: 30
+          EOF
       - name: Create ZIP archive
         shell: bash
         run: |
           pushd build_assets || exit 1
           touch -mt $(date +%Y01010000) *
-          zip -9vr ../archnets-$ASSET_NAME.zip .
+          zip -9vr ../archnets-node-$ASSET_NAME.zip .
           popd || exit 1
-          FILE=./archnets-$ASSET_NAME.zip
+          FILE=./archnets-node-$ASSET_NAME.zip
           DGST=$FILE.dgst
           for METHOD in {"md5","sha1","sha256","sha512"}
           do
@@ -167,18 +188,18 @@ jobs:
           done
       - name: Change the name
         run: |
-          mv build_assets archnets-$ASSET_NAME
+          mv build_assets archnets-node-$ASSET_NAME
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: archnets-${{ steps.get_filename.outputs.ASSET_NAME }}
+          name: archnets-node-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: |
-            ./archnets-${{ steps.get_filename.outputs.ASSET_NAME }}/*
+            ./archnets-node-${{ steps.get_filename.outputs.ASSET_NAME }}/*
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         if: github.event_name == 'release'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./archnets-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
+          file: ./archnets-node-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
           tag: ${{ github.ref }}
           file_glob: true
