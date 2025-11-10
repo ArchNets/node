@@ -22,7 +22,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/node
+  IMAGE_NAME: archnets/node
 
 jobs:
   build:
