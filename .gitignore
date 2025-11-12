@@ -5,3 +5,4 @@ app/legocmd/.lego/
 output/*
 .idea/*
 new.sh
+build_assets/*
