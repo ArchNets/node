@@ -395,7 +395,7 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	randomPasswd := hex.EncodeToString(p)
 
 	if nodeInfo.Protocol.ServerKey != "" && strings.Contains(cipher, "2022") {
-		nodeInfo.Protocol.ServerKey = base64.RawStdEncoding.EncodeToString([]byte(nodeInfo.Protocol.ServerKey))
+		nodeInfo.Protocol.ServerKey = base64.StdEncoding.EncodeToString([]byte(nodeInfo.Protocol.ServerKey))
 		settings.Password = nodeInfo.Protocol.ServerKey
 		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
 		cipher = ""
@@ -421,19 +421,19 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 		}
 		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 
-	// If SS uses default TCP transport without HTTP obfs, still allow enabling PROXY via TCPSettings
-	if inbound.StreamSetting != nil && inbound.StreamSetting.Network != nil {
-		if *inbound.StreamSetting.Network == coreConf.TransportProtocol("tcp") {
-			if inbound.StreamSetting.TCPSettings == nil {
-				inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
+		// If SS uses default TCP transport without HTTP obfs, still allow enabling PROXY via TCPSettings
+		if inbound.StreamSetting != nil && inbound.StreamSetting.Network != nil {
+			if *inbound.StreamSetting.Network == coreConf.TransportProtocol("tcp") {
+				if inbound.StreamSetting.TCPSettings == nil {
+					inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
+				}
+				inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
+				if inbound.StreamSetting.SocketSettings == nil {
+					inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
+				}
+				inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 			}
-			inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-			if inbound.StreamSetting.SocketSettings == nil {
-				inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-			}
-			inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 		}
-	}
 		httpHeader := map[string]interface{}{
 			"type":    "http",
 			"request": map[string]interface{}{},
