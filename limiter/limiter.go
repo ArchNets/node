@@ -9,6 +9,7 @@ import (
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/common/format"
 	"github.com/juju/ratelimit"
+	log "github.com/sirupsen/logrus"
 )
 
 var limitLock sync.RWMutex
@@ -139,6 +140,15 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		ipMap := new(sync.Map)
 		ipMap.Store(ip, uid)
 		aliveIp := l.AliveList[uid]
+
+		log.WithFields(log.Fields{
+			"uid":         uid,
+			"deviceLimit": deviceLimit,
+			"aliveIp":     aliveIp,
+			"ip":          ip,
+			"taguuid":     taguuid,
+		}).Info("CheckLimit Debug")
+
 		// If any device is online
 		if v, ok := l.UserOnlineIP.LoadOrStore(taguuid, ipMap); ok {
 			ipMap := v.(*sync.Map)
@@ -146,6 +156,10 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 			if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
 				if deviceLimit > 0 {
 					if deviceLimit <= aliveIp {
+						log.WithFields(log.Fields{
+							"uid": uid,
+							"ip":  ip,
+						}).Info("CheckLimit Reject: deviceLimit <= aliveIp")
 						ipMap.Delete(ip)
 						return nil, true
 					}
@@ -158,6 +172,10 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 		} else {
 			if deviceLimit > 0 {
 				if deviceLimit <= aliveIp {
+					log.WithFields(log.Fields{
+						"uid": uid,
+						"ip":  ip,
+					}).Info("CheckLimit Reject (New User): deviceLimit <= aliveIp")
 					l.UserOnlineIP.Delete(taguuid)
 					return nil, true
 				}
