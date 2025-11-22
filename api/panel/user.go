@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"path"
 
-	"encoding/json/jsontext"
-	"encoding/json/v2"
+	"encoding/json"
 )
 
 type OnlineUser struct {
@@ -56,59 +55,40 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
 	}
 	userlist := &UserListBody{}
-	dec := jsontext.NewDecoder(r.RawResponse.Body)
-	for {
-		tok, err := dec.ReadToken()
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode user list: %w", err)
-		}
-		if tok.Kind() == '"' && tok.String() == "users" {
-			break
-		}
-	}
-	tok, err := dec.ReadToken()
-	if err != nil {
+	if err := json.NewDecoder(r.RawResponse.Body).Decode(userlist); err != nil {
 		return nil, fmt.Errorf("failed to decode user list: %w", err)
-	}
-	if tok.Kind() != '[' {
-		return nil, fmt.Errorf(`failed to decode user list: "users" is not an array`)
-	}
-	for dec.PeekKind() != ']' {
-		val, err := dec.ReadValue()
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode user list: read user object failed: %w", err)
-		}
-		var u UserInfo
-		if err := json.Unmarshal(val, &u); err != nil {
-			return nil, fmt.Errorf("failed to decode user list: read user object failed: %w", err)
-		}
-		userlist.Users = append(userlist.Users, u)
 	}
 	c.userEtag = r.Header().Get("ETag")
 	return userlist.Users, nil
 }
 
+type AliveResponse struct {
+	Code int       `json:"code"`
+	Msg  string    `json:"msg"`
+	Data *AliveMap `json:"data"`
+}
+
 func (c *ClientV1) GetUserAlive() (map[int]int, error) {
-	c.AliveMap = &AliveMap{}
-	c.AliveMap.Alive = make(map[int]int)
-	/*const path = "/v1/server/alivelist"
-	r, err := c.client.R().
+	const path = "/v1/server/alivelist"
+	r, err := c.Client.R().
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil || r.StatusCode() >= 399 {
-		c.AliveMap.Alive = make(map[int]int)
+		return nil, fmt.Errorf("failed to get alive list: %v", err)
 	}
 	if r == nil || r.RawResponse == nil {
-		fmt.Printf("received nil response or raw response")
-		c.AliveMap.Alive = make(map[int]int)
+		return nil, fmt.Errorf("received nil response or raw response")
 	}
 	defer r.RawResponse.Body.Close()
-	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		//fmt.Printf("unmarshal user alive list error: %s", err)
-		c.AliveMap.Alive = make(map[int]int)
+
+	resp := &AliveResponse{}
+	if err := json.Unmarshal(r.Body(), resp); err != nil {
+		return nil, fmt.Errorf("unmarshal user alive list error: %s", err)
 	}
-	*/
-	return c.AliveMap.Alive, nil
+	if resp.Data == nil {
+		return make(map[int]int), nil
+	}
+	return resp.Data.Alive, nil
 }
 
 type ServerPushUserTrafficRequest struct {
