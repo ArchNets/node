@@ -81,14 +81,19 @@ func (c *ClientV1) GetUserAlive() (map[int]int, error) {
 	}
 	defer r.RawResponse.Body.Close()
 
+	// Try parsing as AliveMap directly first (as per latest user feedback)
+	aliveMap := &AliveMap{}
+	if err := json.Unmarshal(r.Body(), aliveMap); err == nil && aliveMap.Alive != nil {
+		return aliveMap.Alive, nil
+	}
+
+	// Fallback to AliveResponse if the above fails (just in case)
 	resp := &AliveResponse{}
-	if err := json.Unmarshal(r.Body(), resp); err != nil {
-		return nil, fmt.Errorf("unmarshal user alive list error: %s", err)
+	if err := json.Unmarshal(r.Body(), resp); err == nil && resp.Data != nil {
+		return resp.Data.Alive, nil
 	}
-	if resp.Data == nil {
-		return make(map[int]int), nil
-	}
-	return resp.Data.Alive, nil
+
+	return make(map[int]int), nil
 }
 
 type ServerPushUserTrafficRequest struct {
