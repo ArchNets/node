@@ -41,7 +41,7 @@ git clone https://github.com/archnets/node.git
 cd node
 
 # Build the binary
-GOEXPERIMENT=jsonv2 go build -v -o ./node -trimpath -ldflags "-s -w -buildid="
+GOEXPERIMENT=jsonv2 go build -v -o build_assets/node -trimpath -ldflags "-s -w -buildid="
 ```
 
 The `GOEXPERIMENT=jsonv2` flag is required as this project uses Go's experimental JSON v2 package.

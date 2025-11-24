@@ -147,7 +147,7 @@ func (*DefaultDispatcher) Start() error {
 // Close implements common.Closable.
 func (*DefaultDispatcher) Close() error { return nil }
 
-func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
+func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network, destination net.Destination) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
 	opt := pipe.OptionsFromContext(ctx)
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
@@ -181,9 +181,10 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
+		destAddr := destination.Address.String()
 		w, reject := limit.CheckLimitWithDestination(user.Email,
 			sessionInbound.Source.Address.IP().String(),
-			"",
+			destAddr,
 			network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
@@ -301,7 +302,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 		ctx = session.ContextWithContent(ctx, content)
 	}
 	sniffingRequest := content.SniffingRequest
-	inbound, outbound, l, err := d.getLink(ctx, destination.Network)
+	inbound, outbound, l, err := d.getLink(ctx, destination.Network, destination)
 	if err != nil {
 		return nil, err
 	}
