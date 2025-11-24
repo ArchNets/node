@@ -108,9 +108,61 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 	}
 }
 
+// isConnectivityCheck determines if the request is a connectivity/captive portal check
+func isConnectivityCheck(host string) bool {
+	connectivityDomains := []string{
+		"gstatic.com",
+		"google.com",
+		"captive.apple.com",
+		"apple.com",
+		"appleiphonecell.com",
+		"clients3.google.com",
+		"clients4.google.com",
+		"connectivitycheck.android.com",
+		"connectivitycheck.gstatic.com",
+		"android.clients.google.com",
+		"msftconnecttest.com",
+		"msftncsi.com",
+		"microsoft.com",
+		"detectportal.firefox.com",
+		"nmcheck.gnome.org",
+		"spectrum.s3.amazonaws.com",
+		"cloudflareportal.com",
+		"cloudflarecp.com",
+		"connectivity.cloudflareclient.com",
+		"cp.cloudflare.com",
+		"ibook.info",
+		"itools.info",
+		"thinkdifferent.us",
+		"airport.us",
+		"attwifi.apple.com",
+	}
+	
+	host = strings.ToLower(host)
+	for _, domain := range connectivityDomains {
+		if strings.Contains(host, domain) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
+	return l.CheckLimitWithDestination(taguuid, ip, "", isTcp, noSSUDP)
+}
+
+func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destination string, isTcp bool, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
 	// check if ipv4 mapped ipv6
 	ip = strings.TrimPrefix(ip, "::ffff:")
+
+	// Skip device limiting for connectivity checks
+	skipDeviceLimit := isConnectivityCheck(destination)
+	if skipDeviceLimit {
+		log.WithFields(log.Fields{
+			"destination": destination,
+			"ip":          ip,
+		}).Debug("Skipping device limit for connectivity check")
+	}
 
 	// check and gen speed limit Bucket
 	nodeLimit := l.SpeedLimit
@@ -135,7 +187,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool
 	} else {
 		return nil, true
 	}
-	if noSSUDP {
+	if noSSUDP && !skipDeviceLimit {
 		// Store online user for device limit
 		ipMap := new(sync.Map)
 		ipMap.Store(ip, uid)

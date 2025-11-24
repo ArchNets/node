@@ -181,8 +181,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network) (*
 			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
-		w, reject := limit.CheckLimit(user.Email,
+		w, reject := limit.CheckLimitWithDestination(user.Email,
 			sessionInbound.Source.Address.IP().String(),
+			"",
 			network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
@@ -376,8 +377,10 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
-		w, reject := limit.CheckLimit(user.Email,
+		destAddr := destination.Address.String()
+		w, reject := limit.CheckLimitWithDestination(user.Email,
 			sessionInbound.Source.Address.IP().String(),
+			destAddr,
 			destination.Network == net.Network_TCP,
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reject {
