@@ -10,9 +10,9 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
+	certutil "github.com/archnets/node/common/cert"
 	"github.com/archnets/node/common/file"
 	log "github.com/sirupsen/logrus"
 )
@@ -20,22 +20,46 @@ import (
 func (c *Controller) renewCertTask() error {
 	l, err := NewLego(c.info)
 	if err != nil {
-		log.WithField("节点", c.tag).Info("new lego error: ", err)
+		log.WithField("node", c.tag).Info("new lego error: ", err)
 		return nil
 	}
 	err = l.RenewCert()
 	if err != nil {
-		log.WithField("节点", c.tag).Info("renew cert error: ", err)
+		log.WithField("node", c.tag).Info("renew cert error: ", err)
 		return nil
 	}
 	return nil
 }
 
 func (c *Controller) requestCert() error {
-	certFile := filepath.Join("/etc/archnets/", c.info.Type+strconv.Itoa(c.info.Id)+".cer")
-	keyFile := filepath.Join("/etc/archnets/", c.info.Type+strconv.Itoa(c.info.Id)+".key")
+	certFile, keyFile := certutil.GetCertPaths(c.info.Protocol.SNI, c.info.Type, c.info.Id)
+
 	switch c.info.Protocol.CertMode {
-	case "none", "", "file":
+	case "none", "":
+		// No certificate needed
+	case "file":
+		// Write inline certificate content from API to files
+		if c.info.Protocol.CertFile != "" && c.info.Protocol.KeyFile != "" {
+			// Ensure the directory exists
+			dir := filepath.Dir(certFile)
+			if !file.IsExist(dir) {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					return fmt.Errorf("create cert directory error: %s", err)
+				}
+			}
+			// Write cert file
+			if err := os.WriteFile(certFile, []byte(c.info.Protocol.CertFile), 0644); err != nil {
+				return fmt.Errorf("write cert file error: %s", err)
+			}
+			log.WithField("node", c.tag).Info("Certificate file written: ", certFile)
+			// Write key file
+			if err := os.WriteFile(keyFile, []byte(c.info.Protocol.KeyFile), 0600); err != nil {
+				return fmt.Errorf("write key file error: %s", err)
+			}
+			log.WithField("node", c.tag).Info("Key file written: ", keyFile)
+		} else if !file.IsExist(certFile) || !file.IsExist(keyFile) {
+			return fmt.Errorf("cert_mode is 'file' but no certificate content provided and files do not exist")
+		}
 	case "dns", "http":
 		if file.IsExist(certFile) && file.IsExist(keyFile) {
 			return nil

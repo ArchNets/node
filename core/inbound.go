@@ -8,12 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/archnets/node/api/panel"
+	certutil "github.com/archnets/node/common/cert"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
@@ -98,11 +97,12 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 				in.StreamSetting = &coreConf.StreamConfig{}
 			}
 			in.StreamSetting.Security = "tls"
+			certFile, keyFile := certutil.GetCertPaths(nodeInfo.Protocol.SNI, nodeInfo.Type, nodeInfo.Id)
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
-						CertFile: filepath.Join("/etc/archnets/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".cer"),
-						KeyFile:  filepath.Join("/etc/archnets/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".key"),
+						CertFile: certFile,
+						KeyFile:  keyFile,
 					},
 				},
 			}

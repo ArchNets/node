@@ -85,6 +85,8 @@ type Protocol struct {
 	EncryptionClientPadding string `json:"encryption_client_padding"`
 	EncryptionPassword      string `json:"encryption_password"`
 	CertMode                string `json:"cert_mode"`
+	CertFile                string `json:"cert_file"`
+	KeyFile                 string `json:"key_file"`
 	CertDNSProvider         string `json:"cert_dns_provider"`
 	CertDNSEnv              string `json:"cert_dns_env"`
 	AcceptProxyProtocol     bool   `json:"acceptProxyProtocol"`
