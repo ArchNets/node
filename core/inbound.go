@@ -137,6 +137,25 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		break
 	}
 	in.Tag = tag
+
+	// Set PROXY protocol (centralized handling via SocketSettings only)
+	if nodeInfo.Protocol.AcceptProxyProtocol {
+		if in.StreamSetting == nil {
+			t := coreConf.TransportProtocol(nodeInfo.Protocol.Transport)
+			in.StreamSetting = &coreConf.StreamConfig{
+				Network: &t,
+				SocketSettings: &coreConf.SocketConfig{
+					AcceptProxyProtocol: true,
+				},
+			}
+		} else {
+			if in.StreamSetting.SocketSettings == nil {
+				in.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
+			}
+			in.StreamSetting.SocketSettings.AcceptProxyProtocol = true
+		}
+	}
+
 	return in.Build()
 }
 
@@ -173,41 +192,15 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	switch nodeInfo.Protocol.Transport {
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		// Enable PROXY protocol for TCP-based inbound if configured
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "ws", "websocket":
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 		}
-		// Also set transport-level PROXY protocol flag for WebSocket when supported
-		inbound.StreamSetting.WSSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		// PROXY protocol applies at TCP layer even for WS
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "grpc":
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
 			ServiceName: nodeInfo.Protocol.ServiceName,
 		}
-		// PROXY protocol applies at TCP layer even for gRPC
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	/*case "mkcp":
 	inbound.StreamSetting.KCPSettings = &coreConf.KCPConfig{
 	}*/
@@ -216,17 +209,6 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 		}
-		// Also set transport-level PROXY protocol flag for HTTP Upgrade when supported
-		inbound.StreamSetting.HTTPUPGRADESettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		// PROXY protocol applies at TCP layer even for HTTP upgrade
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "splithttp", "xhttp":
 		inbound.StreamSetting.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
 			Host: nodeInfo.Protocol.Host,
@@ -234,15 +216,6 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 			Mode: nodeInfo.Protocol.XHTTPMode,
 			//Extra: json.RawMessage(nodeInfo.Protocol.XHTTPExtra),
 		}
-		// PROXY protocol applies at TCP layer even for SplitHTTP
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	default:
 		return errors.New("the network type is not vail")
 	}
@@ -262,37 +235,15 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	switch nodeInfo.Protocol.Transport {
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "ws", "websocket":
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 		}
-		inbound.StreamSetting.WSSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "grpc":
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
 			ServiceName: nodeInfo.Protocol.ServiceName,
 		}
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	/*case "mkcp":
 	inbound.StreamSetting.KCPSettings = &coreConf.KCPConfig{
 	}*/
@@ -301,30 +252,12 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 		}
-		inbound.StreamSetting.HTTPUPGRADESettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "splithttp", "xhttp":
 		inbound.StreamSetting.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 			Mode: nodeInfo.Protocol.XHTTPMode,
-			//Extra: json.RawMessage(nodeInfo.Protocol.XHTTPExtra),
 		}
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	default:
 		return errors.New("the network type is not vail")
 	}
@@ -344,37 +277,15 @@ func buildTrojan(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	switch network {
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "ws", "websocket":
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 		}
-		inbound.StreamSetting.WSSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	case "grpc":
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
 			ServiceName: nodeInfo.Protocol.ServiceName,
 		}
-		if inbound.StreamSetting.TCPSettings == nil {
-			inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	default:
 		return errors.New("the network type is not vail")
 	}
@@ -415,25 +326,6 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 		t := coreConf.TransportProtocol("tcp")
 		inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-		inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-		if inbound.StreamSetting.SocketSettings == nil {
-			inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-		}
-		inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-
-		// If SS uses default TCP transport without HTTP obfs, still allow enabling PROXY via TCPSettings
-		if inbound.StreamSetting != nil && inbound.StreamSetting.Network != nil {
-			if *inbound.StreamSetting.Network == coreConf.TransportProtocol("tcp") {
-				if inbound.StreamSetting.TCPSettings == nil {
-					inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-				}
-				inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-				if inbound.StreamSetting.SocketSettings == nil {
-					inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-				}
-				inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-			}
-		}
 		httpHeader := map[string]interface{}{
 			"type":    "http",
 			"request": map[string]interface{}{},
@@ -531,11 +423,6 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	t := coreConf.TransportProtocol("tcp")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
-	inbound.StreamSetting.TCPSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
-	if inbound.StreamSetting.SocketSettings == nil {
-		inbound.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-	}
-	inbound.StreamSetting.SocketSettings.AcceptProxyProtocol = nodeInfo.Protocol.AcceptProxyProtocol
 	sets, err := json.Marshal(settings)
 	inbound.Settings = (*json.RawMessage)(&sets)
 	if err != nil {
