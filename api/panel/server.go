@@ -89,7 +89,7 @@ type Protocol struct {
 	KeyFile                 string `json:"key_file"`
 	CertDNSProvider         string `json:"cert_dns_provider"`
 	CertDNSEnv              string `json:"cert_dns_env"`
-	AcceptProxyProtocol     bool   `json:"acceptProxyProtocol"`
+	AcceptProxyProtocol     bool   `json:"accept_proxy_protocol"`
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {

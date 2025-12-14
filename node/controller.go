@@ -75,7 +75,7 @@ func (c *Controller) Start() error {
 	if err != nil {
 		return fmt.Errorf("add users error: %s", err)
 	}
-	log.WithField("节点", c.tag).Infof("已添加 %d 个新用户", added)
+	log.WithField("node", c.tag).Infof("Added %d new users", added)
 	c.startTasks(c.info)
 	return nil
 }
