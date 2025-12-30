@@ -101,9 +101,21 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 		ForceContentType("application/json").
 		Get(path)
 
+	// Prioritize error checking to avoid processing invalid responses
+	if err != nil {
+		return nil, fmt.Errorf("failed to access %s: %v", client.BaseURL+path, err.Error())
+	}
+
+	// Check HTTP status code
 	if r.StatusCode() == 304 {
 		return nil, nil
 	}
+	if r.StatusCode() >= 400 {
+		body := r.Body()
+		return nil, fmt.Errorf("failed to access %s: %s", client.BaseURL+path, string(body))
+	}
+
+	// Only check hash on successful response
 	hash := sha256.Sum256(r.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
 	if c.responseBodyHash == newBodyHash {
@@ -111,13 +123,6 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 	}
 	c.responseBodyHash = newBodyHash
 	c.ServerConfigEtag = r.Header().Get("ETag")
-	if err != nil {
-		return nil, fmt.Errorf("failed to access %s: %v", client.BaseURL+path, err.Error())
-	}
-	if r.StatusCode() >= 400 {
-		body := r.Body()
-		return nil, fmt.Errorf("failed to access %s: %s", client.BaseURL+path, string(body))
-	}
 	if r != nil {
 		defer func() {
 			if r.RawBody() != nil {
