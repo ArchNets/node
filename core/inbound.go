@@ -162,7 +162,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "vless"
 	var err error
-	decryption := "none"
+	decryption := "none" 
 	if nodeInfo.Protocol.Encryption != "" && nodeInfo.Protocol.Encryption != "none" {
 		switch nodeInfo.Protocol.Encryption {
 		case "mlkem768x25519plus":
@@ -420,6 +420,8 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	settings := &coreConf.AnyTLSServerConfig{
 		PaddingScheme: padding,
 	}
+	// anytls does not support udp or i just can't implement it 
+	// TODO: Study AnyTLS* Prio #10
 	t := coreConf.TransportProtocol("tcp")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}

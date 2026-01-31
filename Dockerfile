@@ -1,5 +1,5 @@
 # Build go
-FROM golang:1.25.3-alpine AS builder
+FROM golang:1.25.6-alpine AS builder
 WORKDIR /app
 COPY . .
 ENV CGO_ENABLED=0
@@ -8,7 +8,7 @@ RUN GOEXPERIMENT=jsonv2 go build -v -o ./output/node -trimpath -ldflags "-s -w -
 
 # Release
 FROM  alpine
-# 安装必要的工具包
+# Install necessary tools
 RUN  apk --update --no-cache add tzdata ca-certificates \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 RUN mkdir /etc/archnets/
