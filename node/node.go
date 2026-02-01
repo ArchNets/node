@@ -16,14 +16,16 @@ type NodeController interface {
 }
 
 type Node struct {
-	xrayControllers []*Controller
-	sshControllers  []*SSHController
+	xrayControllers      []*Controller
+	sshControllers       []*SSHController
+	shadowtlsControllers []*ShadowTLSController
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
 	node := &Node{
-		xrayControllers: make([]*Controller, 0),
-		sshControllers:  make([]*SSHController, 0),
+		xrayControllers:      make([]*Controller, 0),
+		sshControllers:       make([]*SSHController, 0),
+		shadowtlsControllers: make([]*ShadowTLSController, 0),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -62,6 +64,12 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"type": "ssh",
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
+		} else if nodeconfig.Type == "shadowtls" {
+			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n))
+			log.WithFields(log.Fields{
+				"type": "shadowtls",
+				"port": nodeconfig.Port,
+			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
 		} else {
 			node.xrayControllers = append(node.xrayControllers, NewController(core, p, n))
 		}
@@ -93,6 +101,16 @@ func (n *Node) Start() error {
 		}
 	}
 
+	// Start ShadowTLS controllers
+	for i := range n.shadowtlsControllers {
+		err := n.shadowtlsControllers[i].Start()
+		if err != nil {
+			return fmt.Errorf("failed to start shadowtls node [%s]: %s",
+				n.shadowtlsControllers[i].tag,
+				err)
+		}
+	}
+
 	return nil
 }
 
@@ -114,4 +132,13 @@ func (n *Node) Close() {
 		}
 	}
 	n.sshControllers = nil
+
+	// Close ShadowTLS controllers
+	for _, c := range n.shadowtlsControllers {
+		err := c.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing ShadowTLS controller")
+		}
+	}
+	n.shadowtlsControllers = nil
 }

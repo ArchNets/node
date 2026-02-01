@@ -60,7 +60,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"hysteria2",
 		"anytls",
 		"vless",
-		"ssh":
+		"ssh",
+		"shadowtls":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
