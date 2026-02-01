@@ -64,8 +64,8 @@ func (c *ShadowTLSController) Start() error {
 	}
 
 	version := c.info.Protocol.ShadowTLSVersion
-	if version < 2 || version > 3 {
-		return fmt.Errorf("ShadowTLS: version must be 2 or 3, got %d", version)
+	if version < 1 || version > 3 {
+		return fmt.Errorf("ShadowTLS: version must be 1, 2, or 3, got %d", version)
 	}
 
 	handshakeServer := c.info.Protocol.ShadowTLSHandshake
