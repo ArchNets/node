@@ -65,6 +65,14 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
 		} else if nodeconfig.Type == "shadowtls" {
+			// FIX: Create a local copy to ensure pointer safety (though Go 1.22+ handles loop vars)
+			cfg := nodeconfig
+
+			// Log debug info if needed (reverted to Info or removed for production)
+			// log.WithFields(log.Fields{...}).Debug("ShadowTLS config")
+
+			// Update n.Protocol to point to our local safe copy to avoid loop variable issues
+			n.Protocol = &cfg
 			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n))
 			log.WithFields(log.Fields{
 				"type": "shadowtls",

@@ -165,6 +165,17 @@ type Protocol struct {
 }
 ```
 
+### 5.1 Update Backend API Types
+
+Update `server/internal/types/types.go` to allow the API to accept these fields:
+
+```go
+type Protocol struct {
+    // ... same fields as above ...
+    <Protocol>Field1 string `json:"<protocol>_field1,omitempty"`
+}
+```
+
 ---
 
 ## Step 6: Subscription Template

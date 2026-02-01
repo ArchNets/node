@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -68,7 +69,7 @@ func (c *ShadowTLSController) Start() error {
 		return fmt.Errorf("ShadowTLS: version must be 1, 2, or 3, got %d", version)
 	}
 
-	handshakeServer := c.info.Protocol.ShadowTLSHandshake
+	handshakeServer := strings.TrimSpace(c.info.Protocol.ShadowTLSHandshake)
 	if handshakeServer == "" {
 		return fmt.Errorf("ShadowTLS: handshake server is required (e.g., www.google.com:443)")
 	}

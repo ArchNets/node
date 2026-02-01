@@ -96,7 +96,7 @@ type Protocol struct {
 	SSHBanner      string `json:"ssh_banner"`        // Custom SSH banner message
 
 	// ShadowTLS-specific fields
-	ShadowTLSVersion    int    `json:"shadowtls_version"`     // 2 or 3
+	ShadowTLSVersion    int    `json:"shadowtls_version"`     // 1, 2 or 3
 	ShadowTLSHandshake  string `json:"shadowtls_handshake"`   // Handshake server (e.g., www.google.com:443)
 	ShadowTLSStrictMode bool   `json:"shadowtls_strict_mode"` // Require TLS 1.3
 }
