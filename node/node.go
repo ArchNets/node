@@ -6,15 +6,24 @@ import (
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/conf"
 	vCore "github.com/archnets/node/core"
+	log "github.com/sirupsen/logrus"
 )
 
+// NodeController interface for both Xray and SSH controllers
+type NodeController interface {
+	Start() error
+	Close() error
+}
+
 type Node struct {
-	controllers []*Controller
+	xrayControllers []*Controller
+	sshControllers  []*SSHController
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
 	node := &Node{
-		controllers: make([]*Controller, 0),
+		xrayControllers: make([]*Controller, 0),
+		sshControllers:  make([]*SSHController, 0),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -45,32 +54,64 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		if err != nil {
 			return nil, err
 		}
-		node.controllers = append(node.controllers, NewController(core, p, n))
+
+		// Handle SSH protocol separately
+		if nodeconfig.Type == "ssh" {
+			node.sshControllers = append(node.sshControllers, NewSSHController(p, n))
+			log.WithFields(log.Fields{
+				"type": "ssh",
+				"port": nodeconfig.Port,
+			}).Info("SSH protocol detected, using SSH controller")
+		} else {
+			node.xrayControllers = append(node.xrayControllers, NewController(core, p, n))
+		}
 	}
 
 	return node, nil
 }
 
 func (n *Node) Start() error {
-	for i := range n.controllers {
-		err := n.controllers[i].Start()
+	// Start Xray controllers
+	for i := range n.xrayControllers {
+		err := n.xrayControllers[i].Start()
 		if err != nil {
-			return fmt.Errorf("Failed to start node [%s-%s-%d]: %s",
-				n.controllers[i].apiClient.APIHost,
-				n.controllers[i].info.Type,
-				n.controllers[i].info.Id,
+			return fmt.Errorf("failed to start xray node [%s-%s-%d]: %s",
+				n.xrayControllers[i].apiClient.APIHost,
+				n.xrayControllers[i].info.Type,
+				n.xrayControllers[i].info.Id,
 				err)
 		}
 	}
+
+	// Start SSH controllers
+	for i := range n.sshControllers {
+		err := n.sshControllers[i].Start()
+		if err != nil {
+			return fmt.Errorf("failed to start ssh node [%s]: %s",
+				n.sshControllers[i].tag,
+				err)
+		}
+	}
+
 	return nil
 }
 
 func (n *Node) Close() {
-	for _, c := range n.controllers {
+	// Close Xray controllers
+	for _, c := range n.xrayControllers {
 		err := c.Close()
 		if err != nil {
-			panic(err)
+			log.WithError(err).Error("Error closing Xray controller")
 		}
 	}
-	n.controllers = nil
+	n.xrayControllers = nil
+
+	// Close SSH controllers
+	for _, c := range n.sshControllers {
+		err := c.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing SSH controller")
+		}
+	}
+	n.sshControllers = nil
 }

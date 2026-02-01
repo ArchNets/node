@@ -90,6 +90,10 @@ type Protocol struct {
 	CertDNSProvider         string `json:"cert_dns_provider"`
 	CertDNSEnv              string `json:"cert_dns_env"`
 	AcceptProxyProtocol     bool   `json:"accept_proxy_protocol"`
+
+	// SSH-specific fields
+	SSHHostKeyPath string `json:"ssh_host_key_path"` // Path to SSH host key file
+	SSHBanner      string `json:"ssh_banner"`        // Custom SSH banner message
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
