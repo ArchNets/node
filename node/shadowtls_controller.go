@@ -75,12 +75,19 @@ func (c *ShadowTLSController) Start() error {
 	}
 
 	strictMode := c.info.Protocol.ShadowTLSStrictMode
+	shadowsocksPort := c.info.Protocol.ShadowsocksPort
+
+	// Validate shadowsocks port is set
+	if shadowsocksPort <= 0 {
+		return fmt.Errorf("ShadowTLS: shadowsocks_port is required (the local Shadowsocks port to forward to)")
+	}
 
 	// Create and start ShadowTLS server
-	shadowtlsCore, err := vCore.NewShadowTLSCore(c.tag, c.info.Protocol.Port, version, handshakeServer, strictMode)
+	shadowtlsCore, err := vCore.NewShadowTLSCore(c.tag, c.info.Protocol.Port, version, handshakeServer, strictMode, shadowsocksPort)
 	if err != nil {
 		return err
 	}
+
 	c.shadowtlsCore = shadowtlsCore
 	c.shadowtlsCore.SetLimiter(c.limiter)
 

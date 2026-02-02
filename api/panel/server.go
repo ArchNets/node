@@ -99,6 +99,7 @@ type Protocol struct {
 	ShadowTLSVersion    int    `json:"shadowtls_version"`     // 1, 2 or 3
 	ShadowTLSHandshake  string `json:"shadowtls_handshake"`   // Handshake server (e.g., www.google.com:443)
 	ShadowTLSStrictMode bool   `json:"shadowtls_strict_mode"` // Require TLS 1.3
+	ShadowsocksPort     int    `json:"shadowsocks_port"`      // Local Shadowsocks port to forward to
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {

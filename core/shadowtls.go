@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +27,7 @@ type ShadowTLSCore struct {
 	Version         int    // 3 is recommended
 	HandshakeServer string // e.g., "www.google.com:443"
 	StrictMode      bool
+	ShadowsocksPort int // Local Shadowsocks port to forward to
 
 	service    *shadowtls.Service
 	listener   net.Listener
@@ -99,7 +99,7 @@ func (l *shadowTLSLogger) PanicContext(ctx context.Context, args ...any) {
 var _ logger.ContextLogger = (*shadowTLSLogger)(nil)
 
 // NewShadowTLSCore creates a new ShadowTLS server
-func NewShadowTLSCore(tag string, port int, version int, handshakeServer string, strictMode bool) (*ShadowTLSCore, error) {
+func NewShadowTLSCore(tag string, port int, version int, handshakeServer string, strictMode bool, shadowsocksPort int) (*ShadowTLSCore, error) {
 	if version < 2 || version > 3 {
 		version = 3 // Default to v3
 	}
@@ -110,6 +110,7 @@ func NewShadowTLSCore(tag string, port int, version int, handshakeServer string,
 		Version:         version,
 		HandshakeServer: handshakeServer,
 		StrictMode:      strictMode,
+		ShadowsocksPort: shadowsocksPort,
 		users: &ShadowTLSUserMap{
 			uuidToID: make(map[string]int),
 			idToUUID: make(map[int]string),
@@ -259,66 +260,25 @@ func (s *ShadowTLSCore) NewConnectionEx(ctx context.Context, conn net.Conn, sour
 	s.handleProxyRequest(conn, uid, ip)
 }
 
-// handleProxyRequest reads destination and forwards traffic
+// handleProxyRequest forwards the connection to local Shadowsocks
+// ShadowTLS is a wrapper protocol - after authentication, the raw Shadowsocks
+// protocol data is forwarded to the local Shadowsocks server
 func (s *ShadowTLSCore) handleProxyRequest(conn net.Conn, uid int, clientIP string) {
 	defer conn.Close()
 
-	// Read address type
-	addrType := make([]byte, 1)
-	if _, err := io.ReadFull(conn, addrType); err != nil {
-		log.WithError(err).Debug("ShadowTLS: failed to read address type")
-		return
-	}
-
-	var dest string
-	switch addrType[0] {
-	case 0x01: // IPv4
-		addr := make([]byte, 4)
-		if _, err := io.ReadFull(conn, addr); err != nil {
-			return
-		}
-		dest = net.IP(addr).String()
-	case 0x03: // Domain
-		lenBuf := make([]byte, 1)
-		if _, err := io.ReadFull(conn, lenBuf); err != nil {
-			return
-		}
-		domain := make([]byte, lenBuf[0])
-		if _, err := io.ReadFull(conn, domain); err != nil {
-			return
-		}
-		dest = string(domain)
-	case 0x04: // IPv6
-		addr := make([]byte, 16)
-		if _, err := io.ReadFull(conn, addr); err != nil {
-			return
-		}
-		dest = net.IP(addr).String()
-	default:
-		log.WithField("type", addrType[0]).Debug("ShadowTLS: unknown address type")
-		return
-	}
-
-	// Read port
-	portBuf := make([]byte, 2)
-	if _, err := io.ReadFull(conn, portBuf); err != nil {
-		return
-	}
-	port := binary.BigEndian.Uint16(portBuf)
-
-	destAddr := net.JoinHostPort(dest, fmt.Sprintf("%d", port))
-	log.WithFields(log.Fields{
-		"uid":  uid,
-		"dest": destAddr,
-	}).Debug("ShadowTLS proxy request")
-
-	// Connect to destination
-	destConn, err := net.DialTimeout("tcp", destAddr, 10*time.Second)
+	// Connect to local Shadowsocks server
+	ssAddr := fmt.Sprintf("127.0.0.1:%d", s.ShadowsocksPort)
+	ssConn, err := net.DialTimeout("tcp", ssAddr, 10*time.Second)
 	if err != nil {
-		log.WithError(err).WithField("dest", destAddr).Debug("ShadowTLS: failed to connect to destination")
+		log.WithError(err).WithField("dest", ssAddr).Error("ShadowTLS: failed to connect to local Shadowsocks")
 		return
 	}
-	defer destConn.Close()
+	defer ssConn.Close()
+
+	log.WithFields(log.Fields{
+		"uid":    uid,
+		"ssPort": s.ShadowsocksPort,
+	}).Debug("ShadowTLS: forwarding to local Shadowsocks")
 
 	// Bidirectional copy with traffic accounting
 	var wg sync.WaitGroup
@@ -326,12 +286,12 @@ func (s *ShadowTLSCore) handleProxyRequest(conn net.Conn, uid int, clientIP stri
 
 	go func() {
 		defer wg.Done()
-		s.copyWithAccounting(destConn, conn, uid, false) // upload
+		s.copyWithAccounting(ssConn, conn, uid, false) // upload (client -> shadowsocks)
 	}()
 
 	go func() {
 		defer wg.Done()
-		s.copyWithAccounting(conn, destConn, uid, true) // download
+		s.copyWithAccounting(conn, ssConn, uid, true) // download (shadowsocks -> client)
 	}()
 
 	wg.Wait()
