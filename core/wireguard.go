@@ -361,6 +361,11 @@ func (w *WireGuardCore) createInterface() error {
 		return fmt.Errorf("failed to create interface: %w", err)
 	}
 
+	// Enable IP forwarding
+	if err := execCommand("sysctl -w net.ipv4.ip_forward=1"); err != nil {
+		log.WithError(err).Warn("Failed to enable IP forwarding")
+	}
+
 	// Set interface MTU
 	cmd = fmt.Sprintf("ip link set %s mtu %d", w.InterfaceName, w.MTU)
 	if err := execCommand(cmd); err != nil {

@@ -486,6 +486,9 @@ open_ports() {
     iptables -t mangle -F 2>/dev/null
     iptables -F 2>/dev/null
     iptables -X 2>/dev/null
+    sysctl -w net.ipv4.ip_forward=1 2>/dev/null
+    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf 2>/dev/null
+    sysctl -p 2>/dev/null
     netfilter-persistent save 2>/dev/null
     echo -e "${green}Successfully opened firewall ports!${plain}"
 }
