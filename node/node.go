@@ -19,6 +19,7 @@ type Node struct {
 	xrayControllers      []*Controller
 	sshControllers       []*SSHController
 	shadowtlsControllers []*ShadowTLSController
+	wireguardControllers []*WireGuardController
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
@@ -26,6 +27,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		xrayControllers:      make([]*Controller, 0),
 		sshControllers:       make([]*SSHController, 0),
 		shadowtlsControllers: make([]*ShadowTLSController, 0),
+		wireguardControllers: make([]*WireGuardController, 0),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -64,6 +66,12 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"type": "ssh",
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
+		} else if nodeconfig.Type == "wireguard" {
+			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(p, n))
+			log.WithFields(log.Fields{
+				"type": "wireguard",
+				"port": nodeconfig.Port,
+			}).Info("WireGuard protocol detected, using WireGuard controller")
 		} else if nodeconfig.Type == "shadowtls" {
 			// FIX: Create a local copy to ensure pointer safety (though Go 1.22+ handles loop vars)
 			cfg := nodeconfig
@@ -119,6 +127,16 @@ func (n *Node) Start() error {
 		}
 	}
 
+	// Start WireGuard controllers
+	for i := range n.wireguardControllers {
+		err := n.wireguardControllers[i].Start()
+		if err != nil {
+			return fmt.Errorf("failed to start wireguard node [%s]: %s",
+				n.wireguardControllers[i].tag,
+				err)
+		}
+	}
+
 	return nil
 }
 
@@ -149,4 +167,13 @@ func (n *Node) Close() {
 		}
 	}
 	n.shadowtlsControllers = nil
+
+	// Close WireGuard controllers
+	for _, c := range n.wireguardControllers {
+		err := c.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing WireGuard controller")
+		}
+	}
+	n.wireguardControllers = nil
 }

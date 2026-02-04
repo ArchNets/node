@@ -61,7 +61,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"anytls",
 		"vless",
 		"ssh",
-		"shadowtls":
+		"shadowtls",
+		"wireguard":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}

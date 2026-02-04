@@ -100,6 +100,14 @@ type Protocol struct {
 	ShadowTLSHandshake  string `json:"shadowtls_handshake"`   // Handshake server (e.g., www.google.com:443)
 	ShadowTLSStrictMode bool   `json:"shadowtls_strict_mode"` // Require TLS 1.3
 	ShadowsocksPort     int    `json:"shadowsocks_port"`      // Local Shadowsocks port to forward to
+
+	// WireGuard-specific fields
+	WireguardInterface  string `json:"wireguard_interface"`   // Interface name (e.g., wg0)
+	WireguardPrivateKey string `json:"wireguard_private_key"` // Server private key (auto-generated)
+	WireguardPublicKey  string `json:"wireguard_public_key"`  // Server public key (auto-generated)
+	WireguardAddress    string `json:"wireguard_address"`     // Server IP and subnet (e.g., 10.0.0.1/24)
+	WireguardMTU        int    `json:"wireguard_mtu"`         // MTU size (default: 1420)
+	WireguardDNS        string `json:"wireguard_dns"`         // DNS servers (e.g., 1.1.1.1,8.8.8.8)
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
