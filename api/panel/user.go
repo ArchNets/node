@@ -13,12 +13,11 @@ type OnlineUser struct {
 }
 
 type UserInfo struct {
-	Id             int    `json:"id"`
-	SubscriptionId int64  `json:"subscription_id"`
-	Uuid           string `json:"uuid"`
-	SpeedLimit     int    `json:"speed_limit"`
-	DeviceLimit    int    `json:"device_limit"`
-	ServiceId      string `json:"service_id,omitempty"` // Generic field for service-specific identity (e.g. WireGuard Key)
+	Id          int    `json:"id"`
+	Uuid        string `json:"uuid"`
+	SpeedLimit  int    `json:"speed_limit"`
+	DeviceLimit int    `json:"device_limit"`
+	ServiceId   string `json:"service_id,omitempty"` // Generic field for service-specific identity (e.g. WireGuard Key)
 }
 
 type UserListBody struct {

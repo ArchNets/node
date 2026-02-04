@@ -232,18 +232,13 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		// However, wgtypes.PeerConfig expects a PublicKey.
 		// The logic below uses peerPublicKey correctly.
 
-		// Use SubscriptionId for unique IP generation if available (prevents collisions for multi-sub users)
-		generationId := int(user.SubscriptionId)
-		if generationId == 0 {
-			generationId = user.Id
-		}
-
-		assignedIP := w.assignIP(generationId)
+		// Use Id (SubscriptionId) for unique IP generation
+		assignedIP := w.assignIP(user.Id)
 
 		// Parse allowed IPs for this peer
 		_, ipnet, err := net.ParseCIDR(assignedIP + "/32")
 		if err != nil {
-			log.WithError(err).Errorf("Failed to parse IP for user %d (sub %d)", user.Id, user.SubscriptionId)
+			log.WithError(err).Errorf("Failed to parse IP for user %d", user.Id)
 			continue
 		}
 
@@ -442,7 +437,7 @@ func (w *WireGuardCore) updatePeers() error {
 	return nil
 }
 
-// assignIP assigns an IP address to a user based on their ID (SubscriptionId or UserId)
+// assignIP assigns an IP address to a user based on their ID (SubscriptionId)
 // Matches Backend logic: 10.{byteB}.{byteC}.{byteD}
 // Constraints: Even IPs only (2, 4, ..., 254), giving 127 usable hosts per /24 block.
 func (w *WireGuardCore) assignIP(id int) string {
