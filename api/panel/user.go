@@ -17,6 +17,7 @@ type UserInfo struct {
 	Uuid        string `json:"uuid"`
 	SpeedLimit  int    `json:"speed_limit"`
 	DeviceLimit int    `json:"device_limit"`
+	ServiceId   string `json:"service_id,omitempty"` // Generic field for service-specific identity (e.g. WireGuard Key)
 }
 
 type UserListBody struct {

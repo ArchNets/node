@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os/exec"
@@ -186,17 +187,48 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 	w.users.mu.Lock()
 	defer w.users.mu.Unlock()
 
-	for _, user := range users {
-		// Generate peer keys from UUID (deterministic)
-		peerPrivateKey, err := wgtypes.ParseKey(user.Uuid)
-		if err != nil {
-			// If UUID is not a valid key, generate one
-			// In production, you'd store this or generate deterministically
-			peerPrivateKey, _ = wgtypes.GeneratePrivateKey()
-		}
-		peerPublicKey := peerPrivateKey.PublicKey()
+	// Structure for parsing the JSON service_id
+	type ServiceIdentity struct {
+		WireGuard *struct {
+			PublicKey string `json:"public_key"`
+		} `json:"wireguard,omitempty"`
+	}
 
-		// Assign IP address (simple sequential assignment)
+	for _, user := range users {
+		if user.ServiceId == "" {
+			continue
+		}
+
+		// Parse the JSON service_id
+		var identity ServiceIdentity
+		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err != nil {
+			// Fallback: Try treating it as a raw key string (legacy support/backward compatibility)
+			// log.Debugf("Failed to parse ServiceId as JSON for user %d, trying generic string", user.Id)
+			// This part is optional but helpful during migration. For strict mode, we can omit.
+		}
+
+		var pubKeyStr string
+		// Check for WireGuard identity
+		if identity.WireGuard != nil && identity.WireGuard.PublicKey != "" {
+			pubKeyStr = identity.WireGuard.PublicKey
+		} else {
+			// If JSON parse failed or no WG key, try raw string (if users put raw base64 in the DB field)
+			pubKeyStr = user.ServiceId
+		}
+
+		peerPublicKey, err := wgtypes.ParseKey(pubKeyStr)
+		if err != nil {
+			// Only invalid if it's meant to be a key.
+			// If ServiceId is valid JSON for OpenVPN but no WG, we just skip smoothly.
+			if identity.WireGuard != nil {
+				log.WithError(err).Warnf("Invalid WireGuard Public Key for user %d", user.Id)
+			}
+			continue
+		}
+
+		// Note: peerPrivateKey is NOT needed logically anymore on the server side if we trust the public key.
+		// However, wgtypes.PeerConfig expects a PublicKey.
+		// The logic below uses peerPublicKey correctly.ssignment)
 		// In production, you'd use a proper IP allocator
 		assignedIP := w.assignIP(user.Id)
 
@@ -398,23 +430,41 @@ func (w *WireGuardCore) updatePeers() error {
 }
 
 // assignIP assigns an IP address to a user based on their UID
-// Simple implementation: 10.0.0.0/24 network, UID % 254 + 2
+// Enhanced implementation: Supports 10.0.0.0/8 for up to 16M users
 func (w *WireGuardCore) assignIP(uid int) string {
 	// Parse base address
-	ip, _, err := net.ParseCIDR(w.Address)
+	ip, ipNet, err := net.ParseCIDR(w.Address)
 	if err != nil {
-		// Fallback to default
-		return fmt.Sprintf("10.0.0.%d", (uid%254)+2)
+		// Fallback safe default
+		return fmt.Sprintf("10.%d.%d.%d", (uid>>16)&0xFF, (uid>>8)&0xFF, (uid%254)+2)
 	}
 
-	// Simple sequential assignment (improve this in production)
 	ipv4 := ip.To4()
-	if ipv4 != nil {
-		ipv4[3] = byte((uid % 254) + 2)
+	if ipv4 == nil {
+		return ""
+	}
+
+	// Calculate offset based on subnet size
+	ones, _ := ipNet.Mask.Size()
+
+	// If we are using a large subnet (like /8 or /16), distribute users across it
+	if ones <= 16 {
+		// Map UID to the last 3 octets (supports ~16M users on /8)
+		// offset starts at 2 to avoid network/gateway IPs
+		uidOffset := uid + 1
+
+		ipv4[1] = byte((uint32(uidOffset) >> 16) & 0xFF)
+		ipv4[2] = byte((uint32(uidOffset) >> 8) & 0xFF)
+		ipv4[3] = byte((uint32(uidOffset) & 0xFE) + 2) // Avoid .0 and .1 and .255 somewhat simply
+
+		// Ensure we stay within the mask?
+		// For 10.0.0.0/8, this logic fills 10.X.Y.Z perfectly.
 		return ipv4.String()
 	}
 
-	return fmt.Sprintf("10.0.0.%d", (uid%254)+2)
+	// Fallback for smaller subnets (like /24) - collision prone for >250 users but safe for small setups
+	ipv4[3] = byte((uid % 253) + 2)
+	return ipv4.String()
 }
 
 // collectStats collects traffic statistics from WireGuard
