@@ -43,7 +43,8 @@ func (c *WireGuardController) Start() error {
 	// Get initial user list
 	users, err := c.apiClient.GetUserList()
 	if err != nil {
-		return err
+		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
+		users = []panel.UserInfo{}
 	}
 	c.userList = users
 

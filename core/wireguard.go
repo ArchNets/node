@@ -488,10 +488,12 @@ func (w *WireGuardCore) collectStats() {
 	for _, peer := range device.Peers {
 		// Find the user ID for this peer
 		var uid int
+		var assignedIP string
 		w.peers.Range(func(key, value interface{}) bool {
 			wgPeer := value.(*WireGuardPeer)
 			if wgPeer.PublicKey == peer.PublicKey {
 				uid = wgPeer.UID
+				assignedIP = wgPeer.IP
 				return false
 			}
 			return true
@@ -515,6 +517,17 @@ func (w *WireGuardCore) collectStats() {
 		// Update last stats
 		lastStats.ReceiveBytes = peer.ReceiveBytes
 		lastStats.TransmitBytes = peer.TransmitBytes
+
+		// Check if peer just connected (handshake time changed)
+		if !peer.LastHandshakeTime.Equal(lastStats.LastHandshake) {
+			// If previous handshake was zero or very old, this is a new active session
+			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > 3*time.Minute {
+				log.WithFields(log.Fields{
+					"uid": uid,
+					"ip":  assignedIP,
+				}).Info("WireGuard peer connected")
+			}
+		}
 		lastStats.LastHandshake = peer.LastHandshakeTime
 
 		// Add to traffic counter

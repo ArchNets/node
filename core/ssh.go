@@ -300,7 +300,7 @@ func (s *SSHCore) handleDirectTCPIP(newChannel ssh.NewChannel, uid int) {
 	log.WithFields(log.Fields{
 		"uid":  uid,
 		"dest": dest,
-	}).Debug("SSH port forward request")
+	}).Info("SSH port forward request")
 
 	// Connect to destination
 	destConn, err := net.DialTimeout("tcp", dest, 10*time.Second)
