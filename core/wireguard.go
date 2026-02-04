@@ -230,14 +230,20 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 
 		// Note: peerPrivateKey is NOT needed logically anymore on the server side if we trust the public key.
 		// However, wgtypes.PeerConfig expects a PublicKey.
-		// The logic below uses peerPublicKey correctly.ssignment)
-		// In production, you'd use a proper IP allocator
-		assignedIP := w.assignIP(user.Id)
+		// The logic below uses peerPublicKey correctly.
+
+		// Use SubscriptionId for unique IP generation if available (prevents collisions for multi-sub users)
+		generationId := int(user.SubscriptionId)
+		if generationId == 0 {
+			generationId = user.Id
+		}
+
+		assignedIP := w.assignIP(generationId)
 
 		// Parse allowed IPs for this peer
 		_, ipnet, err := net.ParseCIDR(assignedIP + "/32")
 		if err != nil {
-			log.WithError(err).Errorf("Failed to parse IP for user %d", user.Id)
+			log.WithError(err).Errorf("Failed to parse IP for user %d (sub %d)", user.Id, user.SubscriptionId)
 			continue
 		}
 
