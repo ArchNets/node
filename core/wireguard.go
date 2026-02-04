@@ -442,42 +442,35 @@ func (w *WireGuardCore) updatePeers() error {
 	return nil
 }
 
-// assignIP assigns an IP address to a user based on their UID
-// Enhanced implementation: Supports 10.0.0.0/8 for up to 16M users
-func (w *WireGuardCore) assignIP(uid int) string {
-	// Parse base address
-	ip, ipNet, err := net.ParseCIDR(w.Address)
-	if err != nil {
-		// Fallback safe default
-		return fmt.Sprintf("10.%d.%d.%d", (uid>>16)&0xFF, (uid>>8)&0xFF, (uid%254)+2)
-	}
-
-	ipv4 := ip.To4()
-	if ipv4 == nil {
+// assignIP assigns an IP address to a user based on their ID (SubscriptionId or UserId)
+// Matches Backend logic: 10.{byteB}.{byteC}.{byteD}
+// Constraints: Even IPs only (2, 4, ..., 254), giving 127 usable hosts per /24 block.
+func (w *WireGuardCore) assignIP(id int) string {
+	if id <= 0 {
 		return ""
 	}
 
-	// Calculate offset based on subnet size
-	ones, _ := ipNet.Mask.Size()
+	// Algorithm matches Backend's calculateWireGuardIP
+	// 0-based index
+	index := int64(id) - 1
 
-	// If we are using a large subnet (like /8 or /16), distribute users across it
-	if ones <= 16 {
-		// Map UID to the last 3 octets (supports ~16M users on /8)
-		// offset starts at 2 to avoid network/gateway IPs
-		uidOffset := uid + 1
+	// Constants
+	hostsPerSubnet := int64(127) // 2 to 254, even numbers only
 
-		ipv4[1] = byte((uint32(uidOffset) >> 16) & 0xFF)
-		ipv4[2] = byte((uint32(uidOffset) >> 8) & 0xFF)
-		ipv4[3] = byte((uint32(uidOffset) & 0xFE) + 2) // Avoid .0 and .1 and .255 somewhat simply
+	// Calculate D index and overflow to C/B
+	dIndex := index % hostsPerSubnet
+	upperIndex := index / hostsPerSubnet
 
-		// Ensure we stay within the mask?
-		// For 10.0.0.0/8, this logic fills 10.X.Y.Z perfectly.
-		return ipv4.String()
-	}
+	byteC := upperIndex % 256
+	byteB := (upperIndex / 256) % 256
 
-	// Fallback for smaller subnets (like /24) - collision prone for >250 users but safe for small setups
-	ipv4[3] = byte((uid % 253) + 2)
-	return ipv4.String()
+	// Calculate actual byte D: (0->2, 1->4, ..., 126->254)
+	byteD := (dIndex * 2) + 2
+
+	// We assume the base network is compatible with 10.x.x.x structure.
+	// In the future, if we need to support non-10.x networks, we should add base IP math here.
+	// For now, using logic strict to the requirement.
+	return fmt.Sprintf("10.%d.%d.%d", byteB, byteC, byteD)
 }
 
 // collectStats collects traffic statistics from WireGuard
