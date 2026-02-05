@@ -488,6 +488,16 @@ open_ports() {
     iptables -X 2>/dev/null
     sysctl -w net.ipv4.ip_forward=1 2>/dev/null
     echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf 2>/dev/null
+    
+    # Auto-detect interface and add MASQUERADE
+    interface=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
+    if [[ -n "$interface" ]]; then
+        iptables -t nat -A POSTROUTING -o "$interface" -j MASQUERADE
+        echo -e "${green}Added MASQUERADE rule for interface: $interface${plain}"
+    else
+        echo -e "${red}Could not detect primary interface for MASQUERADE rule!${plain}"
+    fi
+
     sysctl -p 2>/dev/null
     netfilter-persistent save 2>/dev/null
     echo -e "${green}Successfully opened firewall ports!${plain}"
