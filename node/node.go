@@ -37,7 +37,8 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	if pullinterval <= 0 {
 		pullinterval = 60
 	}
-	for _, nodeconfig := range *serverconfig.Data.Protocols {
+	for _, cfg := range *serverconfig.Data.Protocols {
+		nodeconfig := cfg
 		if !nodeconfig.Enable {
 			continue
 		}

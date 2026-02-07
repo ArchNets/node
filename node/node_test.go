@@ -109,3 +109,60 @@ func TestNewWithSSH(t *testing.T) {
 		t.Errorf("Expected 1 xray controller, got %d", len(n.xrayControllers))
 	}
 }
+
+func TestNewWithListenIP(t *testing.T) {
+	// Mock configuration
+	config := &conf.Conf{
+		ApiConfig: conf.ServerApiConfig{
+			ServerId:  1,
+			ApiHost:   "http://localhost",
+			SecretKey: "secret",
+		},
+	}
+
+	// Mock server response with two Xray protocols with different ListenIPs
+	protocol1 := panel.Protocol{
+		Type:     "vless",
+		Port:     5000,
+		ListenIP: "127.0.0.1",
+		Enable:   true,
+	}
+	protocol2 := panel.Protocol{
+		Type:     "vmess",
+		Port:     6000,
+		ListenIP: "192.168.1.1",
+		Enable:   true,
+	}
+
+	serverConfig := &panel.ServerConfigResponse{
+		Data: &panel.Data{
+			Protocols: &[]panel.Protocol{protocol1, protocol2},
+		},
+	}
+
+	// Create node
+	n, err := New(nil, config, serverConfig)
+	if err != nil {
+		t.Fatalf("Failed to create node: %v", err)
+	}
+
+	if len(n.xrayControllers) != 2 {
+		t.Fatalf("Expected 2 xray controllers, got %d", len(n.xrayControllers))
+	}
+
+	// Verify protocol1
+	if n.xrayControllers[0].info.Protocol.ListenIP != "127.0.0.1" {
+		t.Errorf("Expected ListenIP 127.0.0.1, got %s", n.xrayControllers[0].info.Protocol.ListenIP)
+	}
+	if n.xrayControllers[0].info.Protocol.Port != 5000 {
+		t.Errorf("Expected Port 5000, got %d", n.xrayControllers[0].info.Protocol.Port)
+	}
+
+	// Verify protocol2
+	if n.xrayControllers[1].info.Protocol.ListenIP != "192.168.1.1" {
+		t.Errorf("Expected ListenIP 192.168.1.1, got %s", n.xrayControllers[1].info.Protocol.ListenIP)
+	}
+	if n.xrayControllers[1].info.Protocol.Port != 6000 {
+		t.Errorf("Expected Port 6000, got %d", n.xrayControllers[1].info.Protocol.Port)
+	}
+}

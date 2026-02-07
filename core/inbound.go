@@ -13,6 +13,7 @@ import (
 
 	"github.com/archnets/node/api/panel"
 	certutil "github.com/archnets/node/common/cert"
+	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
@@ -82,6 +83,12 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		listenIP = "0.0.0.0"
 	}
 	ipAddress := net.ParseAddress(listenIP)
+	log.WithFields(log.Fields{
+		"type": nodeInfo.Type,
+		"ip":   listenIP,
+		"port": nodeInfo.Protocol.Port,
+		"tag":  tag,
+	}).Debug("building inbound handler")
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
