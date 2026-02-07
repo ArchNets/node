@@ -76,8 +76,12 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 				To:   uint32(nodeInfo.Protocol.Port),
 			}},
 	}
-	// Set Listen IP address
-	ipAddress := net.ParseAddress("0.0.0.0")
+	// Set Listen IP address (default to 0.0.0.0 if not specified)
+	listenIP := nodeInfo.Protocol.ListenIP
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+	ipAddress := net.ParseAddress(listenIP)
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
@@ -162,7 +166,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "vless"
 	var err error
-	decryption := "none" 
+	decryption := "none"
 	if nodeInfo.Protocol.Encryption != "" && nodeInfo.Protocol.Encryption != "none" {
 		switch nodeInfo.Protocol.Encryption {
 		case "mlkem768x25519plus":
@@ -420,7 +424,7 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	settings := &coreConf.AnyTLSServerConfig{
 		PaddingScheme: padding,
 	}
-	// anytls does not support udp or i just can't implement it 
+	// anytls does not support udp or i just can't implement it
 	// TODO: Study AnyTLS* Prio #10
 	t := coreConf.TransportProtocol("tcp")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}

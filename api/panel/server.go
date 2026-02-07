@@ -43,6 +43,7 @@ type Outbound struct {
 type Protocol struct {
 	Type                    string `json:"type"`
 	Port                    int    `json:"port"`
+	ListenIP                string `json:"listen_ip"` // Listen IP (default: 0.0.0.0, use 127.0.0.1 for reverse proxy)
 	Enable                  bool   `json:"enable"`
 	Security                string `json:"security"`
 	SNI                     string `json:"sni"`
