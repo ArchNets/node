@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,10 +17,33 @@ import (
 
 // Binary URLs (Latest releases as of now)
 const (
-	WaterwallZipURL = "https://github.com/radkesvat/WaterWall/releases/latest/download/Waterwall-linux-amd64.zip"
-	NodepassURL     = "https://github.com/NodePassProject/nodepass/releases/download/v1.15.0/nodepass_1.15.0_linux_amd64.tar.gz"
+	WaterwallZipURL = "https://github.com/radkesvat/WaterWall/releases/latest/download/Waterwall-linux-64.zip"
 	GostInstallURL  = "https://github.com/go-gost/gost/releases/latest/download/gost-linux-amd64.gz"
 )
+
+// getLatestNodepassVersion fetches the latest version tag from GitHub API
+func getLatestNodepassVersion() (string, error) {
+	resp, err := http.Get("https://api.github.com/repos/NodePassProject/nodepass/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+
+	// Remove 'v' prefix if present
+	version := strings.TrimPrefix(release.TagName, "v")
+	return version, nil
+}
 
 // InstallWaterwall downloads and installs Waterwall to the specified directory
 func InstallWaterwall(destDir string) error {
@@ -62,13 +86,23 @@ func InstallGost() error {
 	return os.Chmod(dest, 0755)
 }
 
-// InstallNodepass downloads and installs Nodepass to /usr/local/bin
+// InstallNodepass downloads and installs the latest Nodepass to /usr/local/bin
 func InstallNodepass() error {
 	dest := "/usr/local/bin/nodepass"
 	log.Infof("Installing Nodepass to %s", dest)
 
+	// Fetch latest version from GitHub API
+	version, err := getLatestNodepassVersion()
+	if err != nil {
+		log.Warnf("Failed to fetch latest nodepass version, using fallback: %v", err)
+		version = "1.15.0" // Fallback version
+	}
+
+	nodepassURL := fmt.Sprintf("https://github.com/NodePassProject/nodepass/releases/download/v%s/nodepass_%s_linux_amd64.tar.gz", version, version)
+	log.Infof("Downloading NodePass v%s", version)
+
 	tarGzPath := dest + ".tar.gz"
-	if err := DownloadFile(NodepassURL, tarGzPath); err != nil {
+	if err := DownloadFile(nodepassURL, tarGzPath); err != nil {
 		return err
 	}
 	defer os.Remove(tarGzPath)
