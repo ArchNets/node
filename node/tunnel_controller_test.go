@@ -8,6 +8,7 @@ import (
 
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/conf"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestNewTunnelController(t *testing.T) {
@@ -135,6 +136,7 @@ func TestTunnelControllerApplyConfigWritesFiles(t *testing.T) {
 		tag:                "tunnel-test",
 		tunnelDir:          tmpDir,
 		forwarderProcesses: make(map[int]*exec.Cmd),
+		logger:             log.WithField("tag", "tunnel-test"),
 	}
 
 	// Create log and libs directories

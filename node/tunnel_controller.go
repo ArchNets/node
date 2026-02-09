@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,9 @@ const (
 	TunnelConfigFmt   = "tunnel_%d.json"
 	ConfigPollSeconds = 60
 	StatusPushSeconds = 30
+	ControllerLogFile = "controller.log"
+	WaterwallLogFile  = "waterwall.log"
+	ForwarderLogFile  = "forwarder.log"
 )
 
 // TunnelController manages WaterWall tunnel nodes
@@ -37,16 +41,21 @@ type TunnelController struct {
 	tunnels               []panel.TunnelInfo
 	configMonitorPeriodic *task.Task
 	statusReportPeriodic  *task.Task
+	logger                *log.Entry
+	waterwallLogFile      *os.File
+	forwarderLogFile      *os.File
 }
 
 // NewTunnelController creates a new tunnel controller
 func NewTunnelController(apiClient *panel.ClientV2, serverId int) *TunnelController {
+	tag := generateTunnelTag(serverId)
 	return &TunnelController{
-		tag:                generateTunnelTag(serverId),
+		tag:                tag,
 		apiClient:          apiClient,
 		serverId:           serverId,
 		tunnelDir:          TunnelDir,
 		forwarderProcesses: make(map[int]*exec.Cmd),
+		logger:             log.WithField("tag", tag), // Initialize with default logger
 	}
 }
 
@@ -71,6 +80,34 @@ func (c *TunnelController) Start() error {
 	}
 	if err := os.MkdirAll(filepath.Join(c.tunnelDir, "libs"), 0755); err != nil {
 		return fmt.Errorf("failed to create libs directory: %v", err)
+	}
+
+	// Initialize dedicated logger that writes to controller.log
+	controllerLogPath := filepath.Join(c.tunnelDir, "log", ControllerLogFile)
+	controllerLogFile, err := os.OpenFile(controllerLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.WithField("err", err).Warn("Failed to open controller log file, using stdout")
+		c.logger = log.WithField("tag", c.tag)
+	} else {
+		// Create a new logger instance for the controller
+		controllerLogger := log.New()
+		controllerLogger.SetOutput(io.MultiWriter(os.Stdout, controllerLogFile))
+		controllerLogger.SetFormatter(&log.TextFormatter{FullTimestamp: true})
+		c.logger = controllerLogger.WithField("tag", c.tag)
+	}
+
+	// Open waterwall log file
+	waterwallLogPath := filepath.Join(c.tunnelDir, "log", WaterwallLogFile)
+	c.waterwallLogFile, err = os.OpenFile(waterwallLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		c.logger.WithField("err", err).Warn("Failed to open waterwall log file")
+	}
+
+	// Open forwarder log file
+	forwarderLogPath := filepath.Join(c.tunnelDir, "log", ForwarderLogFile)
+	c.forwarderLogFile, err = os.OpenFile(forwarderLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		c.logger.WithField("err", err).Warn("Failed to open forwarder log file")
 	}
 
 	// Fetch initial config
@@ -164,7 +201,19 @@ func (c *TunnelController) Close() error {
 	// Stop all forwarders
 	c.stopAllForwarders()
 
-	log.WithField("tag", c.tag).Info("Tunnel controller closed")
+	// Close log files
+	if c.waterwallLogFile != nil {
+		c.waterwallLogFile.Close()
+	}
+	if c.forwarderLogFile != nil {
+		c.forwarderLogFile.Close()
+	}
+
+	if c.logger != nil {
+		c.logger.Info("Tunnel controller closed")
+	} else {
+		log.WithField("tag", c.tag).Info("Tunnel controller closed")
+	}
 	return nil
 }
 
@@ -348,8 +397,11 @@ func (c *TunnelController) startWaterwall() error {
 
 	cmd := exec.Command(WaterwallBinary)
 	cmd.Dir = c.tunnelDir
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Redirect output to waterwall log file
+	if c.waterwallLogFile != nil {
+		cmd.Stdout = c.waterwallLogFile
+		cmd.Stderr = c.waterwallLogFile
+	}
 	// Set process group for proper cleanup
 	setProcessGroup(cmd)
 
@@ -363,15 +415,12 @@ func (c *TunnelController) startWaterwall() error {
 	go func() {
 		err := cmd.Wait()
 		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Warn("WaterWall process exited")
+			c.logger.WithField("err", err).Warn("WaterWall process exited")
 		}
 		c.waterwallProcess = nil
 	}()
 
-	log.WithField("tag", c.tag).Info("WaterWall started")
+	c.logger.Info("WaterWall started")
 	return nil
 }
 
@@ -380,7 +429,7 @@ func (c *TunnelController) stopWaterwall() {
 		// Kill process group
 		killProcessGroup(c.waterwallProcess)
 		c.waterwallProcess = nil
-		log.WithField("tag", c.tag).Info("WaterWall stopped")
+		c.logger.Info("WaterWall stopped")
 	}
 }
 
@@ -388,6 +437,11 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 	var cmd *exec.Cmd
 
 	switch f.ForwarderType {
+	case "waterwall":
+		// WaterWall handles its own forwarding via tunnel configs, skip
+		c.logger.WithField("tunnelId", tunnelId).Debug("Skipping waterwall forwarder (handled by WaterWall binary)")
+		return nil
+
 	case "gost":
 		if _, err := os.Stat(GostBinary); os.IsNotExist(err) {
 			return fmt.Errorf("gost binary not found at %s", GostBinary)
@@ -408,6 +462,12 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		return fmt.Errorf("unknown forwarder type: %s", f.ForwarderType)
 	}
 
+	// Redirect output to forwarder log file
+	if c.forwarderLogFile != nil {
+		cmd.Stdout = c.forwarderLogFile
+		cmd.Stderr = c.forwarderLogFile
+	}
+
 	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
@@ -424,11 +484,12 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		delete(c.forwarderProcesses, key)
 	}()
 
-	log.WithFields(log.Fields{
-		"tag":      c.tag,
-		"tunnelId": tunnelId,
-		"type":     f.ForwarderType,
-		"port":     f.ListenPort,
+	c.logger.WithFields(log.Fields{
+		"tunnelId":   tunnelId,
+		"type":       f.ForwarderType,
+		"port":       f.ListenPort,
+		"targetIP":   f.TargetIP,
+		"targetPort": f.TargetPort,
 	}).Info("Forwarder started")
 
 	return nil
@@ -441,5 +502,5 @@ func (c *TunnelController) stopAllForwarders() {
 		}
 		delete(c.forwarderProcesses, key)
 	}
-	log.WithField("tag", c.tag).Info("All forwarders stopped")
+	c.logger.Info("All forwarders stopped")
 }
