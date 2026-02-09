@@ -10,16 +10,37 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
 
-// Binary URLs (Latest releases as of now)
+// Binary URLs
 const (
-	WaterwallZipURL = "https://github.com/radkesvat/WaterWall/releases/latest/download/Waterwall-linux-64.zip"
-	GostInstallURL  = "https://github.com/go-gost/gost/releases/latest/download/gost-linux-amd64.gz"
+	GostInstallURL = "https://github.com/go-gost/gost/releases/latest/download/gost-linux-amd64.gz"
 )
+
+// getLatestWaterwallVersion fetches the latest version tag from GitHub API
+func getLatestWaterwallVersion() (string, error) {
+	resp, err := http.Get("https://api.github.com/repos/radkesvat/WaterWall/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	return release.TagName, nil // Keep the v prefix for WaterWall URLs
+}
 
 // getLatestNodepassVersion fetches the latest version tag from GitHub API
 func getLatestNodepassVersion() (string, error) {
@@ -45,6 +66,41 @@ func getLatestNodepassVersion() (string, error) {
 	return version, nil
 }
 
+// detectWaterwallVariant detects the appropriate WaterWall variant for this system
+// Returns: "clang-x64", "gcc-x64-old-cpu", or "gcc-arm64"
+func detectWaterwallVariant() string {
+	arch := runtime.GOARCH
+
+	if arch == "arm64" {
+		return "gcc-arm64"
+	}
+
+	// For amd64, check if CPU supports AVX (old CPUs don't)
+	if hasAVXSupport() {
+		return "clang-x64"
+	}
+	return "gcc-x64-old-cpu"
+}
+
+// hasAVXSupport checks if the CPU supports AVX instructions
+func hasAVXSupport() bool {
+	// Read /proc/cpuinfo and check for avx flag
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		log.Warnf("Could not read /proc/cpuinfo, assuming old CPU: %v", err)
+		return false // Assume old CPU if we cant detect
+	}
+
+	content := string(data)
+	// Check for AVX in the flags line
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "flags") {
+			return strings.Contains(line, " avx ")
+		}
+	}
+	return false
+}
+
 // InstallWaterwall downloads and installs Waterwall to the specified directory
 func InstallWaterwall(destDir string) error {
 	log.Infof("Installing Waterwall to %s", destDir)
@@ -52,8 +108,23 @@ func InstallWaterwall(destDir string) error {
 		return err
 	}
 
+	// Get latest version
+	version, err := getLatestWaterwallVersion()
+	if err != nil {
+		log.Warnf("Failed to fetch latest WaterWall version, using fallback: %v", err)
+		version = "v1.41" // Fallback version
+	}
+
+	// Detect appropriate variant
+	variant := detectWaterwallVariant()
+	log.Infof("Detected WaterWall variant: %s", variant)
+
+	// Build download URL: https://github.com/radkesvat/WaterWall/releases/download/v1.41/Waterwall-linux-clang-x64.zip
+	downloadURL := fmt.Sprintf("https://github.com/radkesvat/WaterWall/releases/download/%s/Waterwall-linux-%s.zip", version, variant)
+	log.Infof("Downloading WaterWall %s from %s", version, downloadURL)
+
 	zipPath := filepath.Join(destDir, "waterwall.zip")
-	if err := DownloadFile(WaterwallZipURL, zipPath); err != nil {
+	if err := DownloadFile(downloadURL, zipPath); err != nil {
 		return err
 	}
 	defer os.Remove(zipPath)
@@ -62,8 +133,7 @@ func InstallWaterwall(destDir string) error {
 		return err
 	}
 
-	// Rename according to usage in tunnel_controller (Waterwall with capital W)
-	// The zip contains 'Waterwall' so it should be fine, but let's ensure permissions
+	// Ensure permissions
 	binaryPath := filepath.Join(destDir, "Waterwall")
 	return os.Chmod(binaryPath, 0755)
 }
