@@ -503,23 +503,98 @@ open_ports() {
     echo -e "${green}Successfully opened firewall ports!${plain}"
 }
 
+# Tunnel management functions
+tunnel_install() {
+    echo -e "${green}Installing tunnel components (WaterWall, Gost, NodePass)...${plain}"
+    /usr/local/archnets/node tunnel install
+    if [[ $? == 0 ]]; then
+        echo -e "${green}Tunnel components installed successfully${plain}"
+    else
+        echo -e "${red}Failed to install tunnel components${plain}"
+    fi
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+tunnel_start() {
+    echo -e "${green}Starting tunnel nodes...${plain}"
+    /usr/local/archnets/node tunnel start &
+    sleep 2
+    echo -e "${green}Tunnel nodes started in background${plain}"
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+tunnel_stop() {
+    echo -e "${green}Stopping tunnel processes...${plain}"
+    /usr/local/archnets/node tunnel stop
+    if [[ $? == 0 ]]; then
+        echo -e "${green}Tunnel processes stopped successfully${plain}"
+    else
+        echo -e "${red}Failed to stop tunnel processes${plain}"
+    fi
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+tunnel_restart() {
+    echo -e "${green}Restarting tunnel nodes...${plain}"
+    /usr/local/archnets/node tunnel stop 2>/dev/null
+    sleep 1
+    /usr/local/archnets/node tunnel start &
+    sleep 2
+    echo -e "${green}Tunnel nodes restarted${plain}"
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+tunnel_uninstall() {
+    confirm "Are you sure you want to uninstall tunnel components?" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+    echo -e "${green}Uninstalling tunnel components...${plain}"
+    /usr/local/archnets/node tunnel uninstall
+    if [[ $? == 0 ]]; then
+        echo -e "${green}Tunnel components uninstalled successfully${plain}"
+    else
+        echo -e "${red}Failed to uninstall tunnel components${plain}"
+    fi
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
 show_usage() {
     echo "archnets management script usage:"
     echo "------------------------------------------"
-    echo "node              - Show management menu (more features)"
-    echo "node start        - Start archnets"
-    echo "node stop         - Stop archnets"
-    echo "node restart      - Restart archnets"
-    echo "node status       - View archnets status"
-    echo "node enable       - Enable start at boot"
-    echo "node disable      - Disable start at boot"
-    echo "node log          - View archnets logs"
-    echo "node generate     - Generate archnets config file"
-    echo "node update       - Update archnets"
-    echo "node update x.x.x - Install specific archnets version"
-    echo "node install      - Install archnets"
-    echo "node uninstall    - Uninstall archnets"
-    echo "node version      - Show archnets version"
+    echo "node                - Show management menu (more features)"
+    echo "node start          - Start archnets"
+    echo "node stop           - Stop archnets"
+    echo "node restart        - Restart archnets"
+    echo "node status         - View archnets status"
+    echo "node enable         - Enable start at boot"
+    echo "node disable        - Disable start at boot"
+    echo "node log            - View archnets logs"
+    echo "node generate       - Generate archnets config file"
+    echo "node update         - Update archnets"
+    echo "node update x.x.x   - Install specific archnets version"
+    echo "node install        - Install archnets"
+    echo "node uninstall      - Uninstall archnets"
+    echo "node version        - Show archnets version"
+    echo "------------------------------------------"
+    echo "node tunnel-install - Install tunnel components"
+    echo "node tunnel-start   - Start tunnel nodes"
+    echo "node tunnel-stop    - Stop tunnel processes"
+    echo "node tunnel-restart - Restart tunnel nodes"
+    echo "node tunnel-remove  - Uninstall tunnel components"
     echo "------------------------------------------"
 }
 
@@ -546,11 +621,17 @@ show_menu() {
   ${green}12.${plain} Upgrade maintenance script
   ${green}13.${plain} Generate archnets config file
   ${green}14.${plain} Open all VPS network ports
+————————————————
+  ${green}16.${plain} Install tunnel
+  ${green}17.${plain} Start tunnel
+  ${green}18.${plain} Stop tunnel
+  ${green}19.${plain} Restart tunnel
+  ${green}20.${plain} Uninstall tunnel
+————————————————
   ${green}15.${plain} Exit
  "
- # Future updates can be added to the above string
     show_status
-    echo && read -rp "Please choose [0-15]: " num
+    echo && read -rp "Please choose [0-20]: " num
 
     case "${num}" in
         0) config ;;
@@ -569,7 +650,12 @@ show_menu() {
         13) generate_config_file ;;
         14) open_ports ;;
         15) exit ;;
-        *) echo -e "${red}Please enter a valid number [0-15]${plain}" ;;
+        16) check_install && tunnel_install ;;
+        17) check_install && tunnel_start ;;
+        18) check_install && tunnel_stop ;;
+        19) check_install && tunnel_restart ;;
+        20) check_install && tunnel_uninstall ;;
+        *) echo -e "${red}Please enter a valid number [0-20]${plain}" ;;
     esac
 }
 
@@ -589,6 +675,11 @@ if [[ $# > 0 ]]; then
         "uninstall") check_install 0 && uninstall 0 ;;
         "version") check_install 0 && show_archnets_version 0 ;;
         "update_shell") update_shell ;;
+        "tunnel-install") check_install 0 && tunnel_install 0 ;;
+        "tunnel-start") check_install 0 && tunnel_start 0 ;;
+        "tunnel-stop") check_install 0 && tunnel_stop 0 ;;
+        "tunnel-restart") check_install 0 && tunnel_restart 0 ;;
+        "tunnel-remove") check_install 0 && tunnel_uninstall 0 ;;
         *) show_usage
     esac
 else
