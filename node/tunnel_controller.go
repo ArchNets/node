@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -352,7 +351,7 @@ func (c *TunnelController) startWaterwall() error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	// Set process group for proper cleanup
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start WaterWall: %v", err)
@@ -379,12 +378,7 @@ func (c *TunnelController) startWaterwall() error {
 func (c *TunnelController) stopWaterwall() {
 	if c.waterwallProcess != nil && c.waterwallProcess.Process != nil {
 		// Kill process group
-		pgid, err := syscall.Getpgid(c.waterwallProcess.Process.Pid)
-		if err == nil {
-			syscall.Kill(-pgid, syscall.SIGTERM)
-		} else {
-			c.waterwallProcess.Process.Kill()
-		}
+		killProcessGroup(c.waterwallProcess)
 		c.waterwallProcess = nil
 		log.WithField("tag", c.tag).Info("WaterWall stopped")
 	}
@@ -414,7 +408,7 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		return fmt.Errorf("unknown forwarder type: %s", f.ForwarderType)
 	}
 
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -443,12 +437,7 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 func (c *TunnelController) stopAllForwarders() {
 	for key, cmd := range c.forwarderProcesses {
 		if cmd != nil && cmd.Process != nil {
-			pgid, err := syscall.Getpgid(cmd.Process.Pid)
-			if err == nil {
-				syscall.Kill(-pgid, syscall.SIGTERM)
-			} else {
-				cmd.Process.Kill()
-			}
+			killProcessGroup(cmd)
 		}
 		delete(c.forwarderProcesses, key)
 	}
