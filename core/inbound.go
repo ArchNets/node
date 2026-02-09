@@ -203,6 +203,28 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	switch nodeInfo.Protocol.Transport {
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
+		// Add HTTP header obfuscation if configured
+		if nodeInfo.Protocol.TCPHeaderType == "http" {
+			httpHeader := map[string]interface{}{
+				"type":    "http",
+				"request": map[string]interface{}{},
+			}
+			request := httpHeader["request"].(map[string]interface{})
+			path := nodeInfo.Protocol.TCPHeaderPath
+			if path == "" {
+				path = "/"
+			}
+			request["path"] = []string{path}
+			if len(nodeInfo.Protocol.TCPHeaderHost) > 0 {
+				request["headers"] = map[string]interface{}{
+					"Host": nodeInfo.Protocol.TCPHeaderHost,
+				}
+			}
+			headerJSON, err := json.Marshal(httpHeader)
+			if err == nil {
+				inbound.StreamSetting.TCPSettings.HeaderConfig = json.RawMessage(headerJSON)
+			}
+		}
 	case "ws", "websocket":
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
 			Host: nodeInfo.Protocol.Host,
@@ -246,6 +268,28 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	switch nodeInfo.Protocol.Transport {
 	case "tcp":
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
+		// Add HTTP header obfuscation if configured
+		if nodeInfo.Protocol.TCPHeaderType == "http" {
+			httpHeader := map[string]interface{}{
+				"type":    "http",
+				"request": map[string]interface{}{},
+			}
+			request := httpHeader["request"].(map[string]interface{})
+			path := nodeInfo.Protocol.TCPHeaderPath
+			if path == "" {
+				path = "/"
+			}
+			request["path"] = []string{path}
+			if len(nodeInfo.Protocol.TCPHeaderHost) > 0 {
+				request["headers"] = map[string]interface{}{
+					"Host": nodeInfo.Protocol.TCPHeaderHost,
+				}
+			}
+			headerJSON, err := json.Marshal(httpHeader)
+			if err == nil {
+				inbound.StreamSetting.TCPSettings.HeaderConfig = json.RawMessage(headerJSON)
+			}
+		}
 	case "ws", "websocket":
 		inbound.StreamSetting.WSSettings = &coreConf.WebSocketConfig{
 			Host: nodeInfo.Protocol.Host,

@@ -92,6 +92,11 @@ type Protocol struct {
 	CertDNSEnv              string `json:"cert_dns_env"`
 	AcceptProxyProtocol     bool   `json:"accept_proxy_protocol"`
 
+	// TCP HTTP Header obfuscation (for VMess/VLESS with tcp transport)
+	TCPHeaderType string   `json:"tcp_header_type"` // "none" or "http"
+	TCPHeaderHost []string `json:"tcp_header_host"` // Host header values (e.g., ["www.digikala.com", "example.com"])
+	TCPHeaderPath string   `json:"tcp_header_path"` // Request path (e.g., "/incredible-offers")
+
 	// SSH-specific fields
 	SSHHostKeyPath string `json:"ssh_host_key_path"` // Path to SSH host key file
 	SSHBanner      string `json:"ssh_banner"`        // Custom SSH banner message
