@@ -20,6 +20,7 @@ type Node struct {
 	sshControllers       []*SSHController
 	shadowtlsControllers []*ShadowTLSController
 	wireguardControllers []*WireGuardController
+	tunnelController     *TunnelController
 }
 
 func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConfigResponse) (*Node, error) {
@@ -138,6 +139,16 @@ func (n *Node) Start() error {
 		}
 	}
 
+	// Start Tunnel controller
+	if n.tunnelController != nil {
+		err := n.tunnelController.Start()
+		if err != nil {
+			return fmt.Errorf("failed to start tunnel controller [%s]: %s",
+				n.tunnelController.tag,
+				err)
+		}
+	}
+
 	return nil
 }
 
@@ -177,4 +188,13 @@ func (n *Node) Close() {
 		}
 	}
 	n.wireguardControllers = nil
+
+	// Close Tunnel controller
+	if n.tunnelController != nil {
+		err := n.tunnelController.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing Tunnel controller")
+		}
+		n.tunnelController = nil
+	}
 }

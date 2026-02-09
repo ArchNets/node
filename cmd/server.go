@@ -15,10 +15,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	config string
-	watch  bool
-)
+// Global variables are now in cmd.go
 
 var serverCommand = cobra.Command{
 	Use:   "server",
@@ -28,12 +25,6 @@ var serverCommand = cobra.Command{
 }
 
 func init() {
-	serverCommand.PersistentFlags().
-		StringVarP(&config, "config", "c",
-			"/etc/archnets/config.yml", "config file path")
-	serverCommand.PersistentFlags().
-		BoolVarP(&watch, "watch", "w",
-			true, "watch file path change")
 	command.AddCommand(&serverCommand)
 }
 
