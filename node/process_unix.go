@@ -4,6 +4,7 @@
 package node
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -25,4 +26,13 @@ func killProcessGroup(cmd *exec.Cmd) {
 	} else {
 		_ = cmd.Process.Kill()
 	}
+}
+
+// StopProcess sends SIGTERM to the given PID
+func StopProcess(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Signal(syscall.SIGTERM)
 }

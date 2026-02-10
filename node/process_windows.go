@@ -4,6 +4,7 @@
 package node
 
 import (
+	"os"
 	"os/exec"
 )
 
@@ -16,4 +17,13 @@ func killProcessGroup(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
+}
+
+// StopProcess kills the process with the given PID
+func StopProcess(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Kill()
 }

@@ -3,6 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
 
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/conf"
@@ -10,6 +13,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
+
+const TunnelPidFile = "/var/run/archnets-tunnel.pid"
 
 var tunnelCommand = &cobra.Command{
 	Use:   "tunnel",
@@ -51,10 +56,25 @@ var tunnelStartCmd = &cobra.Command{
 		if err := tc.Start(); err != nil {
 			log.Fatalf("Failed to start tunnel: %v", err)
 		}
-		log.Info("Tunnel nodes started. Press Ctrl+C to stop (if running in foreground)")
-		// Wait for signal? Normally 'node server' is used for long-running.
-		// For standalone start, we might want to keep it alive if it's not a service.
-		select {}
+
+		// Write PID file
+		if err := os.WriteFile(TunnelPidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+			log.Warnf("Failed to write PID file: %v", err)
+		}
+		defer os.Remove(TunnelPidFile)
+
+		log.Info("Tunnel nodes started. Press Ctrl+C to stop")
+
+		// Handle signals
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+		// Block until signal
+		sig := <-sigChan
+		log.WithField("signal", sig).Info("Received signal, shutting down...")
+
+		// Graceful shutdown
+		tc.Close()
 	},
 }
 
@@ -62,11 +82,29 @@ var tunnelStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop tunnel processes (kills running binaries)",
 	Run: func(cmd *cobra.Command, args []string) {
-		c := loadConfig()
-		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
-		// We stop by calling Uninstall logic but only stopping processes
-		tc.Close()
-		log.Info("Tunnel processes stopped")
+		pidContent, err := os.ReadFile(TunnelPidFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Warn("PID file not found. Is the tunnel running?")
+				return
+			}
+			log.Fatalf("Failed to read PID file: %v", err)
+		}
+
+		pid, err := strconv.Atoi(string(pidContent))
+		if err != nil {
+			log.Fatalf("Invalid PID in file: %v", err)
+		}
+
+		// Send SIGTERM using cross-platform helper
+		log.Infof("Sending stop signal to tunnel process %d...", pid)
+		if err := node.StopProcess(pid); err != nil {
+			log.Warnf("Failed to stop process: %v", err)
+		}
+
+		// Optionally wait or check if it died?
+		// node.sh will wait.
+		log.Info("Signal sent")
 	},
 }
 

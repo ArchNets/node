@@ -571,10 +571,7 @@ tunnel_uninstall() {
         before_show_menu
     fi
 }
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
+
 
 tunnel_log() {
     echo -e "${green}Select log to view:${plain}"
