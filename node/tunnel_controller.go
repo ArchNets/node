@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"sync"
+
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
@@ -43,6 +45,7 @@ type TunnelController struct {
 	logger                *log.Entry
 	waterwallLogFile      *os.File
 	forwarderLogFile      *os.File
+	waterwallWg           sync.WaitGroup
 }
 
 // NewTunnelController creates a new tunnel controller
@@ -395,14 +398,15 @@ func (c *TunnelController) startWaterwall() error {
 	}
 
 	c.waterwallProcess = cmd
+	c.waterwallWg.Add(1)
 
 	// Monitor process in background
 	go func() {
+		defer c.waterwallWg.Done()
 		err := cmd.Wait()
 		if err != nil {
 			c.logger.WithField("err", err).Warn("WaterWall process exited")
 		}
-		c.waterwallProcess = nil
 	}()
 
 	c.logger.Info("WaterWall started")
@@ -411,8 +415,13 @@ func (c *TunnelController) startWaterwall() error {
 
 func (c *TunnelController) stopWaterwall() {
 	if c.waterwallProcess != nil && c.waterwallProcess.Process != nil {
+		c.logger.Info("Stopping WaterWall...")
 		// Kill process group
 		killProcessGroup(c.waterwallProcess)
+
+		// Wait for process to exit and cleanup
+		c.waterwallWg.Wait()
+
 		c.waterwallProcess = nil
 		c.logger.Info("WaterWall stopped")
 	}

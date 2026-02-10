@@ -571,6 +571,41 @@ tunnel_uninstall() {
         before_show_menu
     fi
 }
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+tunnel_log() {
+    echo -e "${green}Select log to view:${plain}"
+    echo -e "  1. WaterWall Logs (Tunnel Connectivity)"
+    echo -e "  2. Controller Logs (Management/Updates)"
+    echo -e "  3. Forwarder Logs (Gost/NodePass)"
+    echo && read -rp "Please choose [1-3] (default 1): " log_choice
+    [[ -z "$log_choice" ]] && log_choice=1
+
+    case "$log_choice" in
+        1) 
+            echo -e "${green}Viewing WaterWall logs (Ctrl+C to exit)...${plain}"
+            tail -f /etc/archnets/tunnel/log/waterwall.log
+            ;;
+        2)
+            echo -e "${green}Viewing Controller logs (Ctrl+C to exit)...${plain}"
+            tail -f /etc/archnets/tunnel/log/controller.log
+            ;;
+        3)
+            echo -e "${green}Viewing Forwarder logs (Ctrl+C to exit)...${plain}"
+            tail -f /etc/archnets/tunnel/log/forwarder.log
+            ;;
+        *)
+            echo -e "${red}Invalid choice${plain}"
+            ;;
+    esac
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
 
 show_usage() {
     echo "archnets management script usage:"
@@ -595,6 +630,7 @@ show_usage() {
     echo "node tunnel-stop    - Stop tunnel processes"
     echo "node tunnel-restart - Restart tunnel nodes"
     echo "node tunnel-remove  - Uninstall tunnel components"
+    echo "node tunnel-log     - View tunnel logs"
     echo "------------------------------------------"
 }
 
@@ -627,11 +663,12 @@ show_menu() {
   ${green}18.${plain} Stop tunnel
   ${green}19.${plain} Restart tunnel
   ${green}20.${plain} Uninstall tunnel
+  ${green}21.${plain} View tunnel logs
 ————————————————
   ${green}15.${plain} Exit
  "
     show_status
-    echo && read -rp "Please choose [0-20]: " num
+    echo && read -rp "Please choose [0-21]: " num
 
     case "${num}" in
         0) config ;;
@@ -655,7 +692,8 @@ show_menu() {
         18) check_install && tunnel_stop ;;
         19) check_install && tunnel_restart ;;
         20) check_install && tunnel_uninstall ;;
-        *) echo -e "${red}Please enter a valid number [0-20]${plain}" ;;
+        21) check_install && tunnel_log ;;
+        *) echo -e "${red}Please enter a valid number [0-21]${plain}" ;;
     esac
 }
 
@@ -680,6 +718,7 @@ if [[ $# > 0 ]]; then
         "tunnel-stop") check_install 0 && tunnel_stop 0 ;;
         "tunnel-restart") check_install 0 && tunnel_restart 0 ;;
         "tunnel-remove") check_install 0 && tunnel_uninstall 0 ;;
+        "tunnel-log") check_install 0 && tunnel_log 0 ;;
         *) show_usage
     esac
 else
