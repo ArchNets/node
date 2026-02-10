@@ -519,7 +519,7 @@ tunnel_install() {
 
 tunnel_start() {
     echo -e "${green}Starting tunnel nodes...${plain}"
-    /usr/local/archnets/node tunnel start &
+    nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
     sleep 2
     echo -e "${green}Tunnel nodes started in background${plain}"
     if [[ $# == 0 ]]; then
