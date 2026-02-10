@@ -3,7 +3,6 @@ package node
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,11 +69,6 @@ func (c *TunnelController) Start() error {
 		return fmt.Errorf("failed to create tunnel directory: %v", err)
 	}
 
-	// Auto-install missing binaries
-	if err := c.CheckAndInstallBinaries(); err != nil {
-		log.WithField("err", err).Warn("Tunnel: Auto-installation failed, proceeding with existing binaries if possible")
-	}
-
 	if err := os.MkdirAll(filepath.Join(c.tunnelDir, "log"), 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %v", err)
 	}
@@ -91,7 +85,8 @@ func (c *TunnelController) Start() error {
 	} else {
 		// Create a new logger instance for the controller
 		controllerLogger := log.New()
-		controllerLogger.SetOutput(io.MultiWriter(os.Stdout, controllerLogFile))
+		// Only write to file, NOT stdout
+		controllerLogger.SetOutput(controllerLogFile)
 		controllerLogger.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 		c.logger = controllerLogger.WithField("tag", c.tag)
 	}
@@ -108,6 +103,11 @@ func (c *TunnelController) Start() error {
 	c.forwarderLogFile, err = os.OpenFile(forwarderLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		c.logger.WithField("err", err).Warn("Failed to open forwarder log file")
+	}
+
+	// Auto-install missing binaries
+	if err := c.CheckAndInstallBinaries(); err != nil {
+		c.logger.WithField("err", err).Warn("Tunnel: Auto-installation failed, proceeding with existing binaries if possible")
 	}
 
 	// Fetch initial config
@@ -127,7 +127,7 @@ func (c *TunnelController) Start() error {
 	// Start background tasks
 	c.startTasks()
 
-	log.WithFields(log.Fields{
+	c.logger.WithFields(log.Fields{
 		"tag":         c.tag,
 		"tunnelCount": len(c.tunnels),
 	}).Info("Tunnel controller started")
@@ -139,7 +139,7 @@ func (c *TunnelController) Start() error {
 func (c *TunnelController) CheckAndInstallBinaries() error {
 	// Check Waterwall
 	if _, err := os.Stat(WaterwallBinary); os.IsNotExist(err) {
-		log.Info("WaterWall binary missing, attempting auto-installation...")
+		c.logger.Info("WaterWall binary missing, attempting auto-installation...")
 		if err := installer.InstallWaterwall(c.tunnelDir); err != nil {
 			return fmt.Errorf("failed to install WaterWall: %v", err)
 		}
@@ -147,17 +147,17 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 
 	// Check Gost
 	if _, err := os.Stat(GostBinary); os.IsNotExist(err) {
-		log.Info("Gost binary missing, attempting auto-installation...")
+		c.logger.Info("Gost binary missing, attempting auto-installation...")
 		if err := installer.InstallGost(); err != nil {
-			log.WithField("err", err).Warn("Gost auto-installation failed")
+			c.logger.WithField("err", err).Warn("Gost auto-installation failed")
 		}
 	}
 
 	// Check Nodepass
 	if _, err := os.Stat(NodepassBinary); os.IsNotExist(err) {
-		log.Info("NodePass binary missing, attempting auto-installation...")
+		c.logger.Info("NodePass binary missing, attempting auto-installation...")
 		if err := installer.InstallNodepass(); err != nil {
-			log.WithField("err", err).Warn("NodePass auto-installation failed")
+			c.logger.WithField("err", err).Warn("NodePass auto-installation failed")
 		}
 	}
 
@@ -166,14 +166,14 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 
 // Uninstall stops processes and removes tunnel directories/binaries
 func (c *TunnelController) Uninstall() error {
-	log.WithField("tag", c.tag).Info("Uninstalling tunnel components...")
+	c.logger.Info("Uninstalling tunnel components...")
 
 	// Stop everything first
 	c.Close()
 
 	// Remove tunnel directory
 	if err := os.RemoveAll(c.tunnelDir); err != nil {
-		log.WithField("err", err).Warn("Failed to remove tunnel directory")
+		c.logger.WithField("err", err).Warn("Failed to remove tunnel directory")
 	}
 
 	// Remove system binaries (optional, keep them if others might use them?)
@@ -181,7 +181,7 @@ func (c *TunnelController) Uninstall() error {
 	_ = os.Remove(GostBinary)
 	_ = os.Remove(NodepassBinary)
 
-	log.WithField("tag", c.tag).Info("Tunnel components uninstalled")
+	c.logger.Info("Tunnel components uninstalled")
 	return nil
 }
 
@@ -211,8 +211,6 @@ func (c *TunnelController) Close() error {
 
 	if c.logger != nil {
 		c.logger.Info("Tunnel controller closed")
-	} else {
-		log.WithField("tag", c.tag).Info("Tunnel controller closed")
 	}
 	return nil
 }
@@ -224,7 +222,7 @@ func (c *TunnelController) startTasks() {
 		Execute:  c.configMonitor,
 	}
 	_ = c.configMonitorPeriodic.Start(false)
-	log.WithField("node", c.tag).Info("Tunnel config monitor task started")
+	c.logger.Info("Tunnel config monitor task started")
 
 	// Status report task
 	c.statusReportPeriodic = &task.Task{
@@ -232,16 +230,13 @@ func (c *TunnelController) startTasks() {
 		Execute:  c.statusReport,
 	}
 	_ = c.statusReportPeriodic.Start(false)
-	log.WithField("node", c.tag).Info("Tunnel status report task started")
+	c.logger.Info("Tunnel status report task started")
 }
 
 func (c *TunnelController) configMonitor() error {
 	resp, err := c.apiClient.GetTunnelConfig()
 	if err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Tunnel: Get config failed")
+		c.logger.WithField("err", err).Error("Tunnel: Get config failed")
 		return nil
 	}
 
@@ -251,10 +246,7 @@ func (c *TunnelController) configMonitor() error {
 
 	// Re-apply config (handles changes)
 	if err := c.applyConfig(resp.Data); err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Tunnel: Apply config failed")
+		c.logger.WithField("err", err).Error("Tunnel: Apply config failed")
 	}
 
 	return nil
@@ -293,10 +285,7 @@ func (c *TunnelController) statusReport() error {
 			Tunnels: statuses,
 		})
 		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Warn("Tunnel: Report status failed")
+			c.logger.WithField("err", err).Warn("Tunnel: Report status failed")
 		}
 	}
 
@@ -343,8 +332,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	for _, t := range data.Tunnels {
 		for _, f := range t.Forwarders {
 			if err := c.startForwarder(t.Id, &f); err != nil {
-				log.WithFields(log.Fields{
-					"tag":       c.tag,
+				c.logger.WithFields(log.Fields{
 					"tunnelId":  t.Id,
 					"forwarder": f.ForwarderType,
 					"err":       err,
@@ -353,10 +341,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
-	log.WithFields(log.Fields{
-		"tag":         c.tag,
-		"tunnelCount": len(data.Tunnels),
-	}).Info("Tunnel config applied")
+	c.logger.WithField("tunnelCount", len(data.Tunnels)).Info("Tunnel config applied")
 
 	return nil
 }
