@@ -15,6 +15,7 @@ type Controller struct {
 	server                  *vCore.XrayCore
 	apiClient               *panel.ClientV1
 	tag                     string
+	protocolIndex           int // Index for duplicate protocol types (1, 2, 3...)
 	limiter                 *limiter.Limiter
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
@@ -27,10 +28,16 @@ type Controller struct {
 
 // NewController return a Node controller with default parameters.
 func NewController(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo) *Controller {
+	return NewControllerWithIndex(core, api, info, 1)
+}
+
+// NewControllerWithIndex creates a controller with a specific protocol index for unique tag generation
+func NewControllerWithIndex(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo, protocolIndex int) *Controller {
 	controller := &Controller{
-		server:    core,
-		apiClient: api,
-		info:      info,
+		server:        core,
+		apiClient:     api,
+		info:          info,
+		protocolIndex: protocolIndex,
 	}
 	return controller
 }
@@ -100,5 +107,10 @@ func (c *Controller) Close() error {
 }
 
 func (c *Controller) buildNodeTag(node *panel.NodeInfo) string {
+	if c.protocolIndex > 1 {
+		// Multiple protocols of same type: add index suffix
+		return fmt.Sprintf("[%s]-%s-%d:%d", c.apiClient.APIHost, node.Type, c.protocolIndex, node.Id)
+	}
+	// Single protocol of this type: use original format
 	return fmt.Sprintf("[%s]-%s:%d", c.apiClient.APIHost, node.Type, node.Id)
 }

@@ -38,11 +38,17 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	if pullinterval <= 0 {
 		pullinterval = 60
 	}
+	// Track protocol type counts for generating unique tags
+	protocolCounts := make(map[string]int)
 	for _, cfg := range *serverconfig.Data.Protocols {
 		nodeconfig := cfg
 		if !nodeconfig.Enable {
 			continue
 		}
+		// Increment protocol count for this type
+		protocolCounts[nodeconfig.Type]++
+		protocolIndex := protocolCounts[nodeconfig.Type]
+
 		n := &panel.NodeInfo{
 			Id:                     config.ApiConfig.ServerId,
 			Type:                   nodeconfig.Type,
@@ -89,7 +95,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"port": nodeconfig.Port,
 			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
 		} else {
-			node.xrayControllers = append(node.xrayControllers, NewController(core, p, n))
+			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex))
 		}
 	}
 
