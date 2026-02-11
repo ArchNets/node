@@ -143,6 +143,12 @@ func (w *WireGuardCore) Start() error {
 		return fmt.Errorf("failed to configure interface: %w", err)
 	}
 
+	// Setup NAT/Masquerading
+	if err := w.setupNAT(); err != nil {
+		log.WithError(err).Warn("Failed to setup NAT for WireGuard")
+		// We don't fail hard here, as basic connectivity might still work or be handled externally
+	}
+
 	w.running.Store(true)
 
 	// Start stats collector
@@ -170,6 +176,9 @@ func (w *WireGuardCore) Stop() error {
 	if w.statsCollector != nil {
 		w.statsCollector.stop()
 	}
+
+	// Remove NAT rules
+	w.teardownNAT()
 
 	// Delete the interface
 	if err := w.deleteInterface(); err != nil {
@@ -584,6 +593,96 @@ func (t *statsCollectorTask) run() {
 func (t *statsCollectorTask) stop() {
 	close(t.stopChan)
 	t.wg.Wait()
+}
+
+// setupNAT configures NAT/Masquerading for WireGuard traffic
+func (w *WireGuardCore) setupNAT() error {
+	// Enable IP forwarding (redundant but safe)
+	if err := execCommand("sysctl -w net.ipv4.ip_forward=1"); err != nil {
+		log.WithError(err).Warn("Failed to enable IP forwarding")
+	}
+
+	// Get default interface for internet access
+	defaultIface, err := getDefaultInterface()
+	if err != nil {
+		log.WithError(err).Warn("Failed to get default interface, defaulting to eth0")
+		defaultIface = "eth0"
+	}
+
+	// Calculate subnet for the MASQUERADE rule
+	_, ipnet, err := net.ParseCIDR(w.Address)
+	if err != nil {
+		return fmt.Errorf("invalid address for NAT: %w", err)
+	}
+	subnet := ipnet.String()
+
+	// 1. Allow forwarding
+	// We use -C to check if rule exists before appending to avoid duplicates
+	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+			log.WithError(err).Warn("Failed to add FORWARD input rule")
+		}
+	}
+	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+			log.WithError(err).Warn("Failed to add FORWARD output rule")
+		}
+	}
+
+	// 2. Enable Masquerading
+	// Rule: iptables -t nat -A POSTROUTING -s <subnet> -o <defaultIface> -j MASQUERADE
+	checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+	if err := execCommand(checkCmd); err != nil {
+		addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+		if err := execCommand(addCmd); err != nil {
+			return fmt.Errorf("failed to add MASQUERADE rule: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// teardownNAT removes NAT rules invoked by setupNAT
+func (w *WireGuardCore) teardownNAT() {
+	// We try to remove rules, ignoring errors if they don't exist
+
+	defaultIface, err := getDefaultInterface()
+	if err != nil {
+		defaultIface = "eth0"
+	}
+
+	_, ipnet, _ := net.ParseCIDR(w.Address)
+	var subnet string
+	if ipnet != nil {
+		subnet = ipnet.String()
+	}
+
+	if subnet != "" {
+		_ = execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
+	}
+
+	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
+}
+
+// getDefaultInterface returns the default network interface
+func getDefaultInterface() (string, error) {
+	// ip route show default 0.0.0.0/0
+	// Output format: default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.100 metric 100
+	cmd := exec.Command("ip", "route", "show", "default")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+
+	fields := strings.Fields(string(output))
+	for i, field := range fields {
+		if field == "dev" && i+1 < len(fields) {
+			return fields[i+1], nil
+		}
+	}
+
+	return "", fmt.Errorf("default interface not found")
 }
 
 // execCommand executes a shell command (helper for ip commands)
