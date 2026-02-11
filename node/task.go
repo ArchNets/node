@@ -154,47 +154,51 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
 		log.Print(err)
 	} else {
-		// always report online users, even if empty, to clear backend state
-		var result []panel.OnlineUser
-		if len(*onlineDevice) > 0 {
-			// only report user has traffic > 0 bytes to filter out ping tests
-			var nocountUID = make(map[int]struct{})
-			for _, traffic := range userTraffic {
-				total := traffic.Upload + traffic.Download
-				if total <= 0 {
-					nocountUID[traffic.UID] = struct{}{}
+		if c.isPrimaryReporter {
+			// always report online users, even if empty, to clear backend state
+			var result []panel.OnlineUser
+			if len(*onlineDevice) > 0 {
+				// only report user has traffic > 0 bytes to filter out ping tests
+				var nocountUID = make(map[int]struct{})
+				for _, traffic := range userTraffic {
+					total := traffic.Upload + traffic.Download
+					if total <= 0 {
+						nocountUID[traffic.UID] = struct{}{}
+					}
+				}
+				for _, online := range *onlineDevice {
+					if _, ok := nocountUID[online.UID]; !ok {
+						result = append(result, online)
+					}
 				}
 			}
-			for _, online := range *onlineDevice {
-				if _, ok := nocountUID[online.UID]; !ok {
-					result = append(result, online)
-				}
+			// Report even if result is empty to notify backend of disconnections
+			if err = c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Info("Report online users failed")
+			} else {
+				log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(*onlineDevice), len(result))
 			}
-		}
-		// Report even if result is empty to notify backend of disconnections
-		if err = c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report online users failed")
-		} else {
-			log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(*onlineDevice), len(result))
 		}
 	}
 
-	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
-	if err != nil {
-		log.Print(err)
-	}
-	err = c.apiClient.ReportNodeStatus(
-		&panel.NodeStatus{
-			CPU:    CPU,
-			Mem:    Mem,
-			Disk:   Disk,
-			Uptime: Uptime,
-		})
-	if err != nil {
-		log.Print(err)
+	if c.isPrimaryReporter {
+		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
+		if err != nil {
+			log.Print(err)
+		}
+		err = c.apiClient.ReportNodeStatus(
+			&panel.NodeStatus{
+				CPU:    CPU,
+				Mem:    Mem,
+				Disk:   Disk,
+				Uptime: Uptime,
+			})
+		if err != nil {
+			log.Print(err)
+		}
 	}
 
 	userTraffic = nil

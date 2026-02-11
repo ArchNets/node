@@ -24,20 +24,22 @@ type Controller struct {
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
 	onlineIpReportPeriodic  *task.Task
+	isPrimaryReporter       bool // true if this controller is responsible for reporting status/online users
 }
 
 // NewController return a Node controller with default parameters.
 func NewController(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo) *Controller {
-	return NewControllerWithIndex(core, api, info, 1)
+	return NewControllerWithIndex(core, api, info, 1, true)
 }
 
 // NewControllerWithIndex creates a controller with a specific protocol index for unique tag generation
-func NewControllerWithIndex(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo, protocolIndex int) *Controller {
+func NewControllerWithIndex(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *Controller {
 	controller := &Controller{
-		server:        core,
-		apiClient:     api,
-		info:          info,
-		protocolIndex: protocolIndex,
+		server:            core,
+		apiClient:         api,
+		info:              info,
+		protocolIndex:     protocolIndex,
+		isPrimaryReporter: isPrimaryReporter,
 	}
 	return controller
 }

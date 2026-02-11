@@ -23,14 +23,16 @@ type SSHController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	isPrimaryReporter       bool
 }
 
 // NewSSHController creates a new SSH controller
-func NewSSHController(apiClient *panel.ClientV1, info *panel.NodeInfo) *SSHController {
+func NewSSHController(apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *SSHController {
 	return &SSHController{
-		tag:       generateSSHTag(info),
-		info:      info,
-		apiClient: apiClient,
+		tag:               generateSSHTag(info),
+		info:              info,
+		apiClient:         apiClient,
+		isPrimaryReporter: isPrimaryReporter,
 	}
 }
 
@@ -234,29 +236,31 @@ func (c *SSHController) reportTask() error {
 		}
 	}
 
-	// Report online users
-	if err := c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Info("SSH: Report online users failed")
-	} else {
-		log.WithField("node", c.tag).Infof("SSH: Total %d online users, %d reported", len(onlineUsers), len(result))
-	}
+	if c.isPrimaryReporter {
+		// Report online users
+		if err := c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Info("SSH: Report online users failed")
+		} else {
+			log.WithField("node", c.tag).Infof("SSH: Total %d online users, %d reported", len(onlineUsers), len(result))
+		}
 
-	// Report node status
-	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
-	if err != nil {
-		log.Print(err)
-	}
-	err = c.apiClient.ReportNodeStatus(&panel.NodeStatus{
-		CPU:    CPU,
-		Mem:    Mem,
-		Disk:   Disk,
-		Uptime: Uptime,
-	})
-	if err != nil {
-		log.Print(err)
+		// Report node status
+		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
+		if err != nil {
+			log.Print(err)
+		}
+		err = c.apiClient.ReportNodeStatus(&panel.NodeStatus{
+			CPU:    CPU,
+			Mem:    Mem,
+			Disk:   Disk,
+			Uptime: Uptime,
+		})
+		if err != nil {
+			log.Print(err)
+		}
 	}
 
 	return nil

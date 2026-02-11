@@ -445,6 +445,17 @@ func (w *WireGuardCore) assignIP(id int) string {
 		return ""
 	}
 
+	// Parse the base IP from the configuration
+	baseIP, _, err := net.ParseCIDR(w.Address)
+	if err != nil {
+		// Fallback to safe default if address is invalid (should be caught earlier)
+		baseIP = net.ParseIP("10.0.0.1")
+	}
+	baseIP = baseIP.To4()
+	if baseIP == nil {
+		return ""
+	}
+
 	// Algorithm matches Backend's calculateWireGuardIP
 	// 0-based index
 	index := int64(id) - 1
@@ -452,20 +463,32 @@ func (w *WireGuardCore) assignIP(id int) string {
 	// Constants
 	hostsPerSubnet := int64(127) // 2 to 254, even numbers only
 
-	// Calculate D index and overflow to C/B
+	// Calculate offset indices
 	dIndex := index % hostsPerSubnet
 	upperIndex := index / hostsPerSubnet
 
-	byteC := upperIndex % 256
-	byteB := (upperIndex / 256) % 256
+	cOffset := upperIndex % 256
+	bOffset := (upperIndex / 256) % 256
 
-	// Calculate actual byte D: (0->2, 1->4, ..., 126->254)
+	// Calculate octet values relative to base IP
+	// We add the offset to the base IP components
+
+	// Byte D (4th octet): 2, 4, ..., 254
+	// This logic reset the last octet, ignoring the base IP's last octet
+	// This is intentional to ensure even numbering relative to x.x.x.0
 	byteD := (dIndex * 2) + 2
 
-	// We assume the base network is compatible with 10.x.x.x structure.
-	// In the future, if we need to support non-10.x networks, we should add base IP math here.
-	// For now, using logic strict to the requirement.
-	return fmt.Sprintf("10.%d.%d.%d", byteB, byteC, byteD)
+	// Byte C (3rd octet): Base[2] + offset
+	valC := int(baseIP[2]) + int(cOffset)
+	extraB := valC / 256
+	byteC := valC % 256
+
+	// Byte B (2nd octet): Base[1] + offset + overflow from C
+	valB := int(baseIP[1]) + int(bOffset) + extraB
+	// We do not handle overflow from B to A here as /8 is the max reasonable size
+	byteB := valB % 256
+
+	return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], byteB, byteC, byteD)
 }
 
 // collectStats collects traffic statistics from WireGuard

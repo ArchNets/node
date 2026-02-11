@@ -25,14 +25,16 @@ type ShadowTLSController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	isPrimaryReporter       bool
 }
 
 // NewShadowTLSController creates a new ShadowTLS controller
-func NewShadowTLSController(apiClient *panel.ClientV1, info *panel.NodeInfo) *ShadowTLSController {
+func NewShadowTLSController(apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *ShadowTLSController {
 	return &ShadowTLSController{
-		tag:       generateShadowTLSTag(info),
-		info:      info,
-		apiClient: apiClient,
+		tag:               generateShadowTLSTag(info),
+		info:              info,
+		apiClient:         apiClient,
+		isPrimaryReporter: isPrimaryReporter,
 	}
 }
 
@@ -241,27 +243,29 @@ func (c *ShadowTLSController) reportTask() error {
 	// Get online users from ShadowTLS core
 	onlineUsers := c.shadowtlsCore.GetOnlineUsers()
 
-	// Report online users
-	if err := c.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Info("ShadowTLS: Report online users failed")
-	}
+	if c.isPrimaryReporter {
+		// Report online users
+		if err := c.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Info("ShadowTLS: Report online users failed")
+		}
 
-	// Report node status
-	CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
-	if err != nil {
-		log.Print(err)
-	}
-	err = c.apiClient.ReportNodeStatus(&panel.NodeStatus{
-		CPU:    CPU,
-		Mem:    Mem,
-		Disk:   Disk,
-		Uptime: Uptime,
-	})
-	if err != nil {
-		log.Print(err)
+		// Report node status
+		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
+		if err != nil {
+			log.Print(err)
+		}
+		err = c.apiClient.ReportNodeStatus(&panel.NodeStatus{
+			CPU:    CPU,
+			Mem:    Mem,
+			Disk:   Disk,
+			Uptime: Uptime,
+		})
+		if err != nil {
+			log.Print(err)
+		}
 	}
 
 	return nil

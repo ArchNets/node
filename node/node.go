@@ -40,6 +40,9 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	}
 	// Track protocol type counts for generating unique tags
 	protocolCounts := make(map[string]int)
+	// Track created clients for reuse
+	clientMap := make(map[string]*panel.ClientV1)
+
 	for _, cfg := range *serverconfig.Data.Protocols {
 		nodeconfig := cfg
 		if !nodeconfig.Enable {
@@ -57,25 +60,45 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 			PullInterval:           pullinterval,
 			Protocol:               &nodeconfig,
 		}
-		p, err := panel.NewClientV1(&conf.NodeApiConfig{
-			APIHost:   config.ApiConfig.ApiHost,
-			NodeType:  nodeconfig.Type,
-			NodeID:    config.ApiConfig.ServerId,
-			SecretKey: config.ApiConfig.SecretKey,
-		})
-		if err != nil {
-			return nil, err
+
+		var p *panel.ClientV1
+		var err error
+		isPrimaryReporter := false
+
+		// Check if we already have a client for this protocol type
+		if existingClient, ok := clientMap[nodeconfig.Type]; ok {
+			p = existingClient
+			// Use existing client, so this is NOT the primary reporter
+			isPrimaryReporter = false
+			log.WithFields(log.Fields{
+				"type": nodeconfig.Type,
+				"port": nodeconfig.Port,
+			}).Info("Reusing existing client for protocol")
+		} else {
+			// Create new client
+			p, err = panel.NewClientV1(&conf.NodeApiConfig{
+				APIHost:   config.ApiConfig.ApiHost,
+				NodeType:  nodeconfig.Type,
+				NodeID:    config.ApiConfig.ServerId,
+				SecretKey: config.ApiConfig.SecretKey,
+			})
+			if err != nil {
+				return nil, err
+			}
+			// This is the first client for this type, so it IS the primary reporter
+			clientMap[nodeconfig.Type] = p
+			isPrimaryReporter = true
 		}
 
 		// Handle SSH protocol separately
 		if nodeconfig.Type == "ssh" {
-			node.sshControllers = append(node.sshControllers, NewSSHController(p, n))
+			node.sshControllers = append(node.sshControllers, NewSSHController(p, n, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "ssh",
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
 		} else if nodeconfig.Type == "wireguard" {
-			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(p, n))
+			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(p, n, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "wireguard",
 				"port": nodeconfig.Port,
@@ -89,13 +112,13 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 
 			// Update n.Protocol to point to our local safe copy to avoid loop variable issues
 			n.Protocol = &cfg
-			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n))
+			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "shadowtls",
 				"port": nodeconfig.Port,
 			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
 		} else {
-			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex))
+			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter))
 		}
 	}
 
