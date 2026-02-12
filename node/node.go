@@ -20,6 +20,7 @@ type Node struct {
 	sshControllers       []*SSHController
 	shadowtlsControllers []*ShadowTLSController
 	wireguardControllers []*WireGuardController
+	amneziawgControllers []*AmneziaWGController
 	tunnelController     *TunnelController
 }
 
@@ -29,6 +30,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		sshControllers:       make([]*SSHController, 0),
 		shadowtlsControllers: make([]*ShadowTLSController, 0),
 		wireguardControllers: make([]*WireGuardController, 0),
+		amneziawgControllers: make([]*AmneziaWGController, 0),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -103,6 +105,12 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"type": "wireguard",
 				"port": nodeconfig.Port,
 			}).Info("WireGuard protocol detected, using WireGuard controller")
+		} else if nodeconfig.Type == "amneziawg" {
+			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(p, n, isPrimaryReporter))
+			log.WithFields(log.Fields{
+				"type": "amneziawg",
+				"port": nodeconfig.Port,
+			}).Info("AmneziaWG protocol detected, using AmneziaWG controller")
 		} else if nodeconfig.Type == "shadowtls" {
 			// FIX: Create a local copy to ensure pointer safety (though Go 1.22+ handles loop vars)
 			cfg := nodeconfig
@@ -168,6 +176,16 @@ func (n *Node) Start() error {
 		}
 	}
 
+	// Start AmneziaWG controllers
+	for i := range n.amneziawgControllers {
+		err := n.amneziawgControllers[i].Start()
+		if err != nil {
+			return fmt.Errorf("failed to start amneziawg node [%s]: %s",
+				n.amneziawgControllers[i].tag,
+				err)
+		}
+	}
+
 	// Start Tunnel controller
 	if n.tunnelController != nil {
 		err := n.tunnelController.Start()
@@ -217,6 +235,15 @@ func (n *Node) Close() {
 		}
 	}
 	n.wireguardControllers = nil
+
+	// Close AmneziaWG controllers
+	for _, c := range n.amneziawgControllers {
+		err := c.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing AmneziaWG controller")
+		}
+	}
+	n.amneziawgControllers = nil
 
 	// Close Tunnel controller
 	if n.tunnelController != nil {

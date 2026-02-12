@@ -114,6 +114,17 @@ type Protocol struct {
 	WireguardAddress    string `json:"wireguard_address"`     // Server IP and subnet (e.g., 10.0.0.1/24)
 	WireguardMTU        int    `json:"wireguard_mtu"`         // MTU size (default: 1420)
 	WireguardDNS        string `json:"wireguard_dns"`         // DNS servers (e.g., 1.1.1.1,8.8.8.8)
+
+	// AmneziaWG-specific fields
+	AmneziaJc   int `json:"amnezia_jc"`
+	AmneziaJmin int `json:"amnezia_jmin"`
+	AmneziaJmax int `json:"amnezia_jmax"`
+	AmneziaS1   int `json:"amnezia_s1"`
+	AmneziaS2   int `json:"amnezia_s2"`
+	AmneziaH1   int `json:"amnezia_h1"`
+	AmneziaH2   int `json:"amnezia_h2"`
+	AmneziaH3   int `json:"amnezia_h3"`
+	AmneziaH4   int `json:"amnezia_h4"`
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
