@@ -175,10 +175,10 @@ install_base() {
             echo "Installing EPEL repository..."
             yum install -y epel-release >/dev/null 2>&1
         fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools
+        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools kernel-devel kernel-headers
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools
+        need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools linux-headers
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
         need_install_apt wget curl unzip tar cron socat ca-certificates pv amneziawg-tools amneziawg-dkms wireguard-tools "linux-headers-$(uname -r)"
@@ -193,7 +193,7 @@ install_base() {
         pacman -Sy --noconfirm >/dev/null 2>&1
         # --needed skips already installed packages; very efficient
         echo "Installing required packages..."
-        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv wireguard-tools >/dev/null 2>&1
+        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv wireguard-tools linux-headers >/dev/null 2>&1
     fi
 }
 
