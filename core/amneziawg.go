@@ -291,8 +291,8 @@ func (w *AmneziaWGCore) configureInterface() error {
 	}
 
 	// 2. Set Amnezia params
-	// awg set <iface> Jc <jc> Jmin <jmin> Jmax <jmax> S1 <s1> S2 <s2> H1 <h1> H2 <h2> H3 <h3> H4 <h4>
-	amneziaCmd := fmt.Sprintf("awg set %s Jc %d Jmin %d Jmax %d S1 %d S2 %d H1 %d H2 %d H3 %d H4 %d",
+	// awg set <iface> jc <jc> jmin <jmin> jmax <jmax> s1 <s1> s2 <s2> h1 <h1> h2 <h2> h3 <h3> h4 <h4>
+	amneziaCmd := fmt.Sprintf("awg set %s jc %d jmin %d jmax %d s1 %d s2 %d h1 %d h2 %d h3 %d h4 %d",
 		w.InterfaceName, w.Jc, w.Jmin, w.Jmax, w.S1, w.S2, w.H1, w.H2, w.H3, w.H4)
 
 	if err := execCommand(amneziaCmd); err != nil {
