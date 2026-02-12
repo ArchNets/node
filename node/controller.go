@@ -1,7 +1,6 @@
 package node
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/archnets/node/api/panel"
@@ -50,10 +49,11 @@ func (c *Controller) Start() error {
 	// Update user
 	c.userList, err = c.apiClient.GetUserList()
 	if err != nil {
-		return fmt.Errorf("get user list error: %s", err)
+		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
+		c.userList = []panel.UserInfo{}
 	}
 	if len(c.userList) == 0 {
-		return errors.New("add users error: not have any user")
+		log.Warn("User list is empty, node started with no users")
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive()
 	if err != nil {

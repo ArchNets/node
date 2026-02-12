@@ -33,33 +33,39 @@ type AliveMap struct {
 }
 
 func (c *ClientV1) GetUserList() ([]UserInfo, error) {
+	c.userMu.Lock()
+	defer c.userMu.Unlock()
+
 	const p = "/v1/server/user"
 	r, err := c.Client.R().
 		SetHeader("If-None-Match", c.userEtag).
 		ForceContentType("application/json").
 		SetDoNotParseResponse(true).
 		Get(p)
+	if err != nil {
+		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
+	}
 	if r == nil || r.RawResponse == nil {
 		return nil, fmt.Errorf("server response is empty")
 	}
 	defer r.RawResponse.Body.Close()
 
 	if r.StatusCode() == 304 {
-		return nil, nil
+		return c.UserList.Users, nil
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
-	}
 	if r.StatusCode() >= 400 {
 		body := r.Body()
 		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
 	}
+
 	userlist := &UserListBody{}
 	if err := json.NewDecoder(r.RawResponse.Body).Decode(userlist); err != nil {
 		return nil, fmt.Errorf("failed to decode user list: %w", err)
 	}
+
 	c.userEtag = r.Header().Get("ETag")
+	c.UserList = userlist
 	return userlist.Users, nil
 }
 

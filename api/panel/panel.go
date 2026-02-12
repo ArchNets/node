@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -20,6 +21,7 @@ type ClientV1 struct {
 	NodeType  string
 	NodeId    int
 	userEtag  string
+	userMu    sync.RWMutex
 	UserList  *UserListBody
 	AliveMap  *AliveMap
 }
@@ -79,8 +81,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		APIHost:   c.APIHost,
 		NodeType:  c.NodeType,
 		NodeId:    c.NodeID,
-		UserList:  &UserListBody{},
-		AliveMap:  &AliveMap{},
+		UserList:  &UserListBody{Users: make([]UserInfo, 0)},
+		AliveMap:  &AliveMap{Alive: make(map[int]int)},
 	}, nil
 }
 
