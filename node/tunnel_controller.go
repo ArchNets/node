@@ -490,6 +490,21 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 			return fmt.Errorf("failed to detect gateway MAC: %v", err)
 		}
 
+		// Start Paqet
+		transportPort := c.extractPaqetPort(f.Config)
+		role := c.extractPaqetRole(f.Config)
+
+		// Determine bind port for network block
+		// Client (Entry): 0 (ephemeral)
+		// Server (Exit): transportPort
+		bindPort := 0
+		if role == "server" {
+			bindPort = transportPort
+		}
+
+		// Setup firewall rules first (always on transport port)
+		c.setupPaqetFirewall(transportPort)
+
 		networkBlock := fmt.Sprintf(`
 network:
   interface: "%s"
@@ -500,7 +515,7 @@ network:
     local_flag: ["PA"]
     pcap:
       sockbuf: 8388608
-`, iface, localIP, f.ListenPort, gatewayMAC)
+`, iface, localIP, bindPort, gatewayMAC)
 
 		// Merge config
 		fullConfig := f.Config + "\n" + networkBlock
@@ -512,13 +527,8 @@ network:
 			return fmt.Errorf("failed to write paqet config: %v", err)
 		}
 
-		// Start Paqet
-		transportPort := c.extractPaqetPort(f.Config)
-		// Setup firewall rules first
-		c.setupPaqetFirewall(transportPort)
-
-		// paqet -c config_file
-		cmd = exec.Command(PaqetBinary, "-c", configPath)
+		// paqet run -c config_file
+		cmd = exec.Command(PaqetBinary, "run", "-c", configPath)
 
 	default:
 		return fmt.Errorf("unknown forwarder type: %s", f.ForwarderType)
@@ -657,4 +667,20 @@ func (c *TunnelController) extractPaqetPort(config string) int {
 		}
 	}
 	return 0
+}
+
+// extractPaqetRole parses the partial YAML to find the role
+func (c *TunnelController) extractPaqetRole(config string) string {
+	lines := strings.Split(config, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "role:") {
+			parts := strings.Split(trimmed, ":")
+			if len(parts) >= 2 {
+				val := strings.TrimSpace(parts[1])
+				return strings.Trim(val, `"'`)
+			}
+		}
+	}
+	return ""
 }
