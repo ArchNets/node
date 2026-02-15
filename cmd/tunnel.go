@@ -51,6 +51,19 @@ var tunnelStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start tunnel nodes",
 	Run: func(cmd *cobra.Command, args []string) {
+		// Prevent multiple controllers from running
+		if pidContent, err := os.ReadFile(TunnelPidFile); err == nil {
+			pid, err := strconv.Atoi(string(pidContent))
+			if err == nil {
+				// Check if process is still alive
+				if process, err := os.FindProcess(pid); err == nil {
+					if err := process.Signal(syscall.Signal(0)); err == nil {
+						log.Fatalf("Tunnel controller already running (PID %d). Stop it first with 'node tunnel-stop'.", pid)
+					}
+				}
+			}
+		}
+
 		c := loadConfig()
 		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
 		if err := tc.Start(); err != nil {

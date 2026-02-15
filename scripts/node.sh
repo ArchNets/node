@@ -518,6 +518,17 @@ tunnel_install() {
 }
 
 tunnel_start() {
+    # Check if a controller is already running
+    if [[ -f /var/run/archnets-tunnel.pid ]]; then
+        local pid=$(cat /var/run/archnets-tunnel.pid)
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "${red}Tunnel controller already running (PID $pid). Stop it first with 'node tunnel-stop'.${plain}"
+            if [[ $# == 0 ]]; then
+                before_show_menu
+            fi
+            return 1
+        fi
+    fi
     echo -e "${green}Starting tunnel nodes...${plain}"
     nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
     sleep 2
@@ -530,6 +541,10 @@ tunnel_start() {
 tunnel_stop() {
     echo -e "${green}Stopping tunnel processes...${plain}"
     /usr/local/archnets/node tunnel stop
+    # Also kill any orphaned forwarder processes
+    killall -9 paqet 2>/dev/null
+    killall -9 gost 2>/dev/null
+    killall -9 nodepass 2>/dev/null
     if [[ $? == 0 ]]; then
         echo -e "${green}Tunnel processes stopped successfully${plain}"
     else
@@ -543,8 +558,11 @@ tunnel_stop() {
 tunnel_restart() {
     echo -e "${green}Restarting tunnel nodes...${plain}"
     /usr/local/archnets/node tunnel stop 2>/dev/null
+    killall -9 paqet 2>/dev/null
+    killall -9 gost 2>/dev/null
+    killall -9 nodepass 2>/dev/null
     sleep 1
-    /usr/local/archnets/node tunnel start &
+    nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
     sleep 2
     echo -e "${green}Tunnel nodes restarted${plain}"
     if [[ $# == 0 ]]; then
