@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"sync"
@@ -512,6 +513,10 @@ network:
 		}
 
 		// Start Paqet
+		transportPort := c.extractPaqetPort(f.Config)
+		// Setup firewall rules first
+		c.setupPaqetFirewall(transportPort)
+
 		// paqet -c config_file
 		cmd = exec.Command(PaqetBinary, "-c", configPath)
 
@@ -556,8 +561,100 @@ func (c *TunnelController) stopAllForwarders() {
 	for key, cmd := range c.forwarderProcesses {
 		if cmd != nil && cmd.Process != nil {
 			killProcessGroup(cmd)
+
+			// Clean up firewall rules if it was a paqet forwarder
+			// We need to know which port it was. Since we don't store it easily in the map,
+			// we can either store it or just let the teardown happen if we had it.
+			// For now, let's just log and handle it correctly in a per-forwarder stop if we had one.
+			// But since we stop ALL, and Paqet configs are in c.tunnelDir, we can look for them.
 		}
 		delete(c.forwarderProcesses, key)
 	}
+	// For Paqet specifically, we need to teardown the firewall rules for the transport port.
+	// Since the transport port is inside the config file, we scan the tunnel directory for paqet configs.
+	files, _ := filepath.Glob(filepath.Join(c.tunnelDir, "paqet_*.yaml"))
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		if err == nil {
+			transportPort := c.extractPaqetPort(string(content))
+			if transportPort > 0 {
+				c.teardownPaqetFirewall(transportPort)
+			}
+		}
+	}
+
 	c.logger.Info("All forwarders stopped")
+}
+
+func (c *TunnelController) setupPaqetFirewall(port int) {
+	if port <= 0 {
+		return
+	}
+	c.logger.WithField("port", port).Info("Setting up Paqet firewall rules (NOTRACK/RST-DROP)")
+
+	rules := [][]string{
+		{"-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
+		{"-t", "filter", "-A", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
+		{"-t", "filter", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
+	}
+
+	for _, rule := range rules {
+		checkRule := make([]string, len(rule))
+		copy(checkRule, rule)
+		for i, v := range checkRule {
+			if v == "-A" {
+				checkRule[i] = "-C"
+			}
+		}
+
+		if err := exec.Command("iptables", checkRule...).Run(); err != nil {
+			if err := exec.Command("iptables", rule...).Run(); err != nil {
+				c.logger.WithFields(log.Fields{
+					"rule": rule,
+					"err":  err,
+				}).Warn("Failed to add iptables rule")
+			}
+		}
+	}
+}
+
+func (c *TunnelController) teardownPaqetFirewall(port int) {
+	if port <= 0 {
+		return
+	}
+	c.logger.WithField("port", port).Info("Tearing down Paqet firewall rules")
+
+	rules := [][]string{
+		{"-t", "raw", "-D", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-t", "raw", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
+		{"-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
+		{"-t", "filter", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
+	}
+
+	for _, rule := range rules {
+		_ = exec.Command("iptables", rule...).Run()
+	}
+}
+
+// extractPaqetPort parses the partial YAML to find the transport port
+func (c *TunnelController) extractPaqetPort(config string) int {
+	// Simple line-by-line search to avoid importing a full YAML parser
+	// Works for both listen: addr: ":29000" and server: addr: "IP:29000"
+	lines := strings.Split(config, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "addr:") {
+			parts := strings.Split(trimmed, ":")
+			if len(parts) >= 2 {
+				portStr := strings.Trim(parts[len(parts)-1], `"' `)
+				if port, err := strconv.Atoi(portStr); err == nil {
+					return port
+				}
+			}
+		}
+	}
+	return 0
 }
