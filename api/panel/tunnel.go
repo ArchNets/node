@@ -42,7 +42,8 @@ type Forwarder struct {
 	ListenPort    int    `json:"listen_port"`
 	TargetIP      string `json:"target_ip"`
 	TargetPort    int    `json:"target_port"`
-	ForwarderType string `json:"forwarder_type"` // "gost" or "nodepass"
+	ForwarderType string `json:"forwarder_type"` // "gost", "nodepass", "paqet"
+	Config        string `json:"config"`         // Partial Paqet config
 }
 
 // TunnelStatusRequest is the request body for POST /v2/server/:server_id/tunnel/status

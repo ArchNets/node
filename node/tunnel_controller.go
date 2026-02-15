@@ -18,12 +18,19 @@ import (
 )
 
 const (
-	TunnelDir         = "/etc/archnets/tunnel"
-	WaterwallBinary   = "/etc/archnets/tunnel/Waterwall"
-	GostBinary        = "/usr/local/bin/gost"
-	NodepassBinary    = "/usr/local/bin/nodepass"
-	CoreConfigFile    = "core.json"
-	TunnelConfigFmt   = "tunnel_%d.json"
+	TunnelDir       = "/etc/archnets/tunnel"
+	GostBinary      = "/usr/local/bin/gost"
+	NodepassBinary  = "/usr/local/bin/nodepass"
+	CoreConfigFile  = "core.json"
+	TunnelConfigFmt = "tunnel_%d.json"
+)
+
+var (
+	PaqetBinary     = "/usr/local/bin/paqet"
+	WaterwallBinary = "/etc/archnets/tunnel/Waterwall"
+)
+
+const (
 	ConfigPollSeconds = 60
 	StatusPushSeconds = 30
 	ControllerLogFile = "controller.log"
@@ -164,6 +171,14 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 		}
 	}
 
+	// Check Paqet
+	if _, err := os.Stat(PaqetBinary); os.IsNotExist(err) {
+		c.logger.Info("Paqet binary missing, attempting auto-installation...")
+		if err := installer.InstallPaqet(); err != nil {
+			c.logger.WithField("err", err).Warn("Paqet auto-installation failed")
+		}
+	}
+
 	return nil
 }
 
@@ -183,6 +198,7 @@ func (c *TunnelController) Uninstall() error {
 	// User said "deleting everything too", so we remove them.
 	_ = os.Remove(GostBinary)
 	_ = os.Remove(NodepassBinary)
+	_ = os.Remove(PaqetBinary)
 
 	c.logger.Info("Tunnel components uninstalled")
 	return nil
@@ -451,6 +467,53 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		// nodepass client://0.0.0.0:listen_port/target_ip:target_port
 		target := fmt.Sprintf("client://0.0.0.0:%d/%s:%d", f.ListenPort, f.TargetIP, f.TargetPort)
 		cmd = exec.Command(NodepassBinary, target)
+
+	case "paqet":
+		if _, err := os.Stat(PaqetBinary); os.IsNotExist(err) {
+			return fmt.Errorf("paqet binary not found at %s", PaqetBinary)
+		}
+
+		// Detect network details
+		iface, err := GetDefaultInterface()
+		if err != nil {
+			return fmt.Errorf("failed to detect default interface: %v", err)
+		}
+
+		localIP, err := GetLocalIP(iface)
+		if err != nil {
+			return fmt.Errorf("failed to detect local IP: %v", err)
+		}
+
+		gatewayMAC, err := GetGatewayMAC()
+		if err != nil {
+			return fmt.Errorf("failed to detect gateway MAC: %v", err)
+		}
+
+		networkBlock := fmt.Sprintf(`
+network:
+  interface: "%s"
+  ipv4:
+    addr: "%s:%d"
+    router_mac: "%s"
+  tcp:
+    local_flag: ["PA"]
+    pcap:
+      sockbuf: 8388608
+`, iface, localIP, f.ListenPort, gatewayMAC)
+
+		// Merge config
+		fullConfig := f.Config + "\n" + networkBlock
+
+		// Write config file
+		configFilename := fmt.Sprintf("paqet_%d.yaml", f.ListenPort)
+		configPath := filepath.Join(c.tunnelDir, configFilename)
+		if err := os.WriteFile(configPath, []byte(fullConfig), 0644); err != nil {
+			return fmt.Errorf("failed to write paqet config: %v", err)
+		}
+
+		// Start Paqet
+		// paqet -c config_file
+		cmd = exec.Command(PaqetBinary, "-c", configPath)
 
 	default:
 		return fmt.Errorf("unknown forwarder type: %s", f.ForwarderType)

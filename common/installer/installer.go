@@ -66,6 +66,27 @@ func getLatestNodepassVersion() (string, error) {
 	return version, nil
 }
 
+// getLatestPaqetVersion fetches the latest version tag from GitHub API
+func getLatestPaqetVersion() (string, error) {
+	resp, err := http.Get("https://api.github.com/repos/hanselime/paqet/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	return release.TagName, nil
+}
+
 // detectWaterwallVariant detects the appropriate WaterWall variant for this system
 // Returns: "clang-x64", "gcc-x64-old-cpu", or "gcc-arm64"
 func detectWaterwallVariant() string {
@@ -205,6 +226,188 @@ func InstallNodepass() error {
 	// Actually Nodepass tar.gz contains multiple files. We need the one named 'nodepass'
 	// I'll implement a helper to extract a specific file from tar.gz
 	return ExtractFromTarGz(tarGzPath, "nodepass", dest)
+}
+
+// InstallPaqet downloads and installs Paqet to /usr/local/bin
+func InstallPaqet() error {
+	dest := "/usr/local/bin/paqet"
+	log.Infof("Installing Paqet to %s", dest)
+
+	version, err := getLatestPaqetVersion()
+	if err != nil {
+		log.Warnf("Failed to fetch latest Paqet version, using fallback: %v", err)
+		version = "v1.0.0"
+	}
+
+	// Detect architecture
+	var archName string
+	switch runtime.GOARCH {
+	case "amd64":
+		archName = "amd64"
+	case "arm64":
+		archName = "arm64"
+	case "arm":
+		archName = "arm32"
+	case "386":
+		archName = "386"
+	default:
+		return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
+	}
+
+	// URL format: https://github.com/hanselime/paqet/releases/download/${version}/paqet-linux-${arch}-${version}.tar.gz
+	filename := fmt.Sprintf("paqet-linux-%s-%s.tar.gz", archName, version)
+	downloadURL := fmt.Sprintf("https://github.com/hanselime/paqet/releases/download/%s/%s", version, filename)
+
+	log.Infof("Downloading Paqet %s from %s", version, downloadURL)
+
+	tarGzPath := dest + ".tar.gz"
+	if err := DownloadFile(downloadURL, tarGzPath); err != nil {
+		return err
+	}
+	defer os.Remove(tarGzPath)
+
+	// Extract to temp dir to find the binary
+	tmpDir, err := os.MkdirTemp("", "paqet-install-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := UntarGz(tarGzPath, tmpDir); err != nil {
+		return fmt.Errorf("failed to extract paqet archive: %v", err)
+	}
+
+	// Find binary
+	// Script looks for paqet_${os}_${arch} or paqet
+	possibleNames := []string{
+		fmt.Sprintf("paqet_linux_%s", archName),
+		"paqet",
+	}
+
+	var foundPath string
+
+	// First check direct matches in root of extraction
+	for _, name := range possibleNames {
+		p := filepath.Join(tmpDir, name)
+		if _, err := os.Stat(p); err == nil {
+			foundPath = p
+			break
+		}
+	}
+
+	// If not found, search recursively (like 'find' in the script)
+	if foundPath == "" {
+		err = filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+			if foundPath != "" {
+				return filepath.SkipDir // Stop if found
+			}
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+
+			name := info.Name()
+			if name == "paqet" || name == fmt.Sprintf("paqet_linux_%s", archName) {
+				foundPath = path
+				return filepath.SkipDir
+			}
+			return nil
+		})
+		if err != nil {
+			log.Warnf("Error walking temp dir: %v", err)
+		}
+	}
+
+	if foundPath == "" {
+		return fmt.Errorf("paqet binary not found in downloaded archive")
+	}
+
+	// Move to dest
+	// Check if dest exists
+	if _, err := os.Stat(dest); err == nil {
+		os.Remove(dest)
+	}
+
+	if err := CopyFile(foundPath, dest); err != nil {
+		return err
+	}
+
+	return os.Chmod(dest, 0755)
+}
+
+// CopyFile copies a file from src to dst
+func CopyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+// UntarGz extracts a .tar.gz file to a destination directory
+func UntarGz(src string, dest string) error {
+	file, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	gr, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		target := filepath.Join(dest, header.Name)
+
+		// Prevent Zip Slip
+		if !strings.HasPrefix(target, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal file path: %s", target)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		}
+	}
+	return nil
 }
 
 // DownloadFile downloads a URL to a local file
