@@ -1,6 +1,8 @@
 package node
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -47,12 +49,14 @@ type TunnelController struct {
 	tunnelDir             string
 	waterwallProcess      *exec.Cmd
 	forwarderProcesses    map[int]*exec.Cmd // tunnel_id -> forwarder process
+	forwarderMu           sync.Mutex
 	tunnels               []panel.TunnelInfo
 	configMonitorPeriodic *task.Task
 	statusReportPeriodic  *task.Task
 	logger                *log.Entry
 	waterwallLogFile      *os.File
 	forwarderLogFile      *os.File
+	lastConfigHash        string
 	waterwallWg           sync.WaitGroup
 }
 
@@ -134,6 +138,11 @@ func (c *TunnelController) Start() error {
 	if err := c.applyConfig(resp.Data); err != nil {
 		return fmt.Errorf("failed to apply tunnel config: %v", err)
 	}
+
+	// Set initial config hash so configMonitor doesn't re-apply immediately
+	configJSON, _ := json.Marshal(resp.Data)
+	hash := sha256.Sum256(configJSON)
+	c.lastConfigHash = hex.EncodeToString(hash[:])
 
 	// Start background tasks
 	c.startTasks()
@@ -264,11 +273,24 @@ func (c *TunnelController) configMonitor() error {
 		return nil
 	}
 
+	// Compute config hash to detect changes
+	configJSON, _ := json.Marshal(resp.Data)
+	hash := sha256.Sum256(configJSON)
+	configHash := hex.EncodeToString(hash[:])
+
+	if configHash == c.lastConfigHash {
+		return nil // No changes, skip re-apply
+	}
+
+	c.logger.Info("Tunnel config changed, re-applying...")
+
 	// Re-apply config (handles changes)
 	if err := c.applyConfig(resp.Data); err != nil {
 		c.logger.WithField("err", err).Error("Tunnel: Apply config failed")
+		return nil
 	}
 
+	c.lastConfigHash = configHash
 	return nil
 }
 
@@ -505,6 +527,13 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		// Setup firewall rules first (always on transport port)
 		c.setupPaqetFirewall(transportPort)
 
+		// Build TCP flags section based on role
+		tcpFlags := `    local_flag: ["PA"]`
+		if role == "client" {
+			tcpFlags = `    local_flag: ["PA"]
+    remote_flag: ["PA"]`
+		}
+
 		networkBlock := fmt.Sprintf(`
 network:
   interface: "%s"
@@ -512,10 +541,10 @@ network:
     addr: "%s:%d"
     router_mac: "%s"
   tcp:
-    local_flag: ["PA"]
+%s
     pcap:
       sockbuf: 8388608
-`, iface, localIP, bindPort, gatewayMAC)
+`, iface, localIP, bindPort, gatewayMAC, tcpFlags)
 
 		// Merge config
 		fullConfig := f.Config + "\n" + networkBlock
@@ -548,12 +577,16 @@ network:
 
 	// Use composite key for multiple forwarders per tunnel
 	key := tunnelId*10000 + f.ListenPort
+	c.forwarderMu.Lock()
 	c.forwarderProcesses[key] = cmd
+	c.forwarderMu.Unlock()
 
 	// Monitor process in background
 	go func() {
 		cmd.Wait()
+		c.forwarderMu.Lock()
 		delete(c.forwarderProcesses, key)
+		c.forwarderMu.Unlock()
 	}()
 
 	c.logger.WithFields(log.Fields{
@@ -568,18 +601,14 @@ network:
 }
 
 func (c *TunnelController) stopAllForwarders() {
+	c.forwarderMu.Lock()
 	for key, cmd := range c.forwarderProcesses {
 		if cmd != nil && cmd.Process != nil {
 			killProcessGroup(cmd)
-
-			// Clean up firewall rules if it was a paqet forwarder
-			// We need to know which port it was. Since we don't store it easily in the map,
-			// we can either store it or just let the teardown happen if we had it.
-			// For now, let's just log and handle it correctly in a per-forwarder stop if we had one.
-			// But since we stop ALL, and Paqet configs are in c.tunnelDir, we can look for them.
 		}
 		delete(c.forwarderProcesses, key)
 	}
+	c.forwarderMu.Unlock()
 	// For Paqet specifically, we need to teardown the firewall rules for the transport port.
 	// Since the transport port is inside the config file, we scan the tunnel directory for paqet configs.
 	files, _ := filepath.Glob(filepath.Join(c.tunnelDir, "paqet_*.yaml"))
