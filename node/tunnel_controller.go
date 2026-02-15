@@ -50,6 +50,7 @@ type TunnelController struct {
 	waterwallProcess      *exec.Cmd
 	forwarderProcesses    map[int]*exec.Cmd // tunnel_id -> forwarder process
 	forwarderMu           sync.Mutex
+	forwarderWg           sync.WaitGroup
 	tunnels               []panel.TunnelInfo
 	configMonitorPeriodic *task.Task
 	statusReportPeriodic  *task.Task
@@ -582,7 +583,9 @@ network:
 	c.forwarderMu.Unlock()
 
 	// Monitor process in background
+	c.forwarderWg.Add(1)
 	go func() {
+		defer c.forwarderWg.Done()
 		cmd.Wait()
 		c.forwarderMu.Lock()
 		delete(c.forwarderProcesses, key)
@@ -602,13 +605,15 @@ network:
 
 func (c *TunnelController) stopAllForwarders() {
 	c.forwarderMu.Lock()
-	for key, cmd := range c.forwarderProcesses {
+	for _, cmd := range c.forwarderProcesses {
 		if cmd != nil && cmd.Process != nil {
 			killProcessGroup(cmd)
 		}
-		delete(c.forwarderProcesses, key)
 	}
 	c.forwarderMu.Unlock()
+
+	// Wait for all forwarder goroutines to confirm processes are dead
+	c.forwarderWg.Wait()
 	// For Paqet specifically, we need to teardown the firewall rules for the transport port.
 	// Since the transport port is inside the config file, we scan the tunnel directory for paqet configs.
 	files, _ := filepath.Glob(filepath.Join(c.tunnelDir, "paqet_*.yaml"))
