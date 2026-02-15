@@ -112,14 +112,40 @@ var tunnelRestartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart tunnel nodes",
 	Run: func(cmd *cobra.Command, args []string) {
+		// First, stop the existing tunnel process via PID file
+		pidContent, err := os.ReadFile(TunnelPidFile)
+		if err == nil {
+			pid, err := strconv.Atoi(string(pidContent))
+			if err == nil {
+				log.Infof("Stopping existing tunnel process %d...", pid)
+				_ = node.StopProcess(pid)
+			}
+		}
+
+		// Safety: kill any orphaned forwarder processes
+		node.KillOrphanedForwarders()
+
+		// Now start fresh
 		c := loadConfig()
 		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
-		tc.Close()
 		if err := tc.Start(); err != nil {
 			log.Fatalf("Failed to restart tunnel: %v", err)
 		}
+
+		// Write PID file
+		if err := os.WriteFile(TunnelPidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+			log.Warnf("Failed to write PID file: %v", err)
+		}
+		defer os.Remove(TunnelPidFile)
+
 		log.Info("Tunnel nodes restarted")
-		select {}
+
+		// Handle signals
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-sigChan
+		log.WithField("signal", sig).Info("Received signal, shutting down...")
+		tc.Close()
 	},
 }
 

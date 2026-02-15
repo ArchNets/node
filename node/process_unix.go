@@ -36,3 +36,11 @@ func StopProcess(pid int) error {
 	}
 	return process.Signal(syscall.SIGTERM)
 }
+
+// KillOrphanedForwarders kills any leftover forwarder processes (paqet, gost, nodepass)
+// This is a safety net for restart scenarios where the old controller can't track them.
+func KillOrphanedForwarders() {
+	for _, name := range []string{"paqet", "gost", "nodepass"} {
+		_ = exec.Command("pkill", "-f", name).Run()
+	}
+}

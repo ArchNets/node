@@ -27,3 +27,10 @@ func StopProcess(pid int) error {
 	}
 	return process.Kill()
 }
+
+// KillOrphanedForwarders kills any leftover forwarder processes
+func KillOrphanedForwarders() {
+	for _, name := range []string{"paqet", "gost", "nodepass"} {
+		_ = exec.Command("taskkill", "/F", "/IM", name+".exe").Run()
+	}
+}
