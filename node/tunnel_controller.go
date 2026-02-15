@@ -607,7 +607,16 @@ func (c *TunnelController) stopAllForwarders() {
 	c.forwarderMu.Lock()
 	for _, cmd := range c.forwarderProcesses {
 		if cmd != nil && cmd.Process != nil {
+			// Send SIGTERM first
 			killProcessGroup(cmd)
+
+			// If process doesn't die within 2s, force kill
+			go func(proc *os.Process) {
+				time.Sleep(2 * time.Second)
+				if proc != nil {
+					_ = proc.Kill() // SIGKILL
+				}
+			}(cmd.Process)
 		}
 	}
 	c.forwarderMu.Unlock()
