@@ -28,12 +28,13 @@ type CoreConfig struct {
 
 // TunnelInfo represents a single tunnel configuration
 type TunnelInfo struct {
-	Id         int         `json:"id"`
-	Name       string      `json:"name"`
-	Role       string      `json:"role"`        // "entry" or "exit"
-	ConfigJSON string      `json:"config_json"` // Raw WaterWall tunnel config
-	RemoteIP   string      `json:"remote_ip"`   // Remote tunnel IP for health checks
-	Forwarders []Forwarder `json:"forwarders"`
+	Id          int          `json:"id"`
+	Name        string       `json:"name"`
+	Role        string       `json:"role"`        // "entry" or "exit"
+	ConfigJSON  string       `json:"config_json"` // Raw WaterWall tunnel config
+	RemoteIP    string       `json:"remote_ip"`   // Remote tunnel IP for health checks
+	Forwarders  []Forwarder  `json:"forwarders"`
+	ScanCommand *ScanCommand `json:"scan_command,omitempty"`
 }
 
 // Forwarder represents a port forwarder configuration (gost/nodepass)
@@ -46,6 +47,33 @@ type Forwarder struct {
 	Config        string `json:"config"`         // Partial Paqet config
 }
 
+// ScanCommand is sent by the backend when a ProtoSwap scan is requested
+type ScanCommand struct {
+	Protocol    string `json:"protocol"` // tcp, udp, both
+	TcpTestPort int    `json:"tcp_test_port"`
+	UdpTestPort int    `json:"udp_test_port"`
+}
+
+// ScanResultItem represents a single protocol test result
+type ScanResultItem struct {
+	ProtocolNumber int    `json:"protocol_number"`
+	Type           string `json:"type"` // tcp or udp
+	LatencyMs      int    `json:"latency_ms"`
+	UploadSpeed    int64  `json:"upload_speed"`
+	DownloadSpeed  int64  `json:"download_speed"`
+	PacketLoss     int    `json:"packet_loss"`
+	Jitter         int    `json:"jitter"`
+}
+
+// ScanResultsRequest is the request body for reporting scan results
+type ScanResultsRequest struct {
+	TunnelId int              `json:"tunnel_id"`
+	Status   string           `json:"status"` // running, completed, failed
+	Error    string           `json:"error,omitempty"`
+	Progress int              `json:"progress"`
+	Results  []ScanResultItem `json:"results"`
+}
+
 // TunnelStatusRequest is the request body for POST /v2/server/:server_id/tunnel/status
 type TunnelStatusRequest struct {
 	Tunnels []TunnelStatus `json:"tunnels"`
@@ -53,9 +81,11 @@ type TunnelStatusRequest struct {
 
 // TunnelStatus represents the status of a single tunnel
 type TunnelStatus struct {
-	TunnelId  int  `json:"tunnel_id"`
-	Online    bool `json:"online"`
-	LatencyMs int  `json:"latency_ms"`
+	TunnelId      int   `json:"tunnel_id"`
+	Online        bool  `json:"online"`
+	LatencyMs     int   `json:"latency_ms"`
+	TotalUpload   int64 `json:"total_upload"`
+	TotalDownload int64 `json:"total_download"`
 }
 
 // GetTunnelConfig fetches the tunnel configuration from the backend
@@ -97,6 +127,26 @@ func (c *ClientV2) ReportTunnelStatus(status *TunnelStatusRequest) error {
 
 	if r.StatusCode() >= 400 {
 		return fmt.Errorf("failed to report tunnel status: %s", string(r.Body()))
+	}
+
+	return nil
+}
+
+// ReportScanResults reports ProtoSwap scan results to the backend
+func (c *ClientV2) ReportScanResults(req *ScanResultsRequest) error {
+	path := fmt.Sprintf("/v2/server/%d/tunnel/scan/results", c.ServerId)
+	r, err := c.Client.
+		R().
+		SetBody(req).
+		ForceContentType("application/json").
+		Post(path)
+
+	if err != nil {
+		return fmt.Errorf("failed to report scan results: %v", err)
+	}
+
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("failed to report scan results: %s", string(r.Body()))
 	}
 
 	return nil

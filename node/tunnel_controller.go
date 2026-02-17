@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,12 @@ const (
 	ForwarderLogFile  = "forwarder.log"
 )
 
+// trafficSnapshot stores the last-seen RX/TX bytes for a TUN device
+type trafficSnapshot struct {
+	rxBytes int64
+	txBytes int64
+}
+
 // TunnelController manages WaterWall tunnel nodes
 type TunnelController struct {
 	tag                   string
@@ -48,6 +55,7 @@ type TunnelController struct {
 	serverId              int
 	tunnelDir             string
 	waterwallProcess      *exec.Cmd
+	waterwallMu           sync.Mutex        // Protects waterwallProcess lifecycle (start/stop/reload)
 	forwarderProcesses    map[int]*exec.Cmd // tunnel_id -> forwarder process
 	forwarderMu           sync.Mutex
 	forwarderWg           sync.WaitGroup
@@ -59,6 +67,9 @@ type TunnelController struct {
 	forwarderLogFile      *os.File
 	lastConfigHash        string
 	waterwallWg           sync.WaitGroup
+	// Traffic monitoring
+	lastTraffic       map[int]trafficSnapshot // tunnel_id -> last traffic snapshot
+	tunnelDeviceNames map[int]string          // tunnel_id -> TUN device name
 }
 
 // NewTunnelController creates a new tunnel controller
@@ -71,6 +82,8 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int) *TunnelControl
 		tunnelDir:          TunnelDir,
 		forwarderProcesses: make(map[int]*exec.Cmd),
 		logger:             log.WithField("tag", tag), // Initialize with default logger
+		lastTraffic:        make(map[int]trafficSnapshot),
+		tunnelDeviceNames:  make(map[int]string),
 	}
 }
 
@@ -274,8 +287,27 @@ func (c *TunnelController) configMonitor() error {
 		return nil
 	}
 
-	// Compute config hash to detect changes
-	configJSON, _ := json.Marshal(resp.Data)
+	// Check for scan commands (independent of config changes)
+	for _, t := range resp.Data.Tunnels {
+		if t.ScanCommand != nil {
+			if t.Role == "entry" {
+				c.handleScanCommand(t)
+			} else if t.Role == "exit" {
+				c.handleExitScanCommand(t)
+			}
+		}
+	}
+
+	// Compute config hash to detect changes — strip scan_command to avoid
+	// re-applying config while a scan is in progress
+	hashData := *resp.Data
+	cleanTunnels := make([]panel.TunnelInfo, len(hashData.Tunnels))
+	for i, t := range hashData.Tunnels {
+		t.ScanCommand = nil
+		cleanTunnels[i] = t
+	}
+	hashData.Tunnels = cleanTunnels
+	configJSON, _ := json.Marshal(hashData)
 	hash := sha256.Sum256(configJSON)
 	configHash := hex.EncodeToString(hash[:])
 
@@ -316,10 +348,39 @@ func (c *TunnelController) statusReport() error {
 	for _, t := range c.tunnels {
 		latency, online := c.pingTarget(t.RemoteIP)
 
+		// Read TUN device traffic
+		var deltaUpload, deltaDownload int64
+		if deviceName, ok := c.tunnelDeviceNames[t.Id]; ok && deviceName != "" {
+			rxBytes, txBytes, err := readTUNTraffic(deviceName)
+			if err == nil {
+				if last, exists := c.lastTraffic[t.Id]; exists {
+					// Compute delta (handle counter reset)
+					if rxBytes >= last.rxBytes {
+						deltaDownload = rxBytes - last.rxBytes
+					} else {
+						deltaDownload = rxBytes // Counter reset
+					}
+					if txBytes >= last.txBytes {
+						deltaUpload = txBytes - last.txBytes
+					} else {
+						deltaUpload = txBytes // Counter reset
+					}
+				}
+				c.lastTraffic[t.Id] = trafficSnapshot{rxBytes: rxBytes, txBytes: txBytes}
+			} else {
+				c.logger.WithFields(log.Fields{
+					"device": deviceName,
+					"err":    err,
+				}).Debug("Failed to read TUN traffic")
+			}
+		}
+
 		statuses = append(statuses, panel.TunnelStatus{
-			TunnelId:  t.Id,
-			Online:    online,
-			LatencyMs: latency,
+			TunnelId:      t.Id,
+			Online:        online,
+			LatencyMs:     latency,
+			TotalUpload:   deltaUpload,
+			TotalDownload: deltaDownload,
 		})
 	}
 
@@ -363,6 +424,14 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	}
 
 	c.tunnels = data.Tunnels
+
+	// Extract device names from tunnel configs for traffic monitoring
+	for _, t := range data.Tunnels {
+		deviceName := extractDeviceNameFromConfig(t.ConfigJSON)
+		if deviceName != "" {
+			c.tunnelDeviceNames[t.Id] = deviceName
+		}
+	}
 
 	// Start WaterWall if we have tunnels
 	if len(data.Tunnels) > 0 {
@@ -419,6 +488,13 @@ func (c *TunnelController) generateCoreJSON(cfg *panel.CoreConfig, tunnelFiles [
 }
 
 func (c *TunnelController) startWaterwall() error {
+	c.waterwallMu.Lock()
+	defer c.waterwallMu.Unlock()
+	return c.startWaterwallLocked()
+}
+
+// startWaterwallLocked starts WaterWall — caller must hold waterwallMu
+func (c *TunnelController) startWaterwallLocked() error {
 	if _, err := os.Stat(WaterwallBinary); os.IsNotExist(err) {
 		return fmt.Errorf("WaterWall binary not found at %s", WaterwallBinary)
 	}
@@ -454,6 +530,13 @@ func (c *TunnelController) startWaterwall() error {
 }
 
 func (c *TunnelController) stopWaterwall() {
+	c.waterwallMu.Lock()
+	defer c.waterwallMu.Unlock()
+	c.stopWaterwallLocked()
+}
+
+// stopWaterwallLocked stops WaterWall — caller must hold waterwallMu
+func (c *TunnelController) stopWaterwallLocked() {
 	if c.waterwallProcess != nil && c.waterwallProcess.Process != nil {
 		c.logger.Info("Stopping WaterWall...")
 		// Kill process group
@@ -724,6 +807,44 @@ func (c *TunnelController) extractPaqetRole(config string) string {
 				return strings.Trim(val, `"'`)
 			}
 		}
+	}
+	return ""
+}
+
+// readTUNTraffic reads RX and TX bytes from sysfs for a network interface
+func readTUNTraffic(deviceName string) (rxBytes, txBytes int64, err error) {
+	rxPath := fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", deviceName)
+	txPath := fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", deviceName)
+
+	rxData, err := os.ReadFile(rxPath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read rx_bytes: %w", err)
+	}
+	txData, err := os.ReadFile(txPath)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read tx_bytes: %w", err)
+	}
+
+	rxBytes, err = strconv.ParseInt(strings.TrimSpace(string(rxData)), 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse rx_bytes: %w", err)
+	}
+	txBytes, err = strconv.ParseInt(strings.TrimSpace(string(txData)), 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse tx_bytes: %w", err)
+	}
+
+	return rxBytes, txBytes, nil
+}
+
+// extractDeviceNameFromConfig extracts the TUN device name from WaterWall config JSON
+// It looks for the "device-name" field in a TunDevice node
+var deviceNameRegex = regexp.MustCompile(`"device-name"\s*:\s*"([^"]+)"`)
+
+func extractDeviceNameFromConfig(configJSON string) string {
+	matches := deviceNameRegex.FindStringSubmatch(configJSON)
+	if len(matches) >= 2 {
+		return matches[1]
 	}
 	return ""
 }
