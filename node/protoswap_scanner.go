@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net"
@@ -18,22 +19,78 @@ import (
 // scanState tracks whether a scan is currently running for a tunnel
 var (
 	activeScansMu sync.Mutex
-	activeScans   = make(map[int]bool) // tunnel_id -> running
+	activeScans   = make(map[int]*scanContext) // tunnel_id -> context
 )
 
-// handleScanCommand checks if a scan command should be launched for a tunnel
+type scanContext struct {
+	cancel context.CancelFunc
+	signal string // "cancel" or "pause" set by handleScanCommand
+	mu     sync.Mutex
+}
+
+// setSignal safely sets the signal
+func (s *scanContext) setSignal(sig string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signal = sig
+}
+
+// getSignal safely gets the signal
+func (s *scanContext) getSignal() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.signal
+}
+
+// isScanRunning checks if a scan is running for the given tunnel ID
+func (c *TunnelController) isScanRunning(tunnelId int) bool {
+	activeScansMu.Lock()
+	defer activeScansMu.Unlock()
+	_, exists := activeScans[tunnelId]
+	return exists
+}
+
+// handleScanCommand checks if a scan command should be launched or controlled for a tunnel
 func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {
 	activeScansMu.Lock()
-	if activeScans[t.Id] {
-		activeScansMu.Unlock()
-		return // Already scanning
+	sCtx, exists := activeScans[t.Id]
+	activeScansMu.Unlock()
+
+	cmd := t.ScanCommand
+
+	// Handle existing scan
+	if exists {
+		// Check if we need to cancel or pause
+		if cmd.Signal == "cancel" || cmd.Signal == "pause" {
+			// Only cancel if not already signaled (to avoid repeated cancels)
+			if sCtx.getSignal() == "" {
+				c.logger.WithField("tunnel_id", t.Id).Infof("Received %s signal for active scan", cmd.Signal)
+				sCtx.setSignal(cmd.Signal)
+				sCtx.cancel()
+			}
+		}
+		return
 	}
-	activeScans[t.Id] = true
+
+	// Should not start if signal is present (it's a stale signal)
+	if cmd.Signal != "" {
+		return
+	}
+
+	// Start new scan
+	ctx, cancel := context.WithCancel(context.Background())
+	newSCtx := &scanContext{
+		cancel: cancel,
+	}
+
+	activeScansMu.Lock()
+	activeScans[t.Id] = newSCtx
 	activeScansMu.Unlock()
 
 	c.logger.WithFields(log.Fields{
 		"tunnel_id": t.Id,
-		"protocol":  t.ScanCommand.Protocol,
+		"protocol":  cmd.Protocol,
+		"resume":    cmd.ResumeFrom > 0 || cmd.ResumePhase != "",
 	}).Info("ProtoSwap scan command received, starting scan")
 
 	// Report running status
@@ -46,11 +103,11 @@ func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {
 		c.logger.WithField("err", err).Warn("Failed to report scan running status")
 	}
 
-	go c.runProtoswapScan(t)
+	go c.runProtoswapScan(ctx, t, newSCtx)
 }
 
 // runProtoswapScan performs the two-phase protocol scan for a tunnel
-func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
+func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelInfo, sCtx *scanContext) {
 	defer func() {
 		activeScansMu.Lock()
 		delete(activeScans, t.Id)
@@ -59,6 +116,7 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 
 	cmd := t.ScanCommand
 	results := []panel.ScanResultItem{}
+	originalConfig := t.ConfigJSON // Save original config for restore
 
 	// Get the current tunnel's device name and private IPs from config
 	deviceName := extractDeviceNameFromConfig(t.ConfigJSON)
@@ -74,6 +132,13 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 	scanTCP := cmd.Protocol == "tcp" || cmd.Protocol == "both"
 	scanUDP := cmd.Protocol == "udp" || cmd.Protocol == "both"
 
+	// Handle resume logic
+	// If resuming UDP, skip TCP entirely
+	if cmd.ResumePhase == "udp" {
+		scanTCP = false
+		scanUDP = true // Ensure UDP is scanned even if original was "tcp" (though backend handles this)
+	}
+
 	totalTests := 0
 	if scanTCP {
 		totalTests += 256
@@ -81,12 +146,33 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 	if scanUDP {
 		totalTests += 256
 	}
+	if totalTests == 0 {
+		return
+	}
 
 	completed := 0
+	// If resuming, adjust completed count validly is tricky without exact history,
+	// but we can estimate or just use the resume loop index.
+	// For progress bar, strict exactness isn't critical, but nice to have.
+	// We'll calculate progress based on loops.
 
 	// Phase 1+2 for TCP
 	if scanTCP {
 		for proto := 0; proto < 256; proto++ {
+			// Check for cancellation/pause
+			select {
+			case <-ctx.Done():
+				c.handleScanInterruption(t.Id, sCtx.getSignal(), originalConfig, results, proto-1, "tcp")
+				return
+			default:
+			}
+
+			// Resume skipping
+			if cmd.ResumePhase == "tcp" && proto <= cmd.ResumeFrom {
+				completed++
+				continue
+			}
+
 			// Skip the current UDP value (TCP and UDP can't be same)
 			if proto == currentUDP {
 				completed++
@@ -104,10 +190,12 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 			// Report progress every 10 protocols
 			if completed%10 == 0 || completed == totalTests {
 				if err := c.apiClient.ReportScanResults(&panel.ScanResultsRequest{
-					TunnelId: t.Id,
-					Status:   "running",
-					Progress: progress,
-					Results:  results,
+					TunnelId:   t.Id,
+					Status:     "running",
+					Progress:   progress,
+					Results:    results,
+					LastTested: proto,
+					Phase:      "tcp",
 				}); err != nil {
 					c.logger.WithField("err", err).Warn("Failed to report scan progress")
 				}
@@ -118,6 +206,9 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 	// Phase 1+2 for UDP
 	if scanUDP {
 		// Find best TCP result (highest download speed) to use as the fixed TCP value
+		// If we skipped TCP (resume UDP), we need to use currentTCP as best, or ideally
+		// the backend should've provided the best TCP if it matters?
+		// For now, we use currentTCP which is what's in config.
 		bestTCP := currentTCP
 		if scanTCP && len(results) > 0 {
 			bestSpeed := int64(0)
@@ -130,6 +221,20 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 		}
 
 		for proto := 0; proto < 256; proto++ {
+			// Check for cancellation/pause
+			select {
+			case <-ctx.Done():
+				c.handleScanInterruption(t.Id, sCtx.getSignal(), originalConfig, results, proto-1, "udp")
+				return
+			default:
+			}
+
+			// Resume skipping
+			if cmd.ResumePhase == "udp" && proto <= cmd.ResumeFrom {
+				completed++
+				continue
+			}
+
 			// Skip the best TCP value (TCP and UDP can't be same)
 			if proto == bestTCP {
 				completed++
@@ -146,10 +251,12 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 
 			if completed%10 == 0 || completed == totalTests {
 				if err := c.apiClient.ReportScanResults(&panel.ScanResultsRequest{
-					TunnelId: t.Id,
-					Status:   "running",
-					Progress: progress,
-					Results:  results,
+					TunnelId:   t.Id,
+					Status:     "running",
+					Progress:   progress,
+					Results:    results,
+					LastTested: proto,
+					Phase:      "udp",
 				}); err != nil {
 					c.logger.WithField("err", err).Warn("Failed to report scan progress")
 				}
@@ -202,6 +309,38 @@ func (c *TunnelController) runProtoswapScan(t panel.TunnelInfo) {
 		"tunnel_id": t.Id,
 		"results":   len(results),
 	}).Info("ProtoSwap scan completed")
+}
+
+// handleScanInterruption handles pause or cancel: restores original config and reports status
+func (c *TunnelController) handleScanInterruption(tunnelId int, signal string, originalConfig string, results []panel.ScanResultItem, lastProto int, phase string) {
+	// Restore original config
+	if err := c.hotReloadWaterwallConfig(tunnelId, originalConfig); err != nil {
+		c.logger.WithField("err", err).Error("Failed to restore original config after interruption")
+	} else {
+		c.logger.WithField("tunnel_id", tunnelId).Info("Original WaterWall config restored")
+	}
+
+	status := "cancelled"
+	if signal == "pause" {
+		status = "paused"
+	}
+
+	c.logger.WithFields(log.Fields{
+		"tunnel_id": tunnelId,
+		"status":    status,
+		"phase":     phase,
+		"last":      lastProto,
+	}).Info("Scan interrupted")
+
+	// Report interruption
+	c.apiClient.ReportScanResults(&panel.ScanResultsRequest{
+		TunnelId:   tunnelId,
+		Status:     status,
+		Progress:   0, // Irrelevant for these states
+		Results:    results,
+		LastTested: lastProto,
+		Phase:      phase,
+	})
 }
 
 // testProtocol tests a single protocol number for TCP or UDP

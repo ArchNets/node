@@ -287,7 +287,8 @@ func (c *TunnelController) configMonitor() error {
 		return nil
 	}
 
-	// Check for scan commands (independent of config changes)
+	// Check for scan commands and cleanup
+	scanRunning := false
 	for _, t := range resp.Data.Tunnels {
 		if t.ScanCommand != nil {
 			if t.Role == "entry" {
@@ -295,7 +296,22 @@ func (c *TunnelController) configMonitor() error {
 			} else if t.Role == "exit" {
 				c.handleExitScanCommand(t)
 			}
+		} else {
+			// No scan command -> ensure echo servers are stopped (for exit nodes)
+			if t.Role == "exit" {
+				c.stopEchoServers(t.Id)
+			}
 		}
+
+		if c.isScanRunning(t.Id) {
+			scanRunning = true
+		}
+	}
+
+	// 4. Update configurations if changed
+	// Skip if a scan is currently running (to avoid overwriting temp config)
+	if scanRunning {
+		return nil
 	}
 
 	// Compute config hash to detect changes — strip scan_command to avoid

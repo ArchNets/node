@@ -52,6 +52,9 @@ type ScanCommand struct {
 	Protocol    string `json:"protocol"` // tcp, udp, both
 	TcpTestPort int    `json:"tcp_test_port"`
 	UdpTestPort int    `json:"udp_test_port"`
+	Signal      string `json:"signal,omitempty"`       // cancel, pause (empty = run)
+	ResumeFrom  int    `json:"resume_from,omitempty"`  // protocol to resume from
+	ResumePhase string `json:"resume_phase,omitempty"` // tcp or udp
 }
 
 // ScanResultItem represents a single protocol test result
@@ -67,11 +70,13 @@ type ScanResultItem struct {
 
 // ScanResultsRequest is the request body for reporting scan results
 type ScanResultsRequest struct {
-	TunnelId int              `json:"tunnel_id"`
-	Status   string           `json:"status"` // running, completed, failed
-	Error    string           `json:"error,omitempty"`
-	Progress int              `json:"progress"`
-	Results  []ScanResultItem `json:"results"`
+	TunnelId   int              `json:"tunnel_id"`
+	Status     string           `json:"status"` // running, completed, failed, cancelled, paused
+	Error      string           `json:"error,omitempty"`
+	Progress   int              `json:"progress"`
+	Results    []ScanResultItem `json:"results"`
+	LastTested int              `json:"last_tested,omitempty"` // last protocol tested
+	Phase      string           `json:"phase,omitempty"`       // tcp or udp
 }
 
 // TunnelStatusRequest is the request body for POST /v2/server/:server_id/tunnel/status
