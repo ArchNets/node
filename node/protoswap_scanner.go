@@ -156,10 +156,95 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 	// For progress bar, strict exactness isn't critical, but nice to have.
 	// We'll calculate progress based on loops.
 
+	// Time-slotted execution constants
+	const slotDuration = 15 * time.Second
+	const entryNodeDelay = 3 * time.Second
+
+	// Helper to wait for the correct time slot for a protocol
+	waitAndSetProto := func(proto int, targetPhase string) bool {
+		// Calculate target time for this protocol
+		// Protocol index: 0..255 for TCP, then 256..511 for UDP (if both scanned)
+		// But here we might be running just one phase or both.
+		// To keep it simple and synchronized, we map:
+		// TCP 0-255 -> Slot 0-255
+		// UDP 0-255 -> Slot 256-511 (if TCP scanned first), or 0-255 if only UDP?
+		// User requirement says "Entry/Exit nodes ... same protocol at same time".
+		// Implies: Slot N = Protocol N.
+		// If we are scanning UDP, and it's 2nd phase, does it reuse slots 0-255 or continue?
+		// Rationale: If Exit node is also looping 0-255, we must align with that.
+		// Exit node logic (planned): Loop 0-255 for current phase.
+		// So both nodes must agree on "Current Phase".
+		// Problem: How does Exit node know we switched to UDP?
+		// Be simpler: The StartTime defines the start of THIS scan command.
+		// ScanCommand has specific Protocol (tcp/udp/both).
+		// If "both":
+		//   Slots 0-255: TCP 0-255
+		//   Slots 256-511: UDP 0-255
+		// If "tcp":
+		//   Slots 0-255: TCP 0-255
+		// If "udp":
+		//   Slots 0-255: UDP 0-255 (Exit node will run UDP loop)
+
+		slotIndex := proto
+		if targetPhase == "udp" && scanTCP {
+			slotIndex += 256
+		}
+
+		targetTime := time.Unix(cmd.StartTime, 0).Add(time.Duration(slotIndex) * slotDuration)
+
+		// Entry node adds a buffer to allow Exit node to restart first
+		readyTime := targetTime.Add(entryNodeDelay)
+
+		// Check if we are already past the slot window (15s)
+		if time.Now().After(readyTime.Add(slotDuration - entryNodeDelay)) {
+			// Too late for this slot, skip or fail?
+			// If we are way behind, we should skip to catch up.
+			return false // Signal to skip
+		}
+
+		// Wait until readyTime
+		wait := time.Until(readyTime)
+		if wait > 0 {
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		// Set config
+		var newConfigJSON string
+		if targetPhase == "tcp" {
+			newConfigJSON = setProtoswapInConfig(t.ConfigJSON, proto, currentUDP)
+		} else {
+			// Use bestTCP if available, otherwise currentTCP
+			tcpVal := currentTCP
+			if targetPhase == "udp" && scanTCP && len(results) > 0 {
+				bestSpeed := int64(0)
+				for _, r := range results {
+					if r.Type == "tcp" && r.DownloadSpeed > bestSpeed {
+						bestSpeed = r.DownloadSpeed
+						tcpVal = r.ProtocolNumber
+					}
+				}
+			}
+			newConfigJSON = setProtoswapInConfig(t.ConfigJSON, tcpVal, proto)
+		}
+
+		if err := c.hotReloadWaterwallConfig(t.Id, newConfigJSON); err != nil {
+			c.logger.WithField("err", err).Error("Failed to hot-reload WaterWall")
+			return false
+		}
+
+		// Wait for TUN
+		time.Sleep(2 * time.Second)
+		return true
+	}
+
 	// Phase 1+2 for TCP
 	if scanTCP {
 		for proto := 0; proto < 256; proto++ {
-			// Check for cancellation/pause
+			// Check cancel
 			select {
 			case <-ctx.Done():
 				c.handleScanInterruption(t.Id, sCtx.getSignal(), originalConfig, results, proto-1, "tcp")
@@ -173,21 +258,46 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 				continue
 			}
 
-			// Skip the current UDP value (TCP and UDP can't be same)
+			// Skip current UDP value
 			if proto == currentUDP {
 				completed++
 				continue
 			}
 
-			result := c.testProtocol(t, proto, "tcp", cmd.TcpTestPort, deviceName, currentUDP)
-			if result != nil {
-				results = append(results, *result)
+			// Sync Wait
+			if !waitAndSetProto(proto, "tcp") {
+				// Skipped or interrupted
+				select {
+				case <-ctx.Done():
+					c.handleScanInterruption(t.Id, sCtx.getSignal(), originalConfig, results, proto-1, "tcp")
+					return
+				default:
+					c.logger.WithField("proto", proto).Warn("Skipped TCP slot due to lag")
+					completed++
+					continue
+				}
+			}
+
+			// Run checks (Phase 1 & 2) - reduced timeout to fit in slot
+			// Slot is 15s. We waited 2s for TUN + 3s buffer = 5s used.
+			// Remaining: 10s.
+			// Conn check: 2s timeout. Speed test: 7s.
+
+			latency, ok := c.tcpConnectivityCheck(t.RemoteIP, cmd.TcpTestPort, 2*time.Second)
+			if ok {
+				upload, download := c.tcpSpeedTest(t.RemoteIP, cmd.TcpTestPort, 7*time.Second)
+				results = append(results, panel.ScanResultItem{
+					ProtocolNumber: proto,
+					Type:           "tcp",
+					LatencyMs:      latency,
+					UploadSpeed:    upload,
+					DownloadSpeed:  download,
+				})
 			}
 
 			completed++
 			progress := int(float64(completed) / float64(totalTests) * 100)
 
-			// Report progress every 10 protocols
 			if completed%10 == 0 || completed == totalTests {
 				if err := c.apiClient.ReportScanResults(&panel.ScanResultsRequest{
 					TunnelId:   t.Id,
@@ -205,10 +315,6 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 
 	// Phase 1+2 for UDP
 	if scanUDP {
-		// Find best TCP result (highest download speed) to use as the fixed TCP value
-		// If we skipped TCP (resume UDP), we need to use currentTCP as best, or ideally
-		// the backend should've provided the best TCP if it matters?
-		// For now, we use currentTCP which is what's in config.
 		bestTCP := currentTCP
 		if scanTCP && len(results) > 0 {
 			bestSpeed := int64(0)
@@ -221,7 +327,6 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 		}
 
 		for proto := 0; proto < 256; proto++ {
-			// Check for cancellation/pause
 			select {
 			case <-ctx.Done():
 				c.handleScanInterruption(t.Id, sCtx.getSignal(), originalConfig, results, proto-1, "udp")
@@ -229,21 +334,41 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 			default:
 			}
 
-			// Resume skipping
 			if cmd.ResumePhase == "udp" && proto <= cmd.ResumeFrom {
 				completed++
 				continue
 			}
 
-			// Skip the best TCP value (TCP and UDP can't be same)
 			if proto == bestTCP {
 				completed++
 				continue
 			}
 
-			result := c.testProtocol(t, proto, "udp", cmd.UdpTestPort, deviceName, bestTCP)
-			if result != nil {
-				results = append(results, *result)
+			// Sync Wait
+			if !waitAndSetProto(proto, "udp") {
+				select {
+				case <-ctx.Done():
+					c.handleScanInterruption(t.Id, sCtx.getSignal(), originalConfig, results, proto-1, "udp")
+					return
+				default:
+					c.logger.WithField("proto", proto).Warn("Skipped UDP slot due to lag")
+					completed++
+					continue
+				}
+			}
+
+			latency, packetLoss, jitter, ok := c.udpConnectivityCheck(t.RemoteIP, cmd.UdpTestPort, 2*time.Second)
+			if ok {
+				upload, download := c.udpSpeedTest(t.RemoteIP, cmd.UdpTestPort, 7*time.Second)
+				results = append(results, panel.ScanResultItem{
+					ProtocolNumber: proto,
+					Type:           "udp",
+					LatencyMs:      latency,
+					UploadSpeed:    upload,
+					DownloadSpeed:  download,
+					PacketLoss:     packetLoss,
+					Jitter:         jitter,
+				})
 			}
 
 			completed++
@@ -409,7 +534,7 @@ func (c *TunnelController) testProtocol(t panel.TunnelInfo, proto int, protoType
 // tcpConnectivityCheck performs Phase 1 TCP check: try to connect to the test port
 // through the tunnel and measure latency
 func (c *TunnelController) tcpConnectivityCheck(remoteIP string, port int, timeout time.Duration) (latencyMs int, ok bool) {
-	addr := fmt.Sprintf("%s:%d", remoteIP, port)
+	addr := net.JoinHostPort(remoteIP, strconv.Itoa(port))
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
@@ -422,7 +547,7 @@ func (c *TunnelController) tcpConnectivityCheck(remoteIP string, port int, timeo
 
 // tcpSpeedTest performs Phase 2 TCP speed test: send and receive data to measure throughput
 func (c *TunnelController) tcpSpeedTest(remoteIP string, port int, timeout time.Duration) (uploadBps, downloadBps int64) {
-	addr := fmt.Sprintf("%s:%d", remoteIP, port)
+	addr := net.JoinHostPort(remoteIP, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return 0, 0
@@ -668,6 +793,7 @@ type echoState struct {
 	tcpListener net.Listener
 	udpConn     *net.UDPConn
 	stopChan    chan struct{}
+	cancel      context.CancelFunc
 }
 
 // handleExitScanCommand starts echo servers on the exit node when a scan is requested
@@ -680,15 +806,18 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 	echoServersMu.Unlock()
 
 	cmd := t.ScanCommand
+	ctx, cancel := context.WithCancel(context.Background())
 	state := &echoState{
 		stopChan: make(chan struct{}),
+		cancel:   cancel,
 	}
 
 	c.logger.WithFields(log.Fields{
 		"tunnel_id":     t.Id,
 		"tcp_test_port": cmd.TcpTestPort,
 		"udp_test_port": cmd.UdpTestPort,
-	}).Info("Exit node: starting echo servers for scan")
+		"start_time":    cmd.StartTime,
+	}).Info("Exit node: starting echo servers & sync loop for scan")
 
 	// Start TCP echo server
 	if cmd.TcpTestPort > 0 && (cmd.Protocol == "tcp" || cmd.Protocol == "both") {
@@ -714,6 +843,11 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 	echoServers[t.Id] = state
 	echoServersMu.Unlock()
 
+	// Start active scanning loop if StartTime is set
+	if cmd.StartTime > 0 {
+		go c.runExitScanLoop(ctx, t)
+	}
+
 	// Auto-stop after 30 minutes (safety timeout)
 	go func() {
 		select {
@@ -738,6 +872,9 @@ func (c *TunnelController) stopEchoServers(tunnelId int) {
 	echoServersMu.Unlock()
 
 	close(state.stopChan)
+	if state.cancel != nil {
+		state.cancel()
+	}
 	if state.tcpListener != nil {
 		state.tcpListener.Close()
 	}
@@ -836,4 +973,131 @@ func startUDPEchoServer(port int, stop chan struct{}, logger *log.Entry) (*net.U
 
 	logger.WithField("port", port).Info("UDP echo server started")
 	return conn, nil
+}
+
+// runExitScanLoop manages the time-synchronized protocol switching for the exit server
+func (c *TunnelController) runExitScanLoop(ctx context.Context, t panel.TunnelInfo) {
+	cmd := t.ScanCommand
+	startTime := time.Unix(cmd.StartTime, 0)
+
+	// Determine protocols to scan
+	scanTCP := cmd.Protocol == "tcp" || cmd.Protocol == "both"
+	scanUDP := cmd.Protocol == "udp" || cmd.Protocol == "both"
+
+	// Determine offset for UDP phase
+	udpOffset := 256
+	if !scanTCP {
+		// If strict sync is required, we should align with Entry Node's logic.
+		// If Entry Node starts UDP at 0 when protocol="udp", Exit must too.
+		udpOffset = 0
+		if scanTCP {
+			udpOffset = 256
+		}
+	} else {
+		// If both, TCP is 0, UDP is 256
+		udpOffset = 256
+	}
+
+	const SlotDuration = 15 * time.Second
+
+	c.logger.WithFields(log.Fields{
+		"tunnel_id":  t.Id,
+		"start_time": startTime,
+		"udp_offset": udpOffset,
+	}).Info("Starting exit scan loop")
+
+	// Main Loop
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.WithField("tunnel_id", t.Id).Info("Exit scan loop stopped")
+			return
+		case <-ticker.C:
+			now := time.Now()
+			elapsed := now.Sub(startTime)
+			if elapsed < 0 {
+				continue // Waiting for start time
+			}
+
+			slotIndex := int(elapsed / SlotDuration)
+
+			// Determine which phase and protocol this slot belongs to
+			var currentPhase string
+			var proto int
+
+			if scanTCP && slotIndex < 256 {
+				currentPhase = "tcp"
+				proto = slotIndex
+			} else if scanUDP && slotIndex >= udpOffset && slotIndex < (udpOffset+256) {
+				currentPhase = "udp"
+				proto = slotIndex - udpOffset
+			} else {
+				// Slot out of range or in gap
+				if slotIndex >= (udpOffset + 256) {
+					// Scan finished
+					cancelState(t.Id)
+					return
+				}
+				continue // gap or waiting
+			}
+
+			// Apply config if new slot
+			if shouldApplyConfig(t.Id, currentPhase, proto) {
+				c.logger.WithFields(log.Fields{
+					"phase": currentPhase,
+					"proto": proto,
+				}).Info("Exit node switching protocol")
+
+				// Apply config
+				var newConfigJSON string
+				// Extract current values from original config
+				currentTCP, currentUDP := extractProtoswapValues(t.ConfigJSON)
+
+				if currentPhase == "tcp" {
+					newConfigJSON = setProtoswapInConfig(t.ConfigJSON, proto, currentUDP)
+				} else {
+					// Use original TCP value for UDP scan
+					newConfigJSON = setProtoswapInConfig(t.ConfigJSON, currentTCP, proto)
+				}
+
+				if err := c.hotReloadWaterwallConfig(t.Id, newConfigJSON); err != nil {
+					c.logger.Error("Failed to switch config on exit node: ", err)
+				}
+				markConfigApplied(t.Id, currentPhase, proto)
+			}
+		}
+	}
+}
+
+// Helper to deduce if we need to apply config
+var (
+	appliedConfigsMu sync.Mutex
+	appliedConfigs   = make(map[int]string) // tunnelId -> "phase:proto"
+)
+
+func shouldApplyConfig(tunnelId int, phase string, proto int) bool {
+	appliedConfigsMu.Lock()
+	defer appliedConfigsMu.Unlock()
+	key := fmt.Sprintf("%s:%d", phase, proto)
+	if appliedConfigs[tunnelId] == key {
+		return false
+	}
+	return true
+}
+
+func markConfigApplied(tunnelId int, phase string, proto int) {
+	appliedConfigsMu.Lock()
+	defer appliedConfigsMu.Unlock()
+	appliedConfigs[tunnelId] = fmt.Sprintf("%s:%d", phase, proto)
+}
+
+func cancelState(tunnelId int) {
+	echoServersMu.Lock()
+	defer echoServersMu.Unlock()
+	if state, exists := echoServers[tunnelId]; exists && state.cancel != nil {
+		state.cancel()
+	}
 }

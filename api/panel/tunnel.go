@@ -52,6 +52,8 @@ type ScanCommand struct {
 	Protocol    string `json:"protocol"` // tcp, udp, both
 	TcpTestPort int    `json:"tcp_test_port"`
 	UdpTestPort int    `json:"udp_test_port"`
+	StartTime   int64  `json:"start_time"` // Unix timestamp for sync
+
 	Signal      string `json:"signal,omitempty"`       // cancel, pause (empty = run)
 	ResumeFrom  int    `json:"resume_from,omitempty"`  // protocol to resume from
 	ResumePhase string `json:"resume_phase,omitempty"` // tcp or udp
