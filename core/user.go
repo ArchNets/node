@@ -25,6 +25,9 @@ import (
 )
 
 func (v *XrayCore) GetUserManager(tag string) (proxy.UserManager, error) {
+	if v.ihm == nil {
+		return nil, fmt.Errorf("core is closed or not started")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	handler, err := v.ihm.GetHandler(ctx, tag)
