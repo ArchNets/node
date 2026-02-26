@@ -19,6 +19,9 @@ import (
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
 	log "github.com/sirupsen/logrus"
+	"github.com/xtls/xray-core/core"
+	xraystats "github.com/xtls/xray-core/features/stats"
+	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 const (
@@ -70,6 +73,9 @@ type TunnelController struct {
 	// Traffic monitoring
 	lastTraffic       map[int]trafficSnapshot // tunnel_id -> last traffic snapshot
 	tunnelDeviceNames map[int]string          // tunnel_id -> TUN device name
+	// Xray instances
+	xrayInstances map[int]*core.Instance
+	xrayMu        sync.Mutex
 }
 
 // NewTunnelController creates a new tunnel controller
@@ -84,6 +90,7 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int) *TunnelControl
 		logger:             log.WithField("tag", tag), // Initialize with default logger
 		lastTraffic:        make(map[int]trafficSnapshot),
 		tunnelDeviceNames:  make(map[int]string),
+		xrayInstances:      make(map[int]*core.Instance),
 	}
 }
 
@@ -244,6 +251,9 @@ func (c *TunnelController) Close() error {
 	// Stop all forwarders
 	c.stopAllForwarders()
 
+	// Stop all Xray instances
+	c.stopAllXrayInstances()
+
 	// Close log files
 	if c.waterwallLogFile != nil {
 		c.waterwallLogFile.Close()
@@ -366,28 +376,82 @@ func (c *TunnelController) statusReport() error {
 
 		// Read TUN device traffic
 		var deltaUpload, deltaDownload int64
-		if deviceName, ok := c.tunnelDeviceNames[t.Id]; ok && deviceName != "" {
-			rxBytes, txBytes, err := readTUNTraffic(deviceName)
-			if err == nil {
-				if last, exists := c.lastTraffic[t.Id]; exists {
-					// Compute delta (handle counter reset)
-					if rxBytes >= last.rxBytes {
-						deltaDownload = rxBytes - last.rxBytes
-					} else {
-						deltaDownload = rxBytes // Counter reset
-					}
-					if txBytes >= last.txBytes {
-						deltaUpload = txBytes - last.txBytes
-					} else {
-						deltaUpload = txBytes // Counter reset
+
+		if t.Method == "xray" {
+			// Pull Xray stats directly from memory
+			c.xrayMu.Lock()
+			instance := c.xrayInstances[t.Id]
+			c.xrayMu.Unlock()
+
+			if instance != nil {
+				// Parse the ConfigJSON to find the inbound tags
+				var xrayCfg struct {
+					Inbounds []struct {
+						Tag string `json:"tag"`
+					} `json:"inbounds"`
+				}
+				_ = json.Unmarshal([]byte(t.ConfigJSON), &xrayCfg)
+
+				f := instance.GetFeature(xraystats.ManagerType())
+				if f != nil {
+					statsManager := f.(xraystats.Manager)
+
+					// Iterate through inbounds and sum traffic
+					for i, inb := range xrayCfg.Inbounds {
+						tag := inb.Tag
+						if tag == "" {
+							tag = fmt.Sprintf("inbound-%d", i) // Xray default inbound tag
+						}
+
+						// In Xray:
+						// inbound>>>TAG>>>traffic>>>downlink = bytes coming FROM the client TO the proxy
+						// inbound>>>TAG>>>traffic>>>uplink = bytes going FROM the proxy TO the client
+						downName := fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", tag)
+						upName := fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", tag)
+
+						if cDown := statsManager.GetCounter(downName); cDown != nil {
+							// For tunnels, downloaded from user = Upload into tunnel
+							val := cDown.Value()
+							if val > 0 {
+								deltaUpload += val
+								cDown.Set(0)
+							}
+						}
+						if cUp := statsManager.GetCounter(upName); cUp != nil {
+							// Uploaded to user = Download from tunnel
+							val := cUp.Value()
+							if val > 0 {
+								deltaDownload += val
+								cUp.Set(0)
+							}
+						}
 					}
 				}
-				c.lastTraffic[t.Id] = trafficSnapshot{rxBytes: rxBytes, txBytes: txBytes}
-			} else {
-				c.logger.WithFields(log.Fields{
-					"device": deviceName,
-					"err":    err,
-				}).Debug("Failed to read TUN traffic")
+			}
+		} else {
+			if deviceName, ok := c.tunnelDeviceNames[t.Id]; ok && deviceName != "" {
+				rxBytes, txBytes, err := readTUNTraffic(deviceName)
+				if err == nil {
+					if last, exists := c.lastTraffic[t.Id]; exists {
+						// Compute delta (handle counter reset)
+						if rxBytes >= last.rxBytes {
+							deltaDownload = rxBytes - last.rxBytes
+						} else {
+							deltaDownload = rxBytes // Counter reset
+						}
+						if txBytes >= last.txBytes {
+							deltaUpload = txBytes - last.txBytes
+						} else {
+							deltaUpload = txBytes // Counter reset
+						}
+					}
+					c.lastTraffic[t.Id] = trafficSnapshot{rxBytes: rxBytes, txBytes: txBytes}
+				} else {
+					c.logger.WithFields(log.Fields{
+						"device": deviceName,
+						"err":    err,
+					}).Debug("Failed to read TUN traffic")
+				}
 			}
 		}
 
@@ -416,18 +480,32 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	// Stop existing processes
 	c.stopWaterwall()
 	c.stopAllForwarders()
+	c.stopAllXrayInstances()
+
+	var waterwallTunnels []panel.TunnelInfo
+	var xrayTunnels []panel.TunnelInfo
 
 	// Generate and write core.json
-	tunnelFiles := make([]string, 0, len(data.Tunnels))
 	for _, t := range data.Tunnels {
-		filename := fmt.Sprintf(TunnelConfigFmt, t.Id)
-		tunnelFiles = append(tunnelFiles, filename)
+		if t.Method == "waterwall" || t.Method == "" {
+			waterwallTunnels = append(waterwallTunnels, t)
+		} else if t.Method == "xray" {
+			xrayTunnels = append(xrayTunnels, t)
+		}
 	}
 
-	coreJSON := c.generateCoreJSON(data.CoreConfig, tunnelFiles)
-	corePath := filepath.Join(c.tunnelDir, CoreConfigFile)
-	if err := os.WriteFile(corePath, coreJSON, 0644); err != nil {
-		return fmt.Errorf("failed to write core.json: %v", err)
+	if len(waterwallTunnels) > 0 {
+		tunnelFiles := make([]string, 0, len(waterwallTunnels))
+		for _, t := range waterwallTunnels {
+			filename := fmt.Sprintf(TunnelConfigFmt, t.Id)
+			tunnelFiles = append(tunnelFiles, filename)
+		}
+
+		coreJSON := c.generateCoreJSON(data.CoreConfig, tunnelFiles)
+		corePath := filepath.Join(c.tunnelDir, CoreConfigFile)
+		if err := os.WriteFile(corePath, coreJSON, 0644); err != nil {
+			return fmt.Errorf("failed to write core.json: %v", err)
+		}
 	}
 
 	// Write each tunnel config
@@ -443,21 +521,38 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 
 	// Extract device names from tunnel configs for traffic monitoring
 	for _, t := range data.Tunnels {
-		deviceName := extractDeviceNameFromConfig(t.ConfigJSON)
-		if deviceName != "" {
-			c.tunnelDeviceNames[t.Id] = deviceName
+		if t.Method == "waterwall" || t.Method == "" {
+			deviceName := extractDeviceNameFromConfig(t.ConfigJSON)
+			if deviceName != "" {
+				c.tunnelDeviceNames[t.Id] = deviceName
+			}
 		}
 	}
 
-	// Start WaterWall if we have tunnels
-	if len(data.Tunnels) > 0 {
+	// Start WaterWall if we have waterwall tunnels
+	if len(waterwallTunnels) > 0 {
 		if err := c.startWaterwall(); err != nil {
 			return fmt.Errorf("failed to start WaterWall: %v", err)
 		}
 	}
 
+	// Start Xray tunnels natively in Go
+	for _, t := range xrayTunnels {
+		if err := c.startXrayInstance(t); err != nil {
+			c.logger.WithFields(log.Fields{
+				"tunnelId": t.Id,
+				"err":      err,
+			}).Warn("Failed to start Xray tunnel instance")
+		}
+	}
+
 	// Start forwarders
 	for _, t := range data.Tunnels {
+		if t.Method == "xray" {
+			// Skip starting Gost/Paqet/Nodepass/Waterwall wrapper
+			// The Xray core instance handles the forwarding
+			continue
+		}
 		for _, f := range t.Forwarders {
 			if err := c.startForwarder(t.Id, &f); err != nil {
 				c.logger.WithFields(log.Fields{
@@ -700,6 +795,57 @@ network:
 	}).Info("Forwarder started")
 
 	return nil
+}
+
+func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
+	configObj, err := core.LoadConfig("json", []byte(t.ConfigJSON))
+	if err != nil {
+		return fmt.Errorf("failed to parse xray config JSON: %v", err)
+	}
+
+	instance, err := core.New(configObj)
+	if err != nil {
+		return fmt.Errorf("failed to initialize xray instance: %v", err)
+	}
+
+	if err := instance.Start(); err != nil {
+		return fmt.Errorf("failed to start xray instance: %v", err)
+	}
+
+	c.xrayMu.Lock()
+	if c.xrayInstances == nil {
+		c.xrayInstances = make(map[int]*core.Instance)
+	}
+	c.xrayInstances[t.Id] = instance
+	c.xrayMu.Unlock()
+
+	c.logger.WithField("tunnelId", t.Id).Info("Xray tunnel instance started natively in Go")
+	return nil
+}
+
+func (c *TunnelController) stopAllXrayInstances() {
+	c.xrayMu.Lock()
+	defer c.xrayMu.Unlock()
+
+	if c.xrayInstances == nil {
+		c.xrayInstances = make(map[int]*core.Instance)
+		return
+	}
+
+	for id, instance := range c.xrayInstances {
+		if instance != nil {
+			if err := instance.Close(); err != nil {
+				c.logger.WithFields(log.Fields{
+					"tunnelId": id,
+					"err":      err,
+				}).Warn("Failed to cleanly stop Xray instance")
+			} else {
+				c.logger.WithField("tunnelId", id).Info("Xray tunnel instance stopped")
+			}
+		}
+	}
+	// Reallocate the map cleanly
+	c.xrayInstances = make(map[int]*core.Instance)
 }
 
 func (c *TunnelController) stopAllForwarders() {

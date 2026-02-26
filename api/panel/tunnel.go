@@ -31,6 +31,7 @@ type TunnelInfo struct {
 	Id          int          `json:"id"`
 	Name        string       `json:"name"`
 	Role        string       `json:"role"`        // "entry" or "exit"
+	Method      string       `json:"method"`      // "waterwall" or "xray" (NEW)
 	ConfigJSON  string       `json:"config_json"` // Raw WaterWall tunnel config
 	RemoteIP    string       `json:"remote_ip"`   // Remote tunnel IP for health checks
 	Forwarders  []Forwarder  `json:"forwarders"`
