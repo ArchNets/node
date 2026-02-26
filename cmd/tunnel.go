@@ -26,7 +26,7 @@ var tunnelInstallCmd = &cobra.Command{
 	Short: "Install tunnel binaries (WaterWall, Gost, NodePass)",
 	Run: func(cmd *cobra.Command, args []string) {
 		c := loadConfig()
-		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
+		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId, c)
 		if err := tc.CheckAndInstallBinaries(); err != nil {
 			log.Fatalf("Installation failed: %v", err)
 		}
@@ -39,7 +39,7 @@ var tunnelUninstallCmd = &cobra.Command{
 	Short: "Uninstall tunnel components and remove directories",
 	Run: func(cmd *cobra.Command, args []string) {
 		c := loadConfig()
-		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
+		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId, c)
 		if err := tc.Uninstall(); err != nil {
 			log.Fatalf("Uninstallation failed: %v", err)
 		}
@@ -65,7 +65,7 @@ var tunnelStartCmd = &cobra.Command{
 		}
 
 		c := loadConfig()
-		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
+		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId, c)
 		if err := tc.Start(); err != nil {
 			log.Fatalf("Failed to start tunnel: %v", err)
 		}
@@ -140,7 +140,7 @@ var tunnelRestartCmd = &cobra.Command{
 
 		// Now start fresh
 		c := loadConfig()
-		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId)
+		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId, c)
 		if err := tc.Start(); err != nil {
 			log.Fatalf("Failed to restart tunnel: %v", err)
 		}

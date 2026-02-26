@@ -19,10 +19,13 @@ import (
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
+	"github.com/archnets/node/conf"
 	log "github.com/sirupsen/logrus"
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	xraystats "github.com/xtls/xray-core/features/stats"
-	"github.com/xtls/xray-core/infra/conf/serial"
+	coreConf "github.com/xtls/xray-core/infra/conf"
+	confserial "github.com/xtls/xray-core/infra/conf/serial"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
@@ -58,6 +61,7 @@ type TunnelController struct {
 	tag                   string
 	apiClient             *panel.ClientV2
 	serverId              int
+	nodeConfig            *conf.Conf
 	tunnelDir             string
 	waterwallProcess      *exec.Cmd
 	waterwallMu           sync.Mutex        // Protects waterwallProcess lifecycle (start/stop/reload)
@@ -81,12 +85,13 @@ type TunnelController struct {
 }
 
 // NewTunnelController creates a new tunnel controller
-func NewTunnelController(apiClient *panel.ClientV2, serverId int) *TunnelController {
+func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *conf.Conf) *TunnelController {
 	tag := generateTunnelTag(serverId)
 	return &TunnelController{
 		tag:                tag,
 		apiClient:          apiClient,
 		serverId:           serverId,
+		nodeConfig:         nodeConfig,
 		tunnelDir:          TunnelDir,
 		forwarderProcesses: make(map[int]*exec.Cmd),
 		logger:             log.WithField("tag", tag), // Initialize with default logger
@@ -801,7 +806,7 @@ network:
 
 func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	reader := bytes.NewReader([]byte(t.ConfigJSON))
-	confObj, err := serial.DecodeJSONConfig(reader)
+	confObj, err := confserial.DecodeJSONConfig(reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse xray config JSON: %v", err)
 	}
@@ -810,6 +815,23 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	if err != nil {
 		return fmt.Errorf("failed to build xray config protobuf: %v", err)
 	}
+
+	// We forcibly inject Node's global logging config so Xray prints everything to the Node controller's log output
+	// Ensure fallback to warning if config is omitted
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+
+	coreLogConfig := &coreConf.LogConfig{
+		LogLevel:  logLevel,
+		ErrorLog:  c.nodeConfig.LogConfig.Output,
+		AccessLog: c.nodeConfig.LogConfig.Access,
+	}
+	appLogMsg := serial.ToTypedMessage(coreLogConfig.Build())
+
+	// Prepend it to App configurations
+	configObj.App = append([]*serial.TypedMessage{appLogMsg}, configObj.App...)
 
 	instance, err := core.New(configObj)
 	if err != nil {

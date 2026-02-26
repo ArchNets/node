@@ -18,9 +18,10 @@ func TestNewTunnelController(t *testing.T) {
 		ServerId:  1,
 		SecretKey: "secret",
 	})
+	nodeConfig := conf.New()
 
 	// Create tunnel controller
-	tc := NewTunnelController(apiClient, 1)
+	tc := NewTunnelController(apiClient, 1, nodeConfig)
 
 	if tc == nil {
 		t.Fatal("TunnelController should not be nil")
