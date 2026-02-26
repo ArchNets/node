@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/core"
 	xraystats "github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/infra/conf/serial"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
@@ -798,9 +800,15 @@ network:
 }
 
 func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
-	configObj, err := core.LoadConfig("json", []byte(t.ConfigJSON))
+	reader := bytes.NewReader([]byte(t.ConfigJSON))
+	confObj, err := serial.DecodeJSONConfig(reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse xray config JSON: %v", err)
+	}
+
+	configObj, err := confObj.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build xray config protobuf: %v", err)
 	}
 
 	instance, err := core.New(configObj)
