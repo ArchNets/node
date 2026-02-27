@@ -17,6 +17,8 @@ import (
 	"sync"
 
 	"github.com/archnets/node/api/panel"
+	certutil "github.com/archnets/node/common/cert"
+	"github.com/archnets/node/common/file"
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
 	"github.com/archnets/node/conf"
@@ -807,7 +809,14 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	}
 
 	// Build raw JSON from the structured API struct
-	xrayJSON := c.buildXrayJSON(t, t.XrayConfig)
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+	xrayJSON := c.buildXrayJSON(t, t.XrayConfig, logLevel)
+
+	// Log the generated JSON at debug level for troubleshooting
+	c.logger.WithField("json", xrayJSON).Debug("Generated Xray JSON")
 
 	// Convert JSON string to Xray's strongly-typed initial protobuf array
 	reader := bytes.NewReader([]byte(xrayJSON))
@@ -823,10 +832,6 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 
 	// We forcibly inject Node's global logging config so Xray prints everything to the Node controller's log output
 	// Ensure fallback to warning if config is omitted
-	logLevel := c.nodeConfig.LogConfig.Level
-	if logLevel == "" {
-		logLevel = "warning"
-	}
 
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  logLevel,
@@ -858,10 +863,10 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	return nil
 }
 
-func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunnelProtocol) string {
+func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunnelProtocol, logLevel string) string {
 	obj := map[string]interface{}{
 		"log": map[string]interface{}{
-			"loglevel": "none",
+			"loglevel": logLevel,
 		},
 		"inbounds":  []interface{}{},
 		"outbounds": []interface{}{},
@@ -911,16 +916,23 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 		// Exit node: Receive upstream proxy connections + outbound freedom internet
 		streamSettings := buildXrayStreamSettings(cfg, true)
 
-		// Handle raw PEM certificate strings directly from the DB by rewriting them to the disk
+		// Handle raw PEM certificate strings directly from the DB by rewriting them to the disk using central certutil
 		if cfg.CertFile != "" && strings.Contains(cfg.CertFile, "-----BEGIN") {
-			certPath := filepath.Join(c.tunnelDir, "libs", fmt.Sprintf("tunnel_%d_cert.pem", t.Id))
+			certPath, keyPath := certutil.GetCertPaths(cfg.SNI, "tunnel", t.Id)
+
+			// Ensure the directory exists
+			dir := filepath.Dir(certPath)
+			if !file.IsExist(dir) {
+				os.MkdirAll(dir, 0755)
+			}
+
 			os.WriteFile(certPath, []byte(cfg.CertFile), 0644)
 			cfg.CertFile = certPath
-		}
-		if cfg.KeyFile != "" && strings.Contains(cfg.KeyFile, "-----BEGIN") {
-			keyPath := filepath.Join(c.tunnelDir, "libs", fmt.Sprintf("tunnel_%d_key.pem", t.Id))
-			os.WriteFile(keyPath, []byte(cfg.KeyFile), 0600)
-			cfg.KeyFile = keyPath
+
+			if cfg.KeyFile != "" && strings.Contains(cfg.KeyFile, "-----BEGIN") {
+				os.WriteFile(keyPath, []byte(cfg.KeyFile), 0600)
+				cfg.KeyFile = keyPath
+			}
 		}
 
 		// Because we're writing files mid-flight, update the nested map pointer directly
