@@ -153,12 +153,12 @@ func TestTunnelControllerApplyConfigWritesFiles(t *testing.T) {
 		},
 		Tunnels: []panel.TunnelInfo{
 			{
-				Id:         1,
-				Name:       "test-tunnel",
-				Role:       "entry",
-				ConfigJSON: `{"name": "test"}`,
-				RemoteIP:   "127.0.0.1",
-				Forwarders: []panel.Forwarder{},
+				Id:              1,
+				Name:            "test-tunnel",
+				Role:            "entry",
+				WaterwallConfig: `{"name": "test"}`,
+				RemoteIP:        "127.0.0.1",
+				Forwarders:      []panel.Forwarder{},
 			},
 		},
 	}

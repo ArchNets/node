@@ -391,28 +391,23 @@ func (c *TunnelController) statusReport() error {
 			c.xrayMu.Unlock()
 
 			if instance != nil {
-				// Parse the ConfigJSON to find the inbound tags
-				var xrayCfg struct {
-					Inbounds []struct {
-						Tag string `json:"tag"`
-					} `json:"inbounds"`
-				}
-				_ = json.Unmarshal([]byte(t.ConfigJSON), &xrayCfg)
-
+				// Note: Currently Xray tunnels don't have their configs individually read back here for stats
+				// because they are natively loaded.
 				f := instance.GetFeature(xraystats.ManagerType())
 				if f != nil {
+					// Iterate through all counters dynamically rather than looking up by JSON struct
 					statsManager := f.(xraystats.Manager)
 
-					// Iterate through inbounds and sum traffic
-					for i, inb := range xrayCfg.Inbounds {
-						tag := inb.Tag
-						if tag == "" {
-							tag = fmt.Sprintf("inbound-%d", i) // Xray default inbound tag
-						}
+					// Go through all up and down link traffic
+					// We don't have exactly which inbounds are ours right now,
+					// but there is typically only one inbound per tunnel node
 
-						// In Xray:
-						// inbound>>>TAG>>>traffic>>>downlink = bytes coming FROM the client TO the proxy
-						// inbound>>>TAG>>>traffic>>>uplink = bytes going FROM the proxy TO the client
+					// However, we can't easily iterate all counters in xraystats.Manager without reflection or an internal API.
+					// Xray stores these as sync.Map, but doesn't expose a Keys() method.
+					// Instead of reading traffic dynamically, Xray currently provides `proxy` or `inbound-0` as defaults.
+					// We'll hardcode checking the standard expected tags for tunnels:
+					possibleTags := []string{"proxy", "inbound-0", "dokodemo-0", "dokodemo-1", "dokodemo-2"}
+					for _, tag := range possibleTags {
 						downName := fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", tag)
 						upName := fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", tag)
 
@@ -519,8 +514,10 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	for _, t := range data.Tunnels {
 		filename := fmt.Sprintf(TunnelConfigFmt, t.Id)
 		tunnelPath := filepath.Join(c.tunnelDir, filename)
-		if err := os.WriteFile(tunnelPath, []byte(t.ConfigJSON), 0644); err != nil {
-			return fmt.Errorf("failed to write %s: %v", filename, err)
+		if t.Method == "waterwall" || t.Method == "" {
+			if err := os.WriteFile(tunnelPath, []byte(t.WaterwallConfig), 0644); err != nil {
+				return fmt.Errorf("failed to write %s: %v", filename, err)
+			}
 		}
 	}
 
@@ -529,7 +526,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	// Extract device names from tunnel configs for traffic monitoring
 	for _, t := range data.Tunnels {
 		if t.Method == "waterwall" || t.Method == "" {
-			deviceName := extractDeviceNameFromConfig(t.ConfigJSON)
+			deviceName := extractDeviceNameFromConfig(t.WaterwallConfig)
 			if deviceName != "" {
 				c.tunnelDeviceNames[t.Id] = deviceName
 			}
@@ -805,7 +802,15 @@ network:
 }
 
 func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
-	reader := bytes.NewReader([]byte(t.ConfigJSON))
+	if t.XrayConfig == nil {
+		return fmt.Errorf("xray_config is missing for xray tunnel")
+	}
+
+	// Build raw JSON from the structured API struct
+	xrayJSON := c.buildXrayJSON(t, t.XrayConfig)
+
+	// Convert JSON string to Xray's strongly-typed initial protobuf array
+	reader := bytes.NewReader([]byte(xrayJSON))
 	confObj, err := confserial.DecodeJSONConfig(reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse xray config JSON: %v", err)
@@ -851,6 +856,162 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 
 	c.logger.WithField("tunnelId", t.Id).Info("Xray tunnel instance started natively in Go")
 	return nil
+}
+
+func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunnelProtocol) string {
+	obj := map[string]interface{}{
+		"log": map[string]interface{}{
+			"loglevel": "none",
+		},
+		"inbounds":  []interface{}{},
+		"outbounds": []interface{}{},
+	}
+
+	if t.Role == "entry" {
+		// Entry node: Create dokodemo-door forwarders + outbound client proxy connection
+		for _, f := range t.Forwarders {
+			inb := map[string]interface{}{
+				"listen":   "0.0.0.0",
+				"port":     f.ListenPort,
+				"protocol": "dokodemo-door",
+				"settings": map[string]interface{}{
+					"address": f.TargetIP,
+					"port":    f.TargetPort,
+					"network": f.Protocol,
+				},
+				"tag": fmt.Sprintf("dokodemo-%d", f.ListenPort), // Change from ID since it was missing in struct
+			}
+			obj["inbounds"] = append(obj["inbounds"].([]interface{}), inb)
+		}
+
+		streamSettings := buildXrayStreamSettings(cfg, false)
+		outb := map[string]interface{}{
+			"protocol": cfg.Type,
+			"settings": map[string]interface{}{
+				"vnext": []interface{}{
+					map[string]interface{}{
+						"address": cfg.Address,
+						"port":    cfg.Port,
+						"users": []interface{}{
+							map[string]interface{}{
+								"id":         cfg.UUID,
+								"encryption": cfg.Encryption,
+								"flow":       cfg.Flow,
+							},
+						},
+					},
+				},
+			},
+			"streamSettings": streamSettings,
+			"tag":            "proxy",
+		}
+		obj["outbounds"] = append(obj["outbounds"].([]interface{}), outb)
+
+	} else {
+		// Exit node: Receive upstream proxy connections + outbound freedom internet
+		streamSettings := buildXrayStreamSettings(cfg, true)
+
+		// Handle raw PEM certificate strings directly from the DB by rewriting them to the disk
+		if cfg.CertFile != "" && strings.Contains(cfg.CertFile, "-----BEGIN") {
+			certPath := filepath.Join(c.tunnelDir, "libs", fmt.Sprintf("tunnel_%d_cert.pem", t.Id))
+			os.WriteFile(certPath, []byte(cfg.CertFile), 0644)
+			cfg.CertFile = certPath
+		}
+		if cfg.KeyFile != "" && strings.Contains(cfg.KeyFile, "-----BEGIN") {
+			keyPath := filepath.Join(c.tunnelDir, "libs", fmt.Sprintf("tunnel_%d_key.pem", t.Id))
+			os.WriteFile(keyPath, []byte(cfg.KeyFile), 0600)
+			cfg.KeyFile = keyPath
+		}
+
+		// Because we're writing files mid-flight, update the nested map pointer directly
+		if tlsSettings, ok := streamSettings["tlsSettings"].(map[string]interface{}); ok {
+			if cfg.CertFile != "" && cfg.KeyFile != "" {
+				tlsSettings["certificates"] = []interface{}{
+					map[string]interface{}{
+						"certificateFile": cfg.CertFile,
+						"keyFile":         cfg.KeyFile,
+					},
+				}
+			}
+		}
+
+		inb := map[string]interface{}{
+			"listen":   "0.0.0.0",
+			"port":     cfg.Port,
+			"protocol": cfg.Type,
+			"settings": map[string]interface{}{
+				"clients": []interface{}{
+					map[string]interface{}{
+						"id":   cfg.UUID,
+						"flow": cfg.Flow,
+					},
+				},
+				"decryption": "none",
+			},
+			"streamSettings": streamSettings,
+			"tag":            "proxy",
+		}
+		obj["inbounds"] = append(obj["inbounds"].([]interface{}), inb)
+
+		outb := map[string]interface{}{
+			"protocol": "freedom",
+			"settings": map[string]interface{}{},
+		}
+		obj["outbounds"] = append(obj["outbounds"].([]interface{}), outb)
+	}
+
+	b, _ := json.Marshal(obj)
+	return string(b)
+}
+
+func buildXrayStreamSettings(cfg *panel.XrayTunnelProtocol, isServer bool) map[string]interface{} {
+	ss := map[string]interface{}{
+		"network":  cfg.Transport,
+		"security": cfg.Security,
+	}
+
+	if cfg.Security == "tls" {
+		tlsSettings := map[string]interface{}{
+			"serverName": cfg.SNI,
+		}
+		if isServer {
+			tlsSettings["alpn"] = []string{"h2", "http/1.1"}
+		}
+		ss["tlsSettings"] = tlsSettings
+	}
+
+	if cfg.Security == "reality" {
+		realitySettings := map[string]interface{}{
+			"serverName": cfg.SNI,
+			"shortId":    cfg.RealityShortId,
+		}
+		if isServer {
+			realitySettings["privateKey"] = cfg.RealityPrivateKey
+			realitySettings["dest"] = fmt.Sprintf("%s:%d", cfg.RealityServerAddr, cfg.RealityServerPort)
+			realitySettings["serverNames"] = []string{cfg.SNI}
+		} else {
+			realitySettings["publicKey"] = cfg.RealityPublicKey
+			realitySettings["fingerprint"] = cfg.Fingerprint
+		}
+		ss["realitySettings"] = realitySettings
+	}
+
+	if cfg.Transport == "xhttp" {
+		ss["xhttpSettings"] = map[string]interface{}{
+			"mode": cfg.XhttpMode,
+			"path": cfg.Path,
+		}
+	} else if cfg.Transport == "ws" {
+		ss["wsSettings"] = map[string]interface{}{
+			"path": cfg.Path,
+		}
+	} else if cfg.Transport == "grpc" {
+		ss["grpcSettings"] = map[string]interface{}{
+			"serviceName": cfg.ServiceName,
+		}
+	}
+
+	return ss
 }
 
 func (c *TunnelController) stopAllXrayInstances() {

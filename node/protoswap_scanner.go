@@ -116,17 +116,17 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 
 	cmd := t.ScanCommand
 	results := []panel.ScanResultItem{}
-	originalConfig := t.ConfigJSON // Save original config for restore
+	originalConfig := t.WaterwallConfig // Save original config for restore
 
 	// Get the current tunnel's device name and private IPs from config
-	deviceName := extractDeviceNameFromConfig(t.ConfigJSON)
+	deviceName := extractDeviceNameFromConfig(t.WaterwallConfig)
 	if deviceName == "" {
 		c.reportScanError(t.Id, "could not find TUN device name in config")
 		return
 	}
 
 	// Extract current protoswap values from config
-	currentTCP, currentUDP := extractProtoswapValues(t.ConfigJSON)
+	currentTCP, currentUDP := extractProtoswapValues(t.WaterwallConfig)
 
 	// Determine which protocols to scan
 	scanTCP := cmd.Protocol == "tcp" || cmd.Protocol == "both"
@@ -215,7 +215,7 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 		// Set config
 		var newConfigJSON string
 		if targetPhase == "tcp" {
-			newConfigJSON = setProtoswapInConfig(t.ConfigJSON, proto, currentUDP)
+			newConfigJSON = setProtoswapInConfig(t.WaterwallConfig, proto, currentUDP)
 		} else {
 			// Use bestTCP if available, otherwise currentTCP
 			tcpVal := currentTCP
@@ -228,7 +228,7 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 					}
 				}
 			}
-			newConfigJSON = setProtoswapInConfig(t.ConfigJSON, tcpVal, proto)
+			newConfigJSON = setProtoswapInConfig(t.WaterwallConfig, tcpVal, proto)
 		}
 
 		if err := c.hotReloadWaterwallConfig(t.Id, newConfigJSON); err != nil {
@@ -409,7 +409,7 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 		bestUDPVal = currentUDP
 	}
 
-	finalConfig := setProtoswapInConfig(t.ConfigJSON, bestTCPVal, bestUDPVal)
+	finalConfig := setProtoswapInConfig(t.WaterwallConfig, bestTCPVal, bestUDPVal)
 	if err := c.hotReloadWaterwallConfig(t.Id, finalConfig); err != nil {
 		c.logger.WithField("err", err).Error("Failed to restore WaterWall config after scan")
 	} else {
@@ -474,9 +474,9 @@ func (c *TunnelController) testProtocol(t panel.TunnelInfo, proto int, protoType
 	// Modify the WaterWall config with the new protocol number
 	var newConfigJSON string
 	if protoType == "tcp" {
-		newConfigJSON = setProtoswapInConfig(t.ConfigJSON, proto, otherProtoValue)
+		newConfigJSON = setProtoswapInConfig(t.WaterwallConfig, proto, otherProtoValue)
 	} else {
-		newConfigJSON = setProtoswapInConfig(t.ConfigJSON, otherProtoValue, proto)
+		newConfigJSON = setProtoswapInConfig(t.WaterwallConfig, otherProtoValue, proto)
 	}
 
 	// Write the modified config and restart WaterWall
@@ -1054,13 +1054,13 @@ func (c *TunnelController) runExitScanLoop(ctx context.Context, t panel.TunnelIn
 				// Apply config
 				var newConfigJSON string
 				// Extract current values from original config
-				currentTCP, currentUDP := extractProtoswapValues(t.ConfigJSON)
+				currentTCP, currentUDP := extractProtoswapValues(t.WaterwallConfig)
 
 				if currentPhase == "tcp" {
-					newConfigJSON = setProtoswapInConfig(t.ConfigJSON, proto, currentUDP)
+					newConfigJSON = setProtoswapInConfig(t.WaterwallConfig, proto, currentUDP)
 				} else {
 					// Use original TCP value for UDP scan
-					newConfigJSON = setProtoswapInConfig(t.ConfigJSON, currentTCP, proto)
+					newConfigJSON = setProtoswapInConfig(t.WaterwallConfig, currentTCP, proto)
 				}
 
 				if err := c.hotReloadWaterwallConfig(t.Id, newConfigJSON); err != nil {

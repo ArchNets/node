@@ -16,6 +16,7 @@ type TunnelConfigResponse struct {
 type TunnelData struct {
 	CoreConfig *CoreConfig  `json:"core_config"`
 	Tunnels    []TunnelInfo `json:"tunnels"`
+	Total      int64        `json:"total"`
 }
 
 // CoreConfig contains WaterWall core.json settings
@@ -28,14 +29,46 @@ type CoreConfig struct {
 
 // TunnelInfo represents a single tunnel configuration
 type TunnelInfo struct {
-	Id          int          `json:"id"`
-	Name        string       `json:"name"`
-	Role        string       `json:"role"`        // "entry" or "exit"
-	Method      string       `json:"method"`      // "waterwall" or "xray" (NEW)
-	ConfigJSON  string       `json:"config_json"` // Raw WaterWall tunnel config
-	RemoteIP    string       `json:"remote_ip"`   // Remote tunnel IP for health checks
-	Forwarders  []Forwarder  `json:"forwarders"`
-	ScanCommand *ScanCommand `json:"scan_command,omitempty"`
+	Id              int                 `json:"id"`
+	Name            string              `json:"name"`
+	Role            string              `json:"role"`      // "entry" or "exit"
+	Method          string              `json:"method"`    // "waterwall" or "xray" (NEW)
+	RemoteIP        string              `json:"remote_ip"` // Remote tunnel IP for health checks
+	XrayConfig      *XrayTunnelProtocol `json:"xray_config,omitempty"`
+	WaterwallConfig string              `json:"waterwall_config,omitempty"`
+	Forwarders      []Forwarder         `json:"forwarders"`
+	ScanCommand     *ScanCommand        `json:"scan_command,omitempty"`
+}
+
+// XrayTunnelProtocol matches the backend Protocol type with tunnel-specific fields
+type XrayTunnelProtocol struct {
+	// Tunnel-specific
+	UUID    string `json:"uuid"`
+	Address string `json:"address"` // Clean IP or CDN domain
+
+	// Protocol fields
+	Type              string `json:"type"` // vless, vmess, trojan, shadowsocks
+	Port              uint16 `json:"port"`
+	Security          string `json:"security"` // none, tls, reality
+	SNI               string `json:"sni,omitempty"`
+	Fingerprint       string `json:"fingerprint,omitempty"`
+	AllowInsecure     bool   `json:"allow_insecure,omitempty"`
+	Transport         string `json:"transport,omitempty"` // tcp, ws, grpc, xhttp
+	Host              string `json:"host,omitempty"`
+	Path              string `json:"path,omitempty"`
+	ServiceName       string `json:"service_name,omitempty"`
+	XhttpMode         string `json:"xhttp_mode,omitempty"`
+	Flow              string `json:"flow,omitempty"`
+	Encryption        string `json:"encryption,omitempty"`
+	Cipher            string `json:"cipher,omitempty"`
+	ServerKey         string `json:"server_key,omitempty"`
+	CertFile          string `json:"cert_file,omitempty"`
+	KeyFile           string `json:"key_file,omitempty"`
+	RealityServerAddr string `json:"reality_server_addr,omitempty"`
+	RealityServerPort int    `json:"reality_server_port,omitempty"`
+	RealityPrivateKey string `json:"reality_private_key,omitempty"`
+	RealityPublicKey  string `json:"reality_public_key,omitempty"`
+	RealityShortId    string `json:"reality_short_id,omitempty"`
 }
 
 // Forwarder represents a port forwarder configuration (gost/nodepass)
