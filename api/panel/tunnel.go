@@ -60,10 +60,13 @@ type XrayTunnelProtocol struct {
 	XhttpMode         string `json:"xhttp_mode,omitempty"`
 	Flow              string `json:"flow,omitempty"`
 	Encryption        string `json:"encryption,omitempty"`
+	EncryptionMode    string `json:"encryption_mode,omitempty"`
+	EncryptionRTT     string `json:"encryption_rtt,omitempty"`
 	Cipher            string `json:"cipher,omitempty"`
 	ServerKey         string `json:"server_key,omitempty"`
 	CertFile          string `json:"cert_file,omitempty"`
 	KeyFile           string `json:"key_file,omitempty"`
+	ListenIP          string `json:"listen_ip,omitempty"`
 	RealityServerAddr string `json:"reality_server_addr,omitempty"`
 	RealityServerPort int    `json:"reality_server_port,omitempty"`
 	RealityPrivateKey string `json:"reality_private_key,omitempty"`

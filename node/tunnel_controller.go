@@ -870,8 +870,12 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 	if t.Role == "entry" {
 		// Entry node: Create dokodemo-door forwarders + outbound client proxy connection
 		for _, f := range t.Forwarders {
+			listen := "0.0.0.0"
+			if cfg.ListenIP != "" {
+				listen = cfg.ListenIP
+			}
 			inb := map[string]interface{}{
-				"listen":   "0.0.0.0",
+				"listen":   listen,
 				"port":     f.ListenPort,
 				"protocol": "dokodemo-door",
 				"settings": map[string]interface{}{
@@ -879,7 +883,7 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 					"port":    f.TargetPort,
 					"network": f.Protocol,
 				},
-				"tag": fmt.Sprintf("dokodemo-%d", f.ListenPort), // Change from ID since it was missing in struct
+				"tag": fmt.Sprintf("dokodemo-%d", f.ListenPort),
 			}
 			obj["inbounds"] = append(obj["inbounds"].([]interface{}), inb)
 		}
@@ -893,11 +897,7 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 						"address": cfg.Address,
 						"port":    cfg.Port,
 						"users": []interface{}{
-							map[string]interface{}{
-								"id":         cfg.UUID,
-								"encryption": cfg.Encryption,
-								"flow":       cfg.Flow,
-							},
+							buildXrayUser(cfg),
 						},
 					},
 				},
@@ -935,18 +935,32 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 			}
 		}
 
+		client := map[string]interface{}{
+			"id": cfg.UUID,
+		}
+		if cfg.Flow != "" {
+			client["flow"] = cfg.Flow
+		}
+
+		decryption := "none"
+		if cfg.Encryption != "" && cfg.Encryption != "none" {
+			decryption = cfg.Encryption
+		}
+
+		listen := "0.0.0.0"
+		if cfg.ListenIP != "" {
+			listen = cfg.ListenIP
+		}
+
 		inb := map[string]interface{}{
-			"listen":   "0.0.0.0",
+			"listen":   listen,
 			"port":     cfg.Port,
 			"protocol": cfg.Type,
 			"settings": map[string]interface{}{
 				"clients": []interface{}{
-					map[string]interface{}{
-						"id":   cfg.UUID,
-						"flow": cfg.Flow,
-					},
+					client,
 				},
-				"decryption": "none",
+				"decryption": decryption,
 			},
 			"streamSettings": streamSettings,
 			"tag":            "proxy",
@@ -964,6 +978,21 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 	return string(b)
 }
 
+func buildXrayUser(cfg *panel.XrayTunnelProtocol) map[string]interface{} {
+	user := map[string]interface{}{
+		"id": cfg.UUID,
+	}
+	if cfg.Encryption != "" {
+		user["encryption"] = cfg.Encryption
+	} else {
+		user["encryption"] = "none"
+	}
+	if cfg.Flow != "" {
+		user["flow"] = cfg.Flow
+	}
+	return user
+}
+
 func buildXrayStreamSettings(cfg *panel.XrayTunnelProtocol, isServer bool) map[string]interface{} {
 	ss := map[string]interface{}{
 		"network":  cfg.Transport,
@@ -973,9 +1002,16 @@ func buildXrayStreamSettings(cfg *panel.XrayTunnelProtocol, isServer bool) map[s
 	if cfg.Security == "tls" {
 		tlsSettings := map[string]interface{}{
 			"serverName": cfg.SNI,
+			"alpn":       []string{"h2", "http/1.1"},
 		}
-		if isServer {
-			tlsSettings["alpn"] = []string{"h2", "http/1.1"}
+		if !isServer {
+			// Client-side TLS needs fingerprint and allowInsecure for CDN/domain fronting
+			if cfg.Fingerprint != "" {
+				tlsSettings["fingerprint"] = cfg.Fingerprint
+			}
+			if cfg.AllowInsecure {
+				tlsSettings["allowInsecure"] = true
+			}
 		}
 		ss["tlsSettings"] = tlsSettings
 	}
@@ -997,10 +1033,14 @@ func buildXrayStreamSettings(cfg *panel.XrayTunnelProtocol, isServer bool) map[s
 	}
 
 	if cfg.Transport == "xhttp" {
-		ss["xhttpSettings"] = map[string]interface{}{
+		xhttpSettings := map[string]interface{}{
 			"mode": cfg.XhttpMode,
 			"path": cfg.Path,
 		}
+		if cfg.Host != "" {
+			xhttpSettings["host"] = cfg.Host
+		}
+		ss["xhttpSettings"] = xhttpSettings
 	} else if cfg.Transport == "ws" {
 		ss["wsSettings"] = map[string]interface{}{
 			"path": cfg.Path,
