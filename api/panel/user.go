@@ -157,3 +157,33 @@ func (c *ClientV1) ReportNodeOnlineUsers(data *[]OnlineUser) error {
 
 	return nil
 }
+
+// OutboundTraffic represents per-outbound traffic stats
+type OutboundTraffic struct {
+	Tag      string `json:"tag"`
+	Upload   int64  `json:"upload"`
+	Download int64  `json:"download"`
+}
+
+type PushOutboundTrafficRequest struct {
+	Traffic []OutboundTraffic `json:"traffic"`
+}
+
+func (c *ClientV1) PushOutboundTraffic(traffic []OutboundTraffic) error {
+	const p = "/v1/server/outbound_traffic"
+	req := PushOutboundTrafficRequest{
+		Traffic: traffic,
+	}
+	r, err := c.Client.R().
+		SetBody(req).
+		ForceContentType("application/json").
+		Post(p)
+	if err != nil {
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
+	}
+	if r.StatusCode() >= 400 {
+		body := r.Body()
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
+	}
+	return nil
+}

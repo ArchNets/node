@@ -14,15 +14,17 @@ type ServerConfigResponse struct {
 }
 
 type Data struct {
-	TrafficReportThreshold int         `json:"traffic_report_threshold"`
-	PushInterval           int         `json:"push_interval"`
-	PullInterval           int         `json:"pull_interval"`
-	IPStrategy             string      `json:"ip_strategy"`
-	DNS                    *[]DNSItem  `json:"dns"`
-	Block                  *[]string   `json:"block"`
-	Outbound               *[]Outbound `json:"outbound"`
-	Protocols              *[]Protocol `json:"protocols"`
-	Total                  int         `json:"total"`
+	TrafficReportThreshold int            `json:"traffic_report_threshold"`
+	PushInterval           int            `json:"push_interval"`
+	PullInterval           int            `json:"pull_interval"`
+	IPStrategy             string         `json:"ip_strategy"`
+	DNS                    *[]DNSItem     `json:"dns"`
+	Block                  *[]string      `json:"block"`
+	Outbound               *[]Outbound    `json:"outbound"`
+	Routing                *[]RoutingRule `json:"routing"`
+	StatsPolicy            *StatsPolicy   `json:"stats_policy"`
+	Protocols              *[]Protocol    `json:"protocols"`
+	Total                  int            `json:"total"`
 }
 
 type DNSItem struct {
@@ -32,12 +34,33 @@ type DNSItem struct {
 }
 
 type Outbound struct {
-	Name     string   `json:"name"`
-	Protocol string   `json:"protocol"`
-	Address  string   `json:"address"`
-	Port     int      `json:"port"`
-	Password string   `json:"password"`
-	Rules    []string `json:"rules"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Address  string `json:"address"`
+	Port     int    `json:"port"`
+	Password string `json:"password"`
+}
+
+type RoutingRule struct {
+	InboundTags []string `json:"inbound_tags,omitempty"`
+	OutboundTag string   `json:"outbound_tag,omitempty"`
+	BalancerTag string   `json:"balancer_tag,omitempty"`
+	Network     string   `json:"network,omitempty"`
+	Domain      []string `json:"domain,omitempty"`
+	IP          []string `json:"ip,omitempty"`
+	Port        string   `json:"port,omitempty"`
+	SourceIP    []string `json:"source_ip,omitempty"`
+	SourcePort  string   `json:"source_port,omitempty"`
+	Protocol    []string `json:"protocol,omitempty"`
+	User        []string `json:"user,omitempty"`
+	Attrs       string   `json:"attrs,omitempty"`
+}
+
+type StatsPolicy struct {
+	InboundUplink    bool `json:"inbound_uplink"`
+	InboundDownlink  bool `json:"inbound_downlink"`
+	OutboundUplink   bool `json:"outbound_uplink"`
+	OutboundDownlink bool `json:"outbound_downlink"`
 }
 
 type Protocol struct {

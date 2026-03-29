@@ -17,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/routing"
+	xraystats "github.com/xtls/xray-core/features/stats"
 	coreConf "github.com/xtls/xray-core/infra/conf"
 	"google.golang.org/protobuf/proto"
 )
@@ -38,6 +39,8 @@ type XrayCore struct {
 	ihm                         inbound.Manager
 	ohm                         outbound.Manager
 	dispatcher                  *dispatcher.DefaultDispatcher
+	statsManager                xraystats.Manager
+	outboundNames               []string
 }
 
 type UserMap struct {
@@ -66,6 +69,16 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+	if sm := v.Server.GetFeature(xraystats.ManagerType()); sm != nil {
+		v.statsManager = sm.(xraystats.Manager)
+	}
+	// Store outbound names for stats collection
+	if serverconfig.Data.Outbound != nil {
+		v.outboundNames = make([]string, 0, len(*serverconfig.Data.Outbound))
+		for _, ob := range *serverconfig.Data.Outbound {
+			v.outboundNames = append(v.outboundNames, ob.Name)
+		}
+	}
 	v.startTasks(serverconfig)
 	return nil
 }
@@ -103,6 +116,14 @@ func getCore(c *conf.Conf, serverconfig *panel.ServerConfigResponse) *core.Insta
 	var inBoundConfig []*core.InboundHandlerConfig
 
 	// Policy config
+	statsPolicy := serverconfig.Data.StatsPolicy
+	if statsPolicy == nil {
+		statsPolicy = &panel.StatsPolicy{
+			InboundUplink:   true,
+			InboundDownlink: true,
+		}
+	}
+
 	levelPolicyConfig := &coreConf.Policy{
 		StatsUserUplink:   true,
 		StatsUserDownlink: true,
@@ -114,6 +135,12 @@ func getCore(c *conf.Conf, serverconfig *panel.ServerConfigResponse) *core.Insta
 	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
+	corePolicyConfig.System = &coreConf.SystemPolicy{
+		StatsInboundUplink:    statsPolicy.InboundUplink,
+		StatsInboundDownlink:  statsPolicy.InboundDownlink,
+		StatsOutboundUplink:   statsPolicy.OutboundUplink,
+		StatsOutboundDownlink: statsPolicy.OutboundDownlink,
+	}
 	policyConfig, _ := corePolicyConfig.Build()
 	// Build Xray conf
 	config := &core.Config{

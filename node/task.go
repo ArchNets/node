@@ -151,6 +151,18 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 		}
 	}
 
+	// Report outbound traffic
+	if outTraffic := c.server.GetOutboundTraffic(); len(outTraffic) > 0 {
+		if err := c.apiClient.PushOutboundTraffic(outTraffic); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Info("Report outbound traffic failed")
+		} else {
+			log.WithField("node", c.tag).Infof("Reported traffic for %d outbounds", len(outTraffic))
+		}
+	}
+
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
 		log.Print(err)
 	} else {

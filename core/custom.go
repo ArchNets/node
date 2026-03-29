@@ -207,23 +207,10 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				jsonsettings["uuid"] = outbounditem.Password
 				proto := coreConf.TransportProtocol("tcp")
 				streamSettings.Network = &proto
-				/*if outbounditem.Security != "" && outbounditem.Security == "tls" {
-					streamSettings.Security = "tls"
-					streamSettings.TLSSettings = &coreConf.TLSConfig{
-						ServerName: outbounditem.SNI,
-						Insecure: outbounditem.Insecure,
-				}*/
 			case "vless":
 				jsonsettings["uuid"] = outbounditem.Password
 				proto := coreConf.TransportProtocol("tcp")
 				streamSettings.Network = &proto
-				/*if outbounditem.Security != "" && outbounditem.Security == "tls" {
-					streamSettings.Security = "tls"
-					streamSettings.TLSSettings = &coreConf.TLSConfig{
-						ServerName: outbounditem.SNI,
-						Insecure: outbounditem.Insecure,
-				}*/
-			//case "wireguard":
 			default:
 				continue
 			}
@@ -236,41 +223,63 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				Settings:      &rawSettings,
 				StreamSetting: streamSettings,
 			}
-			// Outbound rules
-			var domains []string
-			for _, item := range outbounditem.Rules {
-				data := strings.Split(item, ":")
-				if len(data) == 2 {
-					switch data[0] {
-					case "keyword":
-						domains = append(domains, data[1])
-					case "suffix":
-						domains = append(domains, "domain:"+data[1])
-					case "regex":
-						domains = append(domains, "regexp:"+data[1])
-					default:
-						domains = append(domains, data[1])
-					}
-				} else {
-					domains = append(domains, "full:"+item)
-				}
-			}
+
 			custom_outbound, err := outbound.Build()
 			if err != nil {
 				continue
 			}
-			rule := map[string]interface{}{
-				"domain":      domains,
-				"outboundTag": custom_outbound.Tag,
-			}
-			rawRule, err := json.Marshal(rule)
-			if err == nil {
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			}
+
 			if hasOutboundWithTag(coreOutboundConfig, custom_outbound.Tag) {
 				continue
 			}
 			coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
+		}
+	}
+
+	// custom routing rules
+	if routingList := serverconfig.Data.Routing; routingList != nil {
+		for _, rule := range *routingList {
+			xrayRule := map[string]interface{}{"type": "field"}
+			if len(rule.InboundTags) > 0 {
+				xrayRule["inboundTag"] = rule.InboundTags
+			}
+			if rule.OutboundTag != "" {
+				xrayRule["outboundTag"] = rule.OutboundTag
+			}
+			if rule.BalancerTag != "" {
+				xrayRule["balancerTag"] = rule.BalancerTag
+			}
+			if rule.Network != "" {
+				xrayRule["network"] = rule.Network
+			}
+			if len(rule.Domain) > 0 {
+				xrayRule["domain"] = rule.Domain
+			}
+			if len(rule.IP) > 0 {
+				xrayRule["ip"] = rule.IP
+			}
+			if rule.Port != "" {
+				xrayRule["port"] = rule.Port
+			}
+			if len(rule.SourceIP) > 0 {
+				xrayRule["source"] = rule.SourceIP
+			}
+			if rule.SourcePort != "" {
+				xrayRule["sourcePort"] = rule.SourcePort
+			}
+			if len(rule.Protocol) > 0 {
+				xrayRule["protocol"] = rule.Protocol
+			}
+			if len(rule.User) > 0 {
+				xrayRule["user"] = rule.User
+			}
+			if rule.Attrs != "" {
+				xrayRule["attrs"] = rule.Attrs
+			}
+			rawRule, err := json.Marshal(xrayRule)
+			if err == nil {
+				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+			}
 		}
 	}
 	//build config

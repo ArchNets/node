@@ -114,8 +114,8 @@ func (c *Controller) Close() error {
 func (c *Controller) buildNodeTag(node *panel.NodeInfo) string {
 	if c.protocolIndex > 1 {
 		// Multiple protocols of same type: add index suffix
-		return fmt.Sprintf("[%s]-%s-%d:%d", c.apiClient.APIHost, node.Type, c.protocolIndex, node.Id)
+		return fmt.Sprintf("%s-%d:%d", node.Type, c.protocolIndex, node.Id)
 	}
 	// Single protocol of this type: use original format
-	return fmt.Sprintf("[%s]-%s:%d", c.apiClient.APIHost, node.Type, node.Id)
+	return fmt.Sprintf("%s:%d", node.Type, node.Id)
 }
