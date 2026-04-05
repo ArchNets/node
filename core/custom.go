@@ -181,42 +181,120 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				"address": outbounditem.Address,
 				"port":    outbounditem.Port,
 			}
-			streamSettings := &coreConf.StreamConfig{}
 			switch outbounditem.Protocol {
 			case "http":
-				//jsonsettings["user"] = outbounditem.User
-				jsonsettings["pass"] = outbounditem.Password
+				if outbounditem.User != "" {
+					jsonsettings["user"] = outbounditem.User
+				}
+				if outbounditem.Password != "" {
+					jsonsettings["pass"] = outbounditem.Password
+				}
 			case "socks":
-				//jsonsettings["user"] = outbounditem.User
-				jsonsettings["pass"] = outbounditem.Password
+				if outbounditem.User != "" {
+					jsonsettings["user"] = outbounditem.User
+				}
+				if outbounditem.Password != "" {
+					jsonsettings["pass"] = outbounditem.Password
+				}
 			case "shadowsocks":
-				//jsonsettings["method"] = outbounditem.Method
+				if outbounditem.Cipher != "" {
+					jsonsettings["method"] = outbounditem.Cipher
+				} else {
+					jsonsettings["method"] = "chacha20-ietf-poly1305"
+				}
 				jsonsettings["password"] = outbounditem.Password
 				jsonsettings["uot"] = true
 				jsonsettings["UoTVersion"] = 2
 			case "trojan":
 				jsonsettings["password"] = outbounditem.Password
-				proto := coreConf.TransportProtocol("tcp")
-				streamSettings.Network = &proto
-				streamSettings.Security = "tls"
-				streamSettings.TLSSettings = &coreConf.TLSConfig{
-					//ServerName: outbounditem.SNI,
-					//Insecure: outbounditem.Insecure,
-				}
 			case "vmess":
-				jsonsettings["uuid"] = outbounditem.Password
-				proto := coreConf.TransportProtocol("tcp")
-				streamSettings.Network = &proto
+				jsonsettings["id"] = outbounditem.Password
 			case "vless":
-				jsonsettings["uuid"] = outbounditem.Password
-				proto := coreConf.TransportProtocol("tcp")
-				streamSettings.Network = &proto
+				jsonsettings["id"] = outbounditem.Password
+				jsonsettings["encryption"] = "none"
+				if outbounditem.Flow != "" {
+					jsonsettings["flow"] = outbounditem.Flow
+				}
 			default:
 				continue
 			}
 
 			settings, _ := json.Marshal(jsonsettings)
 			rawSettings := json.RawMessage(settings)
+
+			// Setup transport network
+			transport := outbounditem.Transport
+			if transport == "" {
+				transport = "tcp"
+			}
+			protoT := coreConf.TransportProtocol(transport)
+			streamSettings := &coreConf.StreamConfig{Network: &protoT}
+
+			switch transport {
+			case "tcp":
+				streamSettings.TCPSettings = &coreConf.TCPConfig{}
+				if outbounditem.TCPHeaderType == "http" {
+					httpHeader := map[string]interface{}{
+						"type":    "http",
+						"request": map[string]interface{}{},
+					}
+					request := httpHeader["request"].(map[string]interface{})
+					path := outbounditem.TCPHeaderPath
+					if path == "" {
+						path = "/"
+					}
+					request["path"] = []string{path}
+					if len(outbounditem.TCPHeaderHost) > 0 {
+						request["headers"] = map[string]interface{}{
+							"Host": outbounditem.TCPHeaderHost,
+						}
+					}
+					headerJSON, err := json.Marshal(httpHeader)
+					if err == nil {
+						streamSettings.TCPSettings.HeaderConfig = json.RawMessage(headerJSON)
+					}
+				}
+			case "ws", "websocket":
+				streamSettings.WSSettings = &coreConf.WebSocketConfig{
+					Host: outbounditem.Host,
+					Path: outbounditem.Path,
+				}
+			case "grpc":
+				streamSettings.GRPCSettings = &coreConf.GRPCConfig{
+					ServiceName: outbounditem.ServiceName,
+				}
+			case "httpupgrade":
+				streamSettings.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
+					Host: outbounditem.Host,
+					Path: outbounditem.Path,
+				}
+			case "splithttp", "xhttp":
+				streamSettings.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
+					Host: outbounditem.Host,
+					Path: outbounditem.Path,
+				}
+			}
+
+			// Setup security (TLS/Reality)
+			security := outbounditem.Security
+			if security == "tls" {
+				streamSettings.Security = "tls"
+				streamSettings.TLSSettings = &coreConf.TLSConfig{
+					ServerName:    outbounditem.SNI,
+					AllowInsecure: outbounditem.AllowInsecure,
+					Fingerprint:   outbounditem.Fingerprint,
+				}
+			} else if security == "reality" {
+				streamSettings.Security = "reality"
+				streamSettings.REALITYSettings = &coreConf.REALITYConfig{
+					ServerName:  outbounditem.SNI,
+					Fingerprint: outbounditem.Fingerprint,
+					PublicKey:   outbounditem.RealityPublicKey,
+					ShortId:     outbounditem.RealityShortId,
+					SpiderX:     outbounditem.RealitySpiderX,
+				}
+			}
+
 			outbound := &coreConf.OutboundDetourConfig{
 				Tag:           outbounditem.Name,
 				Protocol:      outbounditem.Protocol,

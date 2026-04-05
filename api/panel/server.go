@@ -34,11 +34,28 @@ type DNSItem struct {
 }
 
 type Outbound struct {
-	Name     string `json:"name"`
-	Protocol string `json:"protocol"`
-	Address  string `json:"address"`
-	Port     int    `json:"port"`
-	Password string `json:"password"`
+	Name             string `json:"name"`
+	Protocol         string `json:"protocol"`
+	Address          string `json:"address"`
+	Port             int    `json:"port"`
+	Password         string `json:"password"`
+	Transport        string `json:"transport,omitempty"`
+	Host             string `json:"host,omitempty"`
+	Path             string `json:"path,omitempty"`
+	ServiceName      string `json:"service_name,omitempty"`
+	TCPHeaderType    string `json:"tcp_header_type,omitempty"`
+	TCPHeaderHost    string `json:"tcp_header_host,omitempty"`
+	TCPHeaderPath    string `json:"tcp_header_path,omitempty"`
+	Security         string `json:"security,omitempty"`
+	SNI              string `json:"sni,omitempty"`
+	AllowInsecure    bool   `json:"allow_insecure,omitempty"`
+	Fingerprint      string `json:"fingerprint,omitempty"`
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	RealityShortId   string `json:"reality_short_id,omitempty"`
+	RealitySpiderX   string `json:"reality_spider_x,omitempty"`
+	Flow             string `json:"flow,omitempty"`
+	Cipher           string `json:"cipher,omitempty"`
+	User             string `json:"user,omitempty"`
 }
 
 type RoutingRule struct {

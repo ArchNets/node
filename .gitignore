@@ -6,3 +6,6 @@ output/*
 .idea/*
 new.sh
 build_assets/*
+install-mirror.sh
+node-mirror.sh
+docs/*
