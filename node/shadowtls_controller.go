@@ -59,7 +59,7 @@ func (c *ShadowTLSController) Start() error {
 	}
 
 	// Create limiter for this protocol
-	c.limiter = limiter.AddLimiter(c.tag, users, aliveList)
+	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, users, aliveList)
 
 	// Get ShadowTLS-specific config - all fields required
 	if c.info.Protocol == nil {

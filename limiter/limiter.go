@@ -20,6 +20,7 @@ func Init() {
 }
 
 type Limiter struct {
+	Nodetype      string
 	SpeedLimit    int
 	UserOnlineIP  *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
 	OldUserOnline *sync.Map      // Key: Ip, value: Uid
@@ -38,8 +39,9 @@ type UserLimitInfo struct {
 	OverLimit         bool
 }
 
-func AddLimiter(tag string, users []panel.UserInfo, aliveList map[int]int) *Limiter {
+func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int) *Limiter {
 	info := &Limiter{
+		Nodetype:      nodetype,
 		UserOnlineIP:  new(sync.Map),
 		UserLimitInfo: new(sync.Map),
 		SpeedLimiter:  new(sync.Map),
@@ -137,7 +139,7 @@ func isConnectivityCheck(host string) bool {
 		"airport.us",
 		"attwifi.apple.com",
 	}
-	
+
 	host = strings.ToLower(host)
 	for _, domain := range connectivityDomains {
 		if strings.Contains(host, domain) {
@@ -147,11 +149,11 @@ func isConnectivityCheck(host string) bool {
 	return false
 }
 
-func (l *Limiter) CheckLimit(taguuid string, ip string, isTcp bool, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
-	return l.CheckLimitWithDestination(taguuid, ip, "", isTcp, noSSUDP)
+func (l *Limiter) CheckLimit(taguuid string, ip string, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
+	return l.CheckLimitWithDestination(taguuid, ip, "", noSSUDP)
 }
 
-func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destination string, isTcp bool, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
+func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destination string, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
 	// check if ipv4 mapped ipv6
 	ip = strings.TrimPrefix(ip, "::ffff:")
 
@@ -187,7 +189,7 @@ func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destinati
 	} else {
 		return nil, true
 	}
-	if noSSUDP && !skipDeviceLimit {
+	if (noSSUDP || l.Nodetype == "hysteria2") && !skipDeviceLimit {
 		// Store online user for device limit
 		ipMap := new(sync.Map)
 		ipMap.Store(ip, uid)

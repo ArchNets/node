@@ -239,7 +239,7 @@ func (s *ShadowTLSCore) NewConnectionEx(ctx context.Context, conn net.Conn, sour
 	// Check device limit
 	if s.limiterRef != nil {
 		tagUUID := format.UserTag(s.Tag, userName)
-		_, reject := s.limiterRef.CheckLimit(tagUUID, ip, true, true)
+		_, reject := s.limiterRef.CheckLimit(tagUUID, ip, true)
 		if reject {
 			log.WithFields(log.Fields{
 				"uid": uid,

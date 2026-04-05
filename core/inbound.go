@@ -372,7 +372,6 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	}
 	settings.Users = append(settings.Users, defaultSSuser)
 	settings.NetworkList = &coreConf.NetworkList{"tcp", "udp"}
-	settings.IVCheck = true
 
 	if nodeInfo.Protocol.Obfs != "" && nodeInfo.Protocol.Obfs == "http" {
 		if nodeInfo.Protocol.ObfsPath != "" || nodeInfo.Protocol.ObfsHost != "" {
@@ -413,38 +412,16 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 }
 
 func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
-	inbound.Protocol = "hysteria2"
-	up := nodeInfo.Protocol.UpMbps
-	down := nodeInfo.Protocol.DownMbps
-	ignore := false
-	if up == 0 && down == 0 {
-		ignore = true
-	}
-	obfs := nodeInfo.Protocol.Obfs
-	obfs_password := nodeInfo.Protocol.ObfsPassword
-	if obfs != "" {
-		if obfs == "none" {
-			obfs = ""
-			obfs_password = ""
-		}
-	}
-	settings := &coreConf.Hysteria2ServerConfig{
-		UpMbps:                uint64(up),
-		DownMbps:              uint64(down),
-		IgnoreClientBandwidth: ignore,
-		Obfs: &coreConf.Hysteria2ObfsConfig{
-			Type:     obfs,
-			Password: obfs_password,
-		},
-	}
+	inbound.Protocol = "hysteria"
+	settings := &coreConf.HysteriaServerConfig{}
 
-	t := coreConf.TransportProtocol("hysteria2")
+	t := coreConf.TransportProtocol("hysteria")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 
 	sets, err := json.Marshal(settings)
 	inbound.Settings = (*json.RawMessage)(&sets)
 	if err != nil {
-		return fmt.Errorf("marshal hysteria2 settings error: %s", err)
+		return fmt.Errorf("marshal hysteria settings error: %s", err)
 	}
 	return nil
 }

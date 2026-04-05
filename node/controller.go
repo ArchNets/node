@@ -62,7 +62,7 @@ func (c *Controller) Start() error {
 	c.tag = c.buildNodeTag(c.info)
 
 	// add limiter
-	l := limiter.AddLimiter(c.tag, c.userList, c.aliveMap)
+	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
 	c.limiter = l
 
 	if c.info.Protocol.Security == "tls" {

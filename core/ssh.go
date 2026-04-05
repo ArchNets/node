@@ -127,7 +127,7 @@ func (s *SSHCore) passwordCallback(conn ssh.ConnMetadata, password []byte) (*ssh
 	// Check device limit via limiter
 	if s.limiterRef != nil {
 		tagUUID := format.UserTag(s.Tag, uuid)
-		_, reject := s.limiterRef.CheckLimit(tagUUID, ip, true, true)
+		_, reject := s.limiterRef.CheckLimit(tagUUID, ip, true)
 		if reject {
 			log.WithFields(log.Fields{
 				"uid": uid,

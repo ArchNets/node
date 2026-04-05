@@ -58,7 +58,7 @@ func (c *WireGuardController) Start() error {
 	}
 
 	// Create limiter for this protocol
-	c.limiter = limiter.AddLimiter(c.tag, users, aliveList)
+	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, users, aliveList)
 
 	// Get WireGuard configuration from protocol
 	address := "10.0.0.1/24" // Default
