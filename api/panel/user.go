@@ -39,6 +39,8 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 	const p = "/v1/server/user"
 	r, err := c.Client.R().
 		SetHeader("If-None-Match", c.userEtag).
+		SetHeader("Cache-Control", "no-cache, no-store").
+		SetHeader("Pragma", "no-cache").
 		ForceContentType("application/json").
 		SetDoNotParseResponse(true).
 		Get(p)
@@ -78,6 +80,8 @@ type AliveResponse struct {
 func (c *ClientV1) GetUserAlive() (map[int]int, error) {
 	const path = "/v1/server/alivelist"
 	r, err := c.Client.R().
+		SetHeader("Cache-Control", "no-cache, no-store").
+		SetHeader("Pragma", "no-cache").
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil || r.StatusCode() >= 399 {

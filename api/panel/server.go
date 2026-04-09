@@ -173,6 +173,8 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 	r, err := client.
 		R().
 		SetHeader("If-None-Match", c.ServerConfigEtag).
+		SetHeader("Cache-Control", "no-cache, no-store").
+		SetHeader("Pragma", "no-cache").
 		ForceContentType("application/json").
 		Get(path)
 
