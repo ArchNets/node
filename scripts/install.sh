@@ -298,6 +298,8 @@ install_ppnode() {
     mkdir /etc/archnets/ -p
     cp geoip.dat /etc/archnets/
     cp geosite.dat /etc/archnets/
+    cp geoip_iran.dat /etc/archnets/ 2>/dev/null || true
+    cp geosite_iran.dat /etc/archnets/ 2>/dev/null || true
     if [[ x"${release}" == x"alpine" ]]; then
         rm /etc/init.d/archnets -f
         cat <<EOF > /etc/init.d/archnets

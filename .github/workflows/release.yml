@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build (leave empty for branch)'
+        description: "Tag to build (leave empty for branch)"
         required: false
         type: string
   pull_request:
@@ -22,7 +22,6 @@ permissions:
   actions: read
 
 jobs:
-
   build:
     strategy:
       matrix:
@@ -109,7 +108,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.3'
+          go-version: "1.25.3"
 
       - name: Get project dependencies
         run: GOEXPERIMENT=jsonv2 go mod download
@@ -147,6 +146,14 @@ jobs:
             DOWNLOAD_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/${i}.dat"
             FILE_NAME="${i}.dat"
             echo -e "Downloading ${DOWNLOAD_URL}..."
+            curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
+          done
+          # Iran-specific geo files (separate dat files, used with ext: prefix)
+          for i in "${LIST[@]}"
+          do
+            DOWNLOAD_URL="https://raw.githubusercontent.com/Chocolate4U/Iran-v2ray-rules/release/${i}.dat"
+            FILE_NAME="${i}_iran.dat"
+            echo -e "Downloading Iran ${DOWNLOAD_URL}..."
             curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
           done
       - name: Add config template
