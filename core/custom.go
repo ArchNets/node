@@ -317,9 +317,21 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	// custom routing rules
 	if routingList := serverconfig.Data.Routing; routingList != nil {
 		for _, rule := range *routingList {
+			splitFunc := func(items []string) []string {
+				var res []string
+				for _, item := range items {
+					for _, part := range strings.Split(item, ",") {
+						if trimmed := strings.TrimSpace(part); trimmed != "" {
+							res = append(res, trimmed)
+						}
+					}
+				}
+				return res
+			}
+
 			xrayRule := map[string]interface{}{"type": "field"}
 			if len(rule.InboundTags) > 0 {
-				xrayRule["inboundTag"] = rule.InboundTags
+				xrayRule["inboundTag"] = splitFunc(rule.InboundTags)
 			}
 			if rule.OutboundTag != "" {
 				xrayRule["outboundTag"] = rule.OutboundTag
@@ -331,25 +343,25 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				xrayRule["network"] = rule.Network
 			}
 			if len(rule.Domain) > 0 {
-				xrayRule["domain"] = rule.Domain
+				xrayRule["domain"] = splitFunc(rule.Domain)
 			}
 			if len(rule.IP) > 0 {
-				xrayRule["ip"] = rule.IP
+				xrayRule["ip"] = splitFunc(rule.IP)
 			}
 			if rule.Port != "" {
 				xrayRule["port"] = rule.Port
 			}
 			if len(rule.SourceIP) > 0 {
-				xrayRule["source"] = rule.SourceIP
+				xrayRule["source"] = splitFunc(rule.SourceIP)
 			}
 			if rule.SourcePort != "" {
 				xrayRule["sourcePort"] = rule.SourcePort
 			}
 			if len(rule.Protocol) > 0 {
-				xrayRule["protocol"] = rule.Protocol
+				xrayRule["protocol"] = splitFunc(rule.Protocol)
 			}
 			if len(rule.User) > 0 {
-				xrayRule["user"] = rule.User
+				xrayRule["user"] = splitFunc(rule.User)
 			}
 			if rule.Attrs != "" {
 				xrayRule["attrs"] = rule.Attrs
