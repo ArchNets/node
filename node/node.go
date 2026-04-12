@@ -100,13 +100,13 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
 		} else if nodeconfig.Type == "wireguard" {
-			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(p, n, isPrimaryReporter))
+			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(core, p, n, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "wireguard",
 				"port": nodeconfig.Port,
 			}).Info("WireGuard protocol detected, using WireGuard controller")
 		} else if nodeconfig.Type == "amneziawg" {
-			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(p, n, isPrimaryReporter))
+			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(core, p, n, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "amneziawg",
 				"port": nodeconfig.Port,

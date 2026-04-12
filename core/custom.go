@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/archnets/node/api/panel"
@@ -215,6 +216,37 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				if outbounditem.Flow != "" {
 					jsonsettings["flow"] = outbounditem.Flow
 				}
+			case "wireguard":
+				delete(jsonsettings, "address")
+				delete(jsonsettings, "port")
+				jsonsettings["secretKey"] = outbounditem.WireguardPrivateKey
+				if len(outbounditem.WireguardAddress) > 0 {
+					jsonsettings["address"] = []string{outbounditem.WireguardAddress}
+				}
+				if outbounditem.WireguardMTU > 0 {
+					jsonsettings["mtu"] = outbounditem.WireguardMTU
+				}
+				peer := map[string]interface{}{
+					"publicKey": outbounditem.WireguardPeerPublicKey,
+					"endpoint":  outbounditem.WireguardPeerEndpoint,
+				}
+				jsonsettings["peers"] = []interface{}{peer}
+
+				if len(outbounditem.WireguardReserved) > 0 {
+					parts := strings.Split(outbounditem.WireguardReserved, ",")
+					if len(parts) == 3 {
+						var res []int
+						for _, p := range parts {
+							v, err := strconv.Atoi(strings.TrimSpace(p))
+							if err == nil {
+								res = append(res, v)
+							}
+						}
+						if len(res) == 3 {
+							jsonsettings["reserved"] = res
+						}
+					}
+				}
 			default:
 				continue
 			}
@@ -222,84 +254,96 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			settings, _ := json.Marshal(jsonsettings)
 			rawSettings := json.RawMessage(settings)
 
-			// Setup transport network
-			transport := outbounditem.Transport
-			if transport == "" {
-				transport = "tcp"
-			}
-			protoT := coreConf.TransportProtocol(transport)
-			streamSettings := &coreConf.StreamConfig{Network: &protoT}
+			var outbound *coreConf.OutboundDetourConfig
 
-			switch transport {
-			case "tcp":
-				streamSettings.TCPSettings = &coreConf.TCPConfig{}
-				if outbounditem.TCPHeaderType == "http" {
-					httpHeader := map[string]interface{}{
-						"type":    "http",
-						"request": map[string]interface{}{},
-					}
-					request := httpHeader["request"].(map[string]interface{})
-					path := outbounditem.TCPHeaderPath
-					if path == "" {
-						path = "/"
-					}
-					request["path"] = []string{path}
-					if len(outbounditem.TCPHeaderHost) > 0 {
-						request["headers"] = map[string]interface{}{
-							"Host": outbounditem.TCPHeaderHost,
+			if outbounditem.Protocol == "wireguard" {
+				// WireGuard outbounds are self-contained tunnels;
+				// they don't use transport or TLS stream settings.
+				outbound = &coreConf.OutboundDetourConfig{
+					Tag:      outbounditem.Name,
+					Protocol: outbounditem.Protocol,
+					Settings: &rawSettings,
+				}
+			} else {
+				// Setup transport network
+				transport := outbounditem.Transport
+				if transport == "" {
+					transport = "tcp"
+				}
+				protoT := coreConf.TransportProtocol(transport)
+				streamSettings := &coreConf.StreamConfig{Network: &protoT}
+
+				switch transport {
+				case "tcp":
+					streamSettings.TCPSettings = &coreConf.TCPConfig{}
+					if outbounditem.TCPHeaderType == "http" {
+						httpHeader := map[string]interface{}{
+							"type":    "http",
+							"request": map[string]interface{}{},
+						}
+						request := httpHeader["request"].(map[string]interface{})
+						path := outbounditem.TCPHeaderPath
+						if path == "" {
+							path = "/"
+						}
+						request["path"] = []string{path}
+						if len(outbounditem.TCPHeaderHost) > 0 {
+							request["headers"] = map[string]interface{}{
+								"Host": outbounditem.TCPHeaderHost,
+							}
+						}
+						headerJSON, err := json.Marshal(httpHeader)
+						if err == nil {
+							streamSettings.TCPSettings.HeaderConfig = json.RawMessage(headerJSON)
 						}
 					}
-					headerJSON, err := json.Marshal(httpHeader)
-					if err == nil {
-						streamSettings.TCPSettings.HeaderConfig = json.RawMessage(headerJSON)
+				case "ws", "websocket":
+					streamSettings.WSSettings = &coreConf.WebSocketConfig{
+						Host: outbounditem.Host,
+						Path: outbounditem.Path,
+					}
+				case "grpc":
+					streamSettings.GRPCSettings = &coreConf.GRPCConfig{
+						ServiceName: outbounditem.ServiceName,
+					}
+				case "httpupgrade":
+					streamSettings.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
+						Host: outbounditem.Host,
+						Path: outbounditem.Path,
+					}
+				case "splithttp", "xhttp":
+					streamSettings.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
+						Host: outbounditem.Host,
+						Path: outbounditem.Path,
 					}
 				}
-			case "ws", "websocket":
-				streamSettings.WSSettings = &coreConf.WebSocketConfig{
-					Host: outbounditem.Host,
-					Path: outbounditem.Path,
-				}
-			case "grpc":
-				streamSettings.GRPCSettings = &coreConf.GRPCConfig{
-					ServiceName: outbounditem.ServiceName,
-				}
-			case "httpupgrade":
-				streamSettings.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
-					Host: outbounditem.Host,
-					Path: outbounditem.Path,
-				}
-			case "splithttp", "xhttp":
-				streamSettings.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
-					Host: outbounditem.Host,
-					Path: outbounditem.Path,
-				}
-			}
 
-			// Setup security (TLS/Reality)
-			security := outbounditem.Security
-			if security == "tls" {
-				streamSettings.Security = "tls"
-				streamSettings.TLSSettings = &coreConf.TLSConfig{
-					ServerName:    outbounditem.SNI,
-					AllowInsecure: outbounditem.AllowInsecure,
-					Fingerprint:   outbounditem.Fingerprint,
+				// Setup security (TLS/Reality)
+				security := outbounditem.Security
+				if security == "tls" {
+					streamSettings.Security = "tls"
+					streamSettings.TLSSettings = &coreConf.TLSConfig{
+						ServerName:    outbounditem.SNI,
+						AllowInsecure: outbounditem.AllowInsecure,
+						Fingerprint:   outbounditem.Fingerprint,
+					}
+				} else if security == "reality" {
+					streamSettings.Security = "reality"
+					streamSettings.REALITYSettings = &coreConf.REALITYConfig{
+						ServerName:  outbounditem.SNI,
+						Fingerprint: outbounditem.Fingerprint,
+						PublicKey:   outbounditem.RealityPublicKey,
+						ShortId:     outbounditem.RealityShortId,
+						SpiderX:     outbounditem.RealitySpiderX,
+					}
 				}
-			} else if security == "reality" {
-				streamSettings.Security = "reality"
-				streamSettings.REALITYSettings = &coreConf.REALITYConfig{
-					ServerName:  outbounditem.SNI,
-					Fingerprint: outbounditem.Fingerprint,
-					PublicKey:   outbounditem.RealityPublicKey,
-					ShortId:     outbounditem.RealityShortId,
-					SpiderX:     outbounditem.RealitySpiderX,
-				}
-			}
 
-			outbound := &coreConf.OutboundDetourConfig{
-				Tag:           outbounditem.Name,
-				Protocol:      outbounditem.Protocol,
-				Settings:      &rawSettings,
-				StreamSetting: streamSettings,
+				outbound = &coreConf.OutboundDetourConfig{
+					Tag:           outbounditem.Name,
+					Protocol:      outbounditem.Protocol,
+					Settings:      &rawSettings,
+					StreamSetting: streamSettings,
+				}
 			}
 
 			custom_outbound, err := outbound.Build()

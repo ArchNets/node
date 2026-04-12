@@ -1,6 +1,8 @@
 package node
 
 import (
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	vCore "github.com/archnets/node/core"
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
+	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 // AmneziaWGController manages AmneziaWG protocol nodes
@@ -24,15 +27,17 @@ type AmneziaWGController struct {
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	isPrimaryReporter       bool
+	xrayCore                *vCore.XrayCore
 }
 
 // NewAmneziaWGController creates a new AmneziaWG controller
-func NewAmneziaWGController(apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *AmneziaWGController {
+func NewAmneziaWGController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *AmneziaWGController {
 	return &AmneziaWGController{
 		tag:               generateAmneziaWGTag(info),
 		info:              info,
 		apiClient:         apiClient,
 		isPrimaryReporter: isPrimaryReporter,
+		xrayCore:          core,
 	}
 }
 
@@ -105,6 +110,35 @@ func (c *AmneziaWGController) Start() error {
 	}
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
+	// Inject Xray TPROXY Inbound
+	tproxyPort := 10800 + c.info.Id
+	inboundJSON := fmt.Sprintf(`{
+		"tag": "%s",
+		"port": %d,
+		"protocol": "dokodemo-door",
+		"settings": {
+			"network": "tcp,udp",
+			"followRedirect": true
+		},
+		"streamSettings": {
+			"sockopt": {
+				"tproxy": "tproxy"
+			}
+		}
+	}`, c.tag, tproxyPort)
+
+	var inConf coreConf.InboundDetourConfig
+	if err := json.Unmarshal([]byte(inboundJSON), &inConf); err != nil {
+		return fmt.Errorf("failed to parse tproxy inbound for %s: %v", c.tag, err)
+	}
+	inboundConfig, err := inConf.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build tproxy inbound for %s: %v", c.tag, err)
+	}
+	if err := c.xrayCore.AddInbound(inboundConfig); err != nil {
+		return fmt.Errorf("failed to add tproxy inbound for %s: %v", c.tag, err)
+	}
+	c.wgCore.SetTProxyPort(tproxyPort)
 
 	// Start server
 	if err := c.wgCore.Start(); err != nil {
@@ -134,6 +168,11 @@ func (c *AmneziaWGController) Close() error {
 	}
 	if c.userReportPeriodic != nil {
 		c.userReportPeriodic.Close()
+	}
+
+	// Remove Xray Inbound
+	if err := c.xrayCore.RemoveInbound(c.tag); err != nil {
+		log.WithError(err).WithField("tag", c.tag).Warn("Failed to remove Xray inbound")
 	}
 
 	if c.wgCore != nil {

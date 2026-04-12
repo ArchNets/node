@@ -56,6 +56,14 @@ type Outbound struct {
 	Flow             string `json:"flow,omitempty"`
 	Cipher           string `json:"cipher,omitempty"`
 	User             string `json:"user,omitempty"`
+
+	// WireGuard outbound extensions
+	WireguardPrivateKey    string `json:"wireguard_private_key,omitempty"`
+	WireguardAddress       string `json:"wireguard_address,omitempty"`
+	WireguardMTU           int    `json:"wireguard_mtu,omitempty"`
+	WireguardPeerPublicKey string `json:"wireguard_peer_public_key,omitempty"`
+	WireguardPeerEndpoint  string `json:"wireguard_peer_endpoint,omitempty"`
+	WireguardReserved      string `json:"wireguard_reserved,omitempty"`
 }
 
 type RoutingRule struct {

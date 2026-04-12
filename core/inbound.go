@@ -20,13 +20,13 @@ import (
 	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
-func (v *XrayCore) removeInbound(tag string) error {
+func (v *XrayCore) RemoveInbound(tag string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return v.ihm.RemoveHandler(ctx, tag)
 }
 
-func (v *XrayCore) addInbound(config *core.InboundHandlerConfig) error {
+func (v *XrayCore) AddInbound(config *core.InboundHandlerConfig) error {
 	rawHandler, err := core.CreateObject(v.Server, config)
 	if err != nil {
 		return err

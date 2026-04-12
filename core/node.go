@@ -9,9 +9,9 @@ import (
 func (v *XrayCore) AddNode(tag string, info *panel.NodeInfo) error {
 	inBoundConfig, err := buildInbound(info, tag)
 	if err != nil {
-		return fmt.Errorf("build inbound error: %s", err)
+		return err
 	}
-	err = v.addInbound(inBoundConfig)
+	err = v.AddInbound(inBoundConfig)
 	if err != nil {
 		return fmt.Errorf("add inbound error: %s", err)
 	}
@@ -19,7 +19,7 @@ func (v *XrayCore) AddNode(tag string, info *panel.NodeInfo) error {
 }
 
 func (v *XrayCore) DelNode(tag string) error {
-	err := v.removeInbound(tag)
+	err := v.RemoveInbound(tag)
 	if err != nil {
 		return fmt.Errorf("remove in error: %s", err)
 	}
