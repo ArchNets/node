@@ -1,0 +1,185 @@
+# ==============================================================================
+# ArchNet Node — Arvan Cloud Container Deployment
+# ==============================================================================
+# USAGE:
+#   1. Edit the ConfigMap below with your panel URL, server ID, and secret key
+#   2. In your ArchNet panel, configure the node with:
+#        - Type: vless (or vmess/trojan)
+#        - Transport: ws
+#        - Port: 8080
+#        - Security: tls, certMode: none (Ingress handles TLS)
+#        - WS Path: /archnets (must match Ingress path below)
+#   3. Apply:  kubectl apply -f arvan-node.yaml
+#   4. Update the Ingress host to your actual Arvan-assigned domain
+# ==============================================================================
+
+# --- ConfigMap: Node Configuration ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: archnet-node-config
+data:
+  config.yml: |
+    Log:
+      Level: info
+      Output:
+      Access: none
+
+    Api:
+      ApiHost: "https://your-panel-url.example.com"
+      ServerID: 1
+      SecretKey: "your_secret_key_here"
+      Timeout: 30
+
+---
+# --- Deployment ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: archnet-node
+  labels:
+    app: archnet-node
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: archnet-node
+  template:
+    metadata:
+      labels:
+        app: archnet-node
+    spec:
+      # Custom DNS: inject /etc/hosts entries into the pod
+      hostAliases:
+        - ip: "1.2.3.4"
+          hostnames:
+            - "panel.example.com"
+      containers:
+        - name: archnet-node
+          image: ghcr.io/archnets/node:latest
+          ports:
+            # VPN inbound port — must match panel node config
+            - name: vpn-ws
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+              ephemeral-storage: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/archnets/
+              readOnly: true
+
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "pgrep node || exit 1"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "pgrep node || exit 1"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: archnet-node-config
+
+
+---
+# --- Service ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: archnet-node
+  labels:
+    app: archnet-node
+spec:
+  ports:
+    - name: vpn-ws
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    app: archnet-node
+  type: ClusterIP
+
+---
+# --- Ingress (NGINX with WebSocket support) ---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: archnet-node-ingress
+  annotations:
+    # WebSocket support — critical for ws transport
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$remote_addr"
+    # These headers enable WebSocket upgrade
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+spec:
+  ingressClassName: nginx
+  rules:
+    # CHANGE THIS to your actual Arvan-assigned domain
+    - host: archnet-XXXXXXXX-vpn.apps.ir-central1.arvancaas.ir
+      http:
+        paths:
+          # WebSocket VPN path — must match panel WS Path setting
+          - path: /archnets
+            pathType: Prefix
+            backend:
+              service:
+                name: archnet-node
+                port:
+                  number: 8080
+
+
+
+# ==============================================================================
+# NOTES
+# ==============================================================================
+# 1. SUPPORTED TRANSPORTS on Arvan:
+#      ws (WebSocket), grpc, httpupgrade, xhttp/splithttp
+#    NOT supported: raw tcp, reality, UDP protocols (hysteria2, tuic, wireguard)
+#
+# 2. TLS is terminated by the Arvan Ingress. Set certMode: none in panel.
+#
+# 3. If using a PRIVATE ghcr.io image, add imagePullSecrets:
+#      spec:
+#        imagePullSecrets:
+#          - name: ghcr-secret
+#    Create it with:
+#      kubectl create secret docker-registry ghcr-secret \
+#        --docker-server=ghcr.io \
+#        --docker-username=YOUR_GITHUB_USER \
+#        --docker-password=YOUR_GITHUB_PAT
+#
+# 4. To use Docker Hub instead, change image to:
+#      image: archnets/node:latest
+#    (requires Docker Hub workflow — see updated GitHub Actions)
+#
+# 5. For gRPC transport, change the Ingress annotations:
+#      nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+#    And update panel transport to "grpc" with a serviceName.
+#
+# 6. Disk (PVC) rules on Arvan:
+#    - Size can only be INCREASED, never decreased
+#    - Disks survive app deletion
+#    - DELETING a disk = data gone forever
+#    - If PVC creation fails via manifest, create via Arvan panel UI
+# ==============================================================================

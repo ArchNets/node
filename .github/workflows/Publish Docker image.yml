@@ -15,8 +15,9 @@ permissions:
   packages: write
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: archnets/node
+  GHCR_REGISTRY: ghcr.io
+  GHCR_IMAGE: archnets/node
+  DOCKERHUB_IMAGE: archnets/node
 
 jobs:
   build:
@@ -40,7 +41,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
+            docker.io/${{ env.DOCKERHUB_IMAGE }}
           
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -51,29 +54,53 @@ jobs:
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest (GHCR)
+        id: build-ghcr
         uses: docker/build-push-action@v6
         with:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Export digest
+      - name: Build and push by digest (Docker Hub)
+        id: build-dockerhub
+        uses: docker/build-push-action@v6
+        with:
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=docker.io/${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digests
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          echo "${digest#sha256:}" > "/tmp/digests/${digest#sha256:}"
+          mkdir -p /tmp/digests/ghcr /tmp/digests/dockerhub
+          ghcr_digest="${{ steps.build-ghcr.outputs.digest }}"
+          echo "${ghcr_digest#sha256:}" > "/tmp/digests/ghcr/${ghcr_digest#sha256:}"
+          dh_digest="${{ steps.build-dockerhub.outputs.digest }}"
+          echo "${dh_digest#sha256:}" > "/tmp/digests/dockerhub/${dh_digest#sha256:}"
   
-      - name: Upload digest
+      - name: Upload GHCR digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests/*
+          name: digests-ghcr-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/ghcr/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload Docker Hub digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-dockerhub-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/dockerhub/*
           if-no-files-found: error
           retention-days: 1
 
@@ -82,11 +109,18 @@ jobs:
     needs:
       - build
     steps:
-      - name: Download digests
+      - name: Download GHCR digests
         uses: actions/download-artifact@v4
         with:
-          path: /tmp/digests
-          pattern: digests-*
+          path: /tmp/digests/ghcr
+          pattern: digests-ghcr-*
+          merge-multiple: true
+
+      - name: Download Docker Hub digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests/dockerhub
+          pattern: digests-dockerhub-*
           merge-multiple: true
      
       - name: Set up Docker Buildx
@@ -96,24 +130,43 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
+            docker.io/${{ env.DOCKERHUB_IMAGE }}
           
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
           
-      - name: Create manifest list and push
+      - name: Create GHCR manifest list and push
         run: |
-          cd /tmp/digests
-          tags=$(echo '${{ steps.meta.outputs.json }}' | jq -cr '.tags | map("-t " + .) | join(" ")')
-          images=$(printf "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s " $(find . -type f -exec cat {} \;))
-          echo "Creating manifest with tags: $tags"
-          echo "Using images: $images"
+          cd /tmp/digests/ghcr
+          tags=$(echo '${{ steps.meta.outputs.json }}' | jq -cr '.tags | map(select(startswith("ghcr.io"))) | map("-t " + .) | join(" ")')
+          images=$(printf "${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}@sha256:%s " $(find . -type f -exec cat {} \;))
+          echo "Creating GHCR manifest with tags: $tags"
+          docker buildx imagetools create $tags $images
+
+      - name: Create Docker Hub manifest list and push
+        run: |
+          cd /tmp/digests/dockerhub
+          tags=$(echo '${{ steps.meta.outputs.json }}' | jq -cr '.tags | map(select(startswith("docker.io"))) | map("-t " + .) | join(" ")')
+          images=$(printf "docker.io/${{ env.DOCKERHUB_IMAGE }}@sha256:%s " $(find . -type f -exec cat {} \;))
+          echo "Creating Docker Hub manifest with tags: $tags"
           docker buildx imagetools create $tags $images
           
-      - name: Inspect image
+      - name: Inspect GHCR image
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}
+
+      - name: Inspect Docker Hub image
+        run: |
+          docker buildx imagetools inspect docker.io/${{ env.DOCKERHUB_IMAGE }}:${{ steps.meta.outputs.version }}
