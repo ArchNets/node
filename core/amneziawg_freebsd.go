@@ -79,3 +79,7 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 func (w *AmneziaWGCore) SetLimiter(l *limiter.Limiter) {
 	w.limiterRef = l
 }
+
+// SetTProxyPort sets the TPROXY port (stub for FreeBSD)
+func (w *AmneziaWGCore) SetTProxyPort(port int) {
+}

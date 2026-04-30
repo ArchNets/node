@@ -69,3 +69,7 @@ func (w *WireGuardCore) GetOnlineUsers() []panel.OnlineUser {
 func (w *WireGuardCore) SetLimiter(l *limiter.Limiter) {
 	w.limiterRef = l
 }
+
+// SetTProxyPort sets the TPROXY port (stub for FreeBSD)
+func (w *WireGuardCore) SetTProxyPort(port int) {
+}
