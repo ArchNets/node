@@ -61,14 +61,30 @@ func (c *IPsecController) Start() error {
 	// Create limiter
 	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, users, aliveList)
 
-	// Get PSK from protocol config
+	// Get PSK and Auth from protocol config
 	psk := "archnet-default-psk"
-	if c.info.Protocol != nil && c.info.Protocol.IPsecPSK != "" {
-		psk = c.info.Protocol.IPsecPSK
+	authMethod := "eap-mschapv2"
+	l2tpSecret := ""
+	mode := "ikev2"
+
+	if c.info.Type == "l2tp" {
+		mode = "l2tp"
+	}
+
+	if c.info.Protocol != nil {
+		if c.info.Protocol.IPsecPSK != "" {
+			psk = c.info.Protocol.IPsecPSK
+		}
+		if c.info.Protocol.L2TPSharedSecret != "" {
+			l2tpSecret = c.info.Protocol.L2TPSharedSecret
+		}
+		if c.info.Protocol.IPsecAuthMethod != "" {
+			authMethod = c.info.Protocol.IPsecAuthMethod
+		}
 	}
 
 	// Create and start IPsec core
-	c.ipsecCore = vCore.NewIPsecCore(c.tag, psk)
+	c.ipsecCore = vCore.NewIPsecCore(c.tag, mode, psk, l2tpSecret, authMethod)
 	if err := c.ipsecCore.Start(); err != nil {
 		return fmt.Errorf("failed to start IPsec core: %w", err)
 	}

@@ -17,8 +17,11 @@ import (
 
 // IPsecCore manages strongSwan IKEv2 and xl2tpd L2TP servers.
 type IPsecCore struct {
-	Tag string
-	PSK string // Pre-Shared Key from Protocol config
+	Tag              string
+	Mode             string // "ikev2" or "l2tp"
+	PSK              string // Pre-Shared Key from Protocol config
+	L2TPSharedSecret string // L2TP shared secret (for L2TP IPSec PSK)
+	AuthMethod       string // "eap-mschapv2" or "psk"
 
 	mu    sync.RWMutex
 	users map[int]*IPsecUser // key: subscription ID
@@ -39,22 +42,40 @@ type IPsecUser struct {
 }
 
 // NewIPsecCore creates a new IPsec core manager.
-func NewIPsecCore(tag, psk string) *IPsecCore {
+func NewIPsecCore(tag, mode, psk, l2tpSecret, authMethod string) *IPsecCore {
+	if mode == "" {
+		mode = "ikev2"
+	}
+	if authMethod == "" {
+		authMethod = "eap-mschapv2"
+	}
 	return &IPsecCore{
-		Tag:          tag,
-		PSK:          psk,
-		users:        make(map[int]*IPsecUser),
-		traffic:      make(map[int]*UserTraffic),
-		lastSasStats: make(map[string]*sasStats),
+		Tag:              tag,
+		Mode:             strings.ToLower(mode),
+		PSK:              psk,
+		L2TPSharedSecret: l2tpSecret,
+		AuthMethod:       authMethod,
+		users:            make(map[int]*IPsecUser),
+		traffic:          make(map[int]*UserTraffic),
+		lastSasStats:     make(map[string]*sasStats),
 	}
 }
 
 // Start initializes strongSwan and xl2tpd.
 func (c *IPsecCore) Start() error {
-	// Enable IP forwarding
+	// Enable IP forwarding and redirect settings for IPsec/L2TP
 	_ = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").Run()
+	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.all.send_redirects=0").Run()
+	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.default.send_redirects=0").Run()
+	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.all.accept_redirects=0").Run()
+	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.default.accept_redirects=0").Run()
 
-	// Write initial configs
+	// Setup NAT
+	if err := c.setupNAT(); err != nil {
+		log.WithError(err).Warn("Failed to setup NAT for IPsec/L2TP")
+	}
+
+	// Write configs
 	if err := c.writeConfigs(); err != nil {
 		return fmt.Errorf("failed to write ipsec configs: %w", err)
 	}
@@ -64,6 +85,11 @@ func (c *IPsecCore) Start() error {
 		return fmt.Errorf("failed to start strongSwan: %w", err)
 	}
 
+	// Start xl2tpd if mode is l2tp
+	if c.Mode == "l2tp" {
+		c.restartXl2tpd()
+	}
+
 	// Start stats collector
 	c.statsCollector = &ipsecStatsCollector{
 		core:     c,
@@ -71,25 +97,49 @@ func (c *IPsecCore) Start() error {
 	}
 	c.statsCollector.start()
 
-	log.WithField("tag", c.Tag).Info("IPsec core started")
+	log.WithFields(log.Fields{
+		"tag":  c.Tag,
+		"mode": c.Mode,
+	}).Info("IPsec core started")
 	return nil
 }
 
-// Stop stops strongSwan.
+// Stop stops strongSwan and xl2tpd.
 func (c *IPsecCore) Stop() {
 	if c.statsCollector != nil {
 		c.statsCollector.stop()
 	}
 	_ = exec.Command("swanctl", "--terminate", "--ike", c.Tag).Run()
-	log.WithField("tag", c.Tag).Info("IPsec core stopped")
+
+	// Cleanup config files
+	os.Remove(fmt.Sprintf("/etc/swanctl/conf.d/%s.conf", c.Tag))
+	os.Remove(fmt.Sprintf("/etc/swanctl/conf.d/%s-secrets.conf", c.Tag))
+
+	if c.Mode == "l2tp" {
+		c.stopXl2tpd()
+		os.Remove(fmt.Sprintf("/etc/xl2tpd/%s.conf", c.Tag))
+		os.Remove(fmt.Sprintf("/etc/ppp/options.xl2tpd.%s", c.Tag))
+		os.Remove(fmt.Sprintf("/etc/ppp/chap-secrets.%s", c.Tag))
+		os.Remove(fmt.Sprintf("/etc/ppp/ip-up.d/%s", c.Tag))
+		os.Remove(fmt.Sprintf("/etc/ppp/ip-down.d/%s", c.Tag))
+		os.Remove(fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag))
+		os.Remove(fmt.Sprintf("/run/xl2tpd-%s.control", c.Tag))
+	}
+
+	c.teardownNAT()
+
+	log.WithFields(log.Fields{
+		"tag":  c.Tag,
+		"mode": c.Mode,
+	}).Info("IPsec core stopped")
 }
 
-// AddUsers parses ServiceId JSON and adds IKEv2 users.
+// AddUsers parses ServiceId JSON and adds users.
 func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	type IKEv2Identity struct {
+	type VPNIdentity struct {
 		IKEv2 *struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -100,28 +150,31 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 		if user.ServiceId == "" {
 			continue
 		}
-		var identity IKEv2Identity
+		var identity VPNIdentity
 		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err != nil {
 			continue
 		}
-		if identity.IKEv2 == nil || identity.IKEv2.Username == "" {
-			continue
-		}
-		c.users[user.Id] = &IPsecUser{
-			UID:      user.Id,
-			UUID:     user.Uuid,
-			Username: identity.IKEv2.Username,
-			Password: identity.IKEv2.Password,
+
+		// The backend puts creds in "ikev2" key even for l2tp
+		if identity.IKEv2 != nil && identity.IKEv2.Username != "" {
+			c.users[user.Id] = &IPsecUser{
+				UID:      user.Id,
+				UUID:     user.Uuid,
+				Username: identity.IKEv2.Username,
+				Password: identity.IKEv2.Password,
+			}
 		}
 	}
 
-	// Regenerate configs with new users
 	if err := c.writeConfigs(); err != nil {
 		log.WithError(err).Error("Failed to write ipsec configs after adding users")
 		return
 	}
 	if err := c.reloadStrongSwan(); err != nil {
 		log.WithError(err).Error("Failed to reload strongSwan after adding users")
+	}
+	if c.Mode == "l2tp" {
+		c.restartXl2tpd()
 	}
 
 	log.WithFields(log.Fields{
@@ -146,6 +199,9 @@ func (c *IPsecCore) DelUsers(users []panel.UserInfo) {
 	if err := c.reloadStrongSwan(); err != nil {
 		log.WithError(err).Error("Failed to reload strongSwan after deleting users")
 	}
+	if c.Mode == "l2tp" {
+		c.restartXl2tpd()
+	}
 
 	log.WithFields(log.Fields{
 		"tag":   c.Tag,
@@ -163,7 +219,7 @@ func (c *IPsecCore) GetTrafficAndReset() map[int]*UserTraffic {
 	return result
 }
 
-// GetOnlineUsers returns currently connected IKEv2 users via swanctl.
+// GetOnlineUsers returns currently connected users via swanctl.
 func (c *IPsecCore) GetOnlineUsers() []panel.OnlineUser {
 	var online []panel.OnlineUser
 	sas := c.parseSasOutput()
@@ -184,13 +240,20 @@ func (c *IPsecCore) GetOnlineUsers() []panel.OnlineUser {
 	return online
 }
 
-// writeConfigs generates swanctl.conf and secrets.
+// writeConfigs generates appropriate configs based on mode.
 func (c *IPsecCore) writeConfigs() error {
-	// Write swanctl connection config
-	conf := c.generateSwanctlConf()
 	if err := os.MkdirAll("/etc/swanctl/conf.d", 0755); err != nil {
 		return err
 	}
+
+	// Write swanctl connection config
+	conf := ""
+	if c.Mode == "l2tp" {
+		conf = c.generateL2TPSwanctlConf()
+	} else {
+		conf = c.generateIKEv2SwanctlConf()
+	}
+
 	confPath := fmt.Sprintf("/etc/swanctl/conf.d/%s.conf", c.Tag)
 	if err := os.WriteFile(confPath, []byte(conf), 0644); err != nil {
 		return fmt.Errorf("failed to write %s: %w", confPath, err)
@@ -203,11 +266,45 @@ func (c *IPsecCore) writeConfigs() error {
 		return fmt.Errorf("failed to write %s: %w", secretsPath, err)
 	}
 
+	// Write L2TP specific configs
+	if c.Mode == "l2tp" {
+		for _, dir := range []string{"/etc/xl2tpd", "/etc/ppp", "/etc/ppp/ip-up.d", "/etc/ppp/ip-down.d"} {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return err
+			}
+		}
+
+		if err := os.WriteFile(fmt.Sprintf("/etc/xl2tpd/%s.conf", c.Tag), []byte(c.generateXl2tpdConf()), 0644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/options.xl2tpd.%s", c.Tag), []byte(c.generatePPPOptions()), 0644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/chap-secrets.%s", c.Tag), []byte(c.generateChapSecrets()), 0600); err != nil {
+			return err
+		}
+		// PPP ip-up script: logs which ppp interface belongs to which user
+		ipUpScript := fmt.Sprintf(`#!/bin/sh
+# Written by ArchNet IPsecCore tag=%s
+echo "$PEERNAME $IFNAME" >> /tmp/archnet-ppp-%s.map
+`, c.Tag, c.Tag)
+		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/ip-up.d/%s", c.Tag), []byte(ipUpScript), 0755); err != nil {
+			return err
+		}
+		// PPP ip-down script: removes mapping
+		ipDownScript := fmt.Sprintf(`#!/bin/sh
+sed -i "/^$PEERNAME $IFNAME$/d" /tmp/archnet-ppp-%s.map 2>/dev/null
+`, c.Tag)
+		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/ip-down.d/%s", c.Tag), []byte(ipDownScript), 0755); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
-// generateSwanctlConf generates the swanctl.conf content.
-func (c *IPsecCore) generateSwanctlConf() string {
+// generateIKEv2SwanctlConf generates IKEv2 swanctl.conf.
+func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 	return fmt.Sprintf(`connections {
     %s {
         version = 2
@@ -221,7 +318,7 @@ func (c *IPsecCore) generateSwanctlConf() string {
             id = %%any
         }
         remote {
-            auth = eap-mschapv2
+            auth = %s
             eap_id = %%any
         }
         children {
@@ -240,25 +337,101 @@ pools {
         dns = 8.8.8.8,1.1.1.1
     }
 }
-`, c.Tag, c.Tag, c.Tag, c.Tag)
+`, c.Tag, c.Tag, c.AuthMethod, c.Tag, c.Tag)
 }
 
-// generateSecrets generates the secrets config.
+// generateL2TPSwanctlConf generates IKEv1 Transport mode swanctl.conf for L2TP.
+func (c *IPsecCore) generateL2TPSwanctlConf() string {
+	return fmt.Sprintf(`connections {
+    %s {
+        version = 1
+        proposals = aes256-sha1-modp2048,aes128-sha1-modp1024,default
+        local {
+            auth = psk
+            id = %%any
+        }
+        remote {
+            auth = psk
+        }
+        children {
+            %s-l2tp {
+                local_ts = dynamic[udp]
+                remote_ts = dynamic[1701/udp]
+                mode = transport
+                esp_proposals = aes256-sha1,aes128-sha1,default
+            }
+        }
+    }
+}
+`, c.Tag, c.Tag)
+}
+
+// generateXl2tpdConf generates xl2tpd.conf (tag-scoped).
+func (c *IPsecCore) generateXl2tpdConf() string {
+	return fmt.Sprintf(`[global]
+port = 1701
+
+[lns default]
+ip range = 10.11.1.2-10.11.254.254
+local ip = 10.11.0.1
+require chap = yes
+refuse pap = yes
+require authentication = yes
+pppoptfile = /etc/ppp/options.xl2tpd.%s
+chap-secrets = /etc/ppp/chap-secrets.%s
+length bit = yes
+`, c.Tag, c.Tag)
+}
+
+// generatePPPOptions generates PPP options.
+func (c *IPsecCore) generatePPPOptions() string {
+	return `ipcp-accept-local
+ipcp-accept-remote
+ms-dns 8.8.8.8
+ms-dns 1.1.1.1
+noccp
+auth
+mtu 1400
+mru 1400
+nodefaultroute
+lock
+proxyarp
+`
+}
+
+// generateChapSecrets generates PPP CHAP secrets.
+func (c *IPsecCore) generateChapSecrets() string {
+	var sb strings.Builder
+	sb.WriteString("# Generated by ArchNet IPsecCore\n")
+	for _, user := range c.users {
+		sb.WriteString(fmt.Sprintf("\"%s\" * \"%s\" *\n", user.Username, user.Password))
+	}
+	return sb.String()
+}
+
+// generateSecrets generates the strongSwan secrets config.
 func (c *IPsecCore) generateSecrets() string {
 	var sb strings.Builder
 	sb.WriteString("secrets {\n")
 
 	// IKE PSK
+	psk := c.PSK
+	if c.Mode == "l2tp" && c.L2TPSharedSecret != "" {
+		psk = c.L2TPSharedSecret
+	}
 	sb.WriteString(fmt.Sprintf("    ike-%s {\n", c.Tag))
-	sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", c.PSK))
+	sb.WriteString("        id = %any\n")
+	sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", psk))
 	sb.WriteString("    }\n")
 
-	// EAP secrets for each user
-	for _, user := range c.users {
-		sb.WriteString(fmt.Sprintf("    eap-%s-%d {\n", c.Tag, user.UID))
-		sb.WriteString(fmt.Sprintf("        id = \"%s\"\n", user.Username))
-		sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", user.Password))
-		sb.WriteString("    }\n")
+	// EAP secrets for each user (IKEv2 only)
+	if c.Mode == "ikev2" {
+		for _, user := range c.users {
+			sb.WriteString(fmt.Sprintf("    eap-%s-%d {\n", c.Tag, user.UID))
+			sb.WriteString(fmt.Sprintf("        id = \"%s\"\n", user.Username))
+			sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", user.Password))
+			sb.WriteString("    }\n")
+		}
 	}
 
 	sb.WriteString("}\n")
@@ -267,11 +440,64 @@ func (c *IPsecCore) generateSecrets() string {
 
 // reloadStrongSwan reloads strongSwan configuration.
 func (c *IPsecCore) reloadStrongSwan() error {
-	// Load credentials
 	if out, err := exec.Command("swanctl", "--load-all").CombinedOutput(); err != nil {
 		return fmt.Errorf("swanctl --load-all failed: %s, output: %s", err, string(out))
 	}
 	return nil
+}
+
+// restartXl2tpd stops any running xl2tpd instance for this tag and starts a new one.
+func (c *IPsecCore) restartXl2tpd() {
+	c.stopXl2tpd()
+	confPath := fmt.Sprintf("/etc/xl2tpd/%s.conf", c.Tag)
+	pidFile := fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag)
+	controlFile := fmt.Sprintf("/run/xl2tpd-%s.control", c.Tag)
+	cmd := exec.Command("xl2tpd", "-c", confPath, "-p", pidFile, "-C", controlFile)
+	if err := cmd.Start(); err != nil {
+		log.WithError(err).Error("Failed to start xl2tpd")
+	}
+}
+
+// stopXl2tpd stops the xl2tpd instance for this tag by reading its PID file.
+func (c *IPsecCore) stopXl2tpd() {
+	pidFile := fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag)
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid := strings.TrimSpace(string(data))
+	if pid != "" {
+		_ = exec.Command("kill", pid).Run()
+		// Wait briefly for process to exit
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// setupNAT configures MASQUERADE for the VPN subnet
+func (c *IPsecCore) setupNAT() error {
+	subnet := "10.10.0.0/16"
+	if c.Mode == "l2tp" {
+		subnet = "10.11.0.0/16"
+	}
+
+	// Basic masquerade rule (assuming eth0 as default iface for simplicity, or just let iptables auto-detect output iface)
+	checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
+	if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
+		addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet)
+		if err := exec.Command("sh", "-c", addCmd).Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// teardownNAT removes MASQUERADE for the VPN subnet
+func (c *IPsecCore) teardownNAT() {
+	subnet := "10.10.0.0/16"
+	if c.Mode == "l2tp" {
+		subnet = "10.11.0.0/16"
+	}
+	_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet)).Run()
 }
 
 type sasStats struct {
@@ -285,7 +511,6 @@ type ipsecStatsCollector struct {
 	wg       sync.WaitGroup
 }
 
-// parsedSA represents one parsed IKE SA from swanctl --list-sas
 type parsedSA struct {
 	Username string
 	RemoteIP string
@@ -294,19 +519,17 @@ type parsedSA struct {
 }
 
 var (
-	// swanctl --list-sas output patterns:
-	//   remote 'user_a1b2c3d4' @ 203.0.113.5[4500]
-	//   bytes_in=12345 bytes_out=67890
 	reRemote   = regexp.MustCompile(`remote\s+'([^']+)'\s+@\s+([0-9.]+)`)
 	reInBytes  = regexp.MustCompile(`bytes_i(?:n)?=(\d+)`)
 	reOutBytes = regexp.MustCompile(`bytes_o(?:ut)?=(\d+)`)
-	// Alternative format from swanctl --list-sas (non-raw):
-	//   192.168.1.100...10.10.0.1  12345 bytes_i ... 67890 bytes_o
 	reBytesAlt = regexp.MustCompile(`(\d+)\s+bytes_i.*?(\d+)\s+bytes_o`)
 )
 
-// parseSasOutput runs swanctl --list-sas and parses the output
 func (c *IPsecCore) parseSasOutput() []parsedSA {
+	if c.Mode == "l2tp" {
+		return c.parseL2TPOnlineUsers()
+	}
+
 	output, err := exec.Command("swanctl", "--list-sas").CombinedOutput()
 	if err != nil {
 		return nil
@@ -315,7 +538,6 @@ func (c *IPsecCore) parseSasOutput() []parsedSA {
 	var current *parsedSA
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
-		// Match remote identity line: remote 'user_xxx' @ 1.2.3.4
 		if m := reRemote.FindStringSubmatch(line); len(m) == 3 {
 			if current != nil {
 				result = append(result, *current)
@@ -329,14 +551,12 @@ func (c *IPsecCore) parseSasOutput() []parsedSA {
 		if current == nil {
 			continue
 		}
-		// Try raw format: bytes_in=N bytes_out=N
 		if m := reInBytes.FindStringSubmatch(line); len(m) == 2 {
 			current.InBytes, _ = strconv.ParseInt(m[1], 10, 64)
 		}
 		if m := reOutBytes.FindStringSubmatch(line); len(m) == 2 {
 			current.OutBytes, _ = strconv.ParseInt(m[1], 10, 64)
 		}
-		// Try alternative format: N bytes_i ... N bytes_o
 		if m := reBytesAlt.FindStringSubmatch(line); len(m) == 3 {
 			current.InBytes, _ = strconv.ParseInt(m[1], 10, 64)
 			current.OutBytes, _ = strconv.ParseInt(m[2], 10, 64)
@@ -348,19 +568,18 @@ func (c *IPsecCore) parseSasOutput() []parsedSA {
 	return result
 }
 
-// collectStats collects traffic from strongSwan and computes deltas
 func (c *IPsecCore) collectStats() {
 	sas := c.parseSasOutput()
 	if len(sas) == 0 {
 		return
 	}
 	c.mu.RLock()
-	// Build username -> UID map
 	usernameToUID := make(map[string]int)
 	for _, user := range c.users {
 		usernameToUID[user.Username] = user.UID
 	}
 	c.mu.RUnlock()
+	
 	c.trafficMu.Lock()
 	defer c.trafficMu.Unlock()
 	for _, sa := range sas {
@@ -373,17 +592,16 @@ func (c *IPsecCore) collectStats() {
 			last = &sasStats{}
 			c.lastSasStats[sa.Username] = last
 		}
-		// Compute delta (handle counter reset if SA was rekeyed)
 		var dlDelta, ulDelta int64
 		if sa.OutBytes >= last.OutBytes {
-			dlDelta = sa.OutBytes - last.OutBytes // out from server = download for user
+			dlDelta = sa.OutBytes - last.OutBytes
 		} else {
-			dlDelta = sa.OutBytes // counter reset
+			dlDelta = sa.OutBytes
 		}
 		if sa.InBytes >= last.InBytes {
-			ulDelta = sa.InBytes - last.InBytes // in to server = upload from user
+			ulDelta = sa.InBytes - last.InBytes
 		} else {
-			ulDelta = sa.InBytes // counter reset
+			ulDelta = sa.InBytes
 		}
 		last.InBytes = sa.InBytes
 		last.OutBytes = sa.OutBytes
@@ -398,7 +616,49 @@ func (c *IPsecCore) collectStats() {
 	}
 }
 
-// ipsecStatsCollector methods
+// parseL2TPOnlineUsers reads the PPP user-to-interface map and collects
+// traffic from /sys/class/net/pppX/statistics.
+func (c *IPsecCore) parseL2TPOnlineUsers() []parsedSA {
+	mapFile := fmt.Sprintf("/tmp/archnet-ppp-%s.map", c.Tag)
+	data, err := os.ReadFile(mapFile)
+	if err != nil {
+		return nil
+	}
+
+	var result []parsedSA
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue
+		}
+		username := parts[0]
+		iface := parts[1]
+
+		// Read rx/tx bytes from sysfs
+		rxBytes := readSysfsInt64(fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", iface))
+		txBytes := readSysfsInt64(fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", iface))
+
+		result = append(result, parsedSA{
+			Username: username,
+			RemoteIP: "",
+			InBytes:  rxBytes, // rx on server = upload from user
+			OutBytes: txBytes, // tx on server = download for user
+		})
+	}
+	return result
+}
+
+// readSysfsInt64 reads an integer from a sysfs file.
+func readSysfsInt64(path string) int64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	v, _ := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	return v
+}
+
 func (t *ipsecStatsCollector) start() {
 	t.wg.Add(1)
 	go t.run()

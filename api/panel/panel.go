@@ -65,7 +65,10 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"ssh",
 		"shadowtls",
 		"wireguard",
-		"amneziawg":
+		"amneziawg",
+		"ikev2",
+		"l2tp",
+		"ipsec":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
