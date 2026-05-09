@@ -56,6 +56,7 @@ type Outbound struct {
 	Flow             string `json:"flow,omitempty"`
 	Cipher           string `json:"cipher,omitempty"`
 	User             string `json:"user,omitempty"`
+	Encryption       string `json:"encryption,omitempty"` // VLESS encryption: "none", "mlkem768x25519plus", etc.
 
 	// WireGuard outbound extensions
 	WireguardPrivateKey    string `json:"wireguard_private_key,omitempty"`
@@ -173,6 +174,11 @@ type Protocol struct {
 	AmneziaH2   int `json:"amnezia_h2"`
 	AmneziaH3   int `json:"amnezia_h3"`
 	AmneziaH4   int `json:"amnezia_h4"`
+
+	// IPsec/IKEv2/L2TP fields
+	IPsecPSK         string `json:"ipsec_psk"`          // Pre-Shared Key for IPsec
+	L2TPSharedSecret string `json:"l2tp_shared_secret"` // L2TP shared secret
+	IPsecAuthMethod  string `json:"ipsec_auth_method"`  // Authentication method: eap-mschapv2, psk
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {

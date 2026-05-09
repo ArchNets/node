@@ -1,5 +1,5 @@
 # ==============================================================================
-# ArchNet Node — Arvan Cloud Container Deployment
+# ArchNet Node — Arvan Cloud Container Deployment (Standalone)
 # ==============================================================================
 # USAGE:
 #   1. Edit the ConfigMap below with your panel URL, server ID, and secret key
@@ -9,7 +9,7 @@
 #        - Port: 8080
 #        - Security: tls, certMode: none (Ingress handles TLS)
 #        - WS Path: /archnets (must match Ingress path below)
-#   3. Apply:  kubectl apply -f arvan-node.yaml
+#   3. Apply:  kubectl apply -f arvan-node-no-singbox.yaml
 #   4. Update the Ingress host to your actual Arvan-assigned domain
 # ==============================================================================
 
@@ -30,77 +30,6 @@ data:
       ServerID: 26
       SecretKey: "jtf1blry-z7b5-edg3-fwgz-6ltss5uznoat"
       Timeout: 30
-
----
-# --- ConfigMap: SingBox Chain Configuration ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: singbox-chain-config2
-data:
-  chain.json: |
-    {
-      "log": {"level": "info"},
-      "dns": {
-        "servers": [
-          {"tag": "dns-remote", "server": "8.8.8.8", "type": "tls", "domain_resolver": "dns-local", "detour": "proxy-germany"},
-          {"tag": "dns-direct", "type": "local", "domain_resolver": "dns-local"},
-          {"tag": "dns-local", "type": "local"}
-        ],
-        "rules": [
-          {"domain": "localhost", "query_type": "A", "action": "predefined", "rcode": "NOERROR", "answer": "localhost. IN A 127.0.0.1"},
-          {"domain": "localhost", "query_type": "AAAA", "action": "predefined", "rcode": "NOERROR", "answer": "localhost. IN AAAA ::1"}
-        ]
-      },
-      "inbounds": [
-        {"type": "mixed", "tag": "in-germany", "listen": "127.0.0.1", "listen_port": 2090},
-        {"type": "mixed", "tag": "in-us", "listen": "127.0.0.1", "listen_port": 2091},
-        {"type": "mixed", "tag": "in-sweden", "listen": "127.0.0.1", "listen_port": 2092},
-        {"type": "mixed", "tag": "in-iraq", "listen": "127.0.0.1", "listen_port": 2093},
-        {"type": "mixed", "tag": "in-turkey", "listen": "127.0.0.1", "listen_port": 2094}
-      ],
-      "outbounds": [
-        {
-          "type": "vless", "tag": "proxy-germany", "server": "152.53.123.55", "server_port": 8080,
-          "uuid": "81f09ba9-d4d0-4cec-99a3-62cd124a15f9", "detour": "Out1", "packet_encoding": "xudp",
-          "transport": {"type": "ws", "path": "/kharij"}
-        },
-        {
-          "type": "vless", "tag": "proxy-us", "server": "147.93.184.13", "server_port": 22153,
-          "uuid": "c245a2ea-e1c5-4f96-9bc3-5beda72e4672", "detour": "Out1", "packet_encoding": "xudp"
-        },
-        {
-          "type": "vless", "tag": "proxy-sweden", "server": "87.121.105.148", "server_port": 21286,
-          "uuid": "cb217cba-9412-4054-a000-c1163f67830a", "detour": "Out1", "packet_encoding": "xudp"
-        },
-        {
-          "type": "vless", "tag": "proxy-iraq", "server": "193.56.135.145", "server_port": 45269,
-          "uuid": "6e6f1284-fcc7-4eaa-b66e-82439b2a4f77", "detour": "Out1", "packet_encoding": "xudp"
-        },
-        {
-          "type": "vless", "tag": "proxy-turkey", "server": "203.202.232.48", "server_port": 12842,
-          "uuid": "b9574ee8-561b-4b8e-80c6-d95cc45946c6", "detour": "Out1", "packet_encoding": "xudp"
-        },
-        {
-          "type": "vless", "tag": "Out1", "server": "87.107.100.140", "server_port": 33855,
-          "uuid": "67f78830-0c93-40ae-8301-9b85ce11c4c7", "packet_encoding": "xudp"
-        },
-        {"type": "direct", "tag": "direct"}
-      ],
-      "route": {
-        "default_domain_resolver": {"server": "dns-direct"},
-        "final": "proxy-germany", "find_process": true,
-        "rules": [
-          {"inbound": ["in-germany", "in-us", "in-sweden", "in-iraq", "in-turkey"], "action": "sniff"},
-          {"inbound": ["in-germany"], "outbound": "proxy-germany"},
-          {"inbound": ["in-us"], "outbound": "proxy-us"},
-          {"inbound": ["in-sweden"], "outbound": "proxy-sweden"},
-          {"inbound": ["in-iraq"], "outbound": "proxy-iraq"},
-          {"inbound": ["in-turkey"], "outbound": "proxy-turkey"},
-          {"protocol": "dns", "action": "hijack-dns"}
-        ]
-      }
-    }
 
 ---
 # --- Deployment ---
@@ -128,25 +57,7 @@ spec:
       #     hostnames:
       #       - "panel.archnets.com"
       containers:
-        # Container 1: Sing-box chain (sidecar)
-        - name: singbox-chain
-          image: mirror2.chabokan.net/guigeng/sing-box:latest
-          args: ["run", "-c", "/etc/singbox-chain/chain.json"]
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "1Gi"
-              ephemeral-storage: "256Mi"
-            limits:
-              cpu: "1"
-              memory: "2Gi"
-              ephemeral-storage: "512Mi"
-          volumeMounts:
-            - name: chain-config
-              mountPath: /etc/singbox-chain/
-              readOnly: true
-              
-        # Container 2: Your existing node
+        # Container 1: Your existing node
         - name: archnet-node2
           # Using Docker Hub mirror (docker.io is restricted from Arvan/Iran)
           image: mirror2.chabokan.net/ebadidev/archnets-node:latest
@@ -208,10 +119,6 @@ spec:
         - name: config
           configMap:
             name: archnet-node2-config2
-        - name: chain-config
-          configMap:
-            name: singbox-chain-config2
-
 
 ---
 # --- Service ---
@@ -330,8 +237,6 @@ spec:
                 name: archnet-node2
                 port:
                   number: 8086
-
-
 
 # ==============================================================================
 # NOTES

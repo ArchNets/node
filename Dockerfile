@@ -1,10 +1,11 @@
 # Build go
 FROM golang:1.26.1-alpine AS builder
+ARG VERSION=docker
 WORKDIR /app
 COPY . .
 ENV CGO_ENABLED=0
 RUN GOEXPERIMENT=jsonv2 go mod download
-RUN GOEXPERIMENT=jsonv2 go build -v -o ./output/node -trimpath -ldflags "-s -w -buildid="
+RUN GOEXPERIMENT=jsonv2 go build -v -o ./output/node -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=${VERSION}' -s -w -buildid="
 
 # Download geo data files
 FROM alpine AS geodata

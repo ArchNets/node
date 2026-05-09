@@ -70,6 +70,7 @@ jobs:
         with:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.meta.outputs.version }}
           outputs: type=image,name=${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push by digest (Docker Hub)
@@ -78,6 +79,7 @@ jobs:
         with:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.meta.outputs.version }}
           outputs: type=image,name=docker.io/${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digests

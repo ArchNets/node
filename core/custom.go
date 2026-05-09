@@ -212,7 +212,11 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				jsonsettings["id"] = outbounditem.Password
 			case "vless":
 				jsonsettings["id"] = outbounditem.Password
-				jsonsettings["encryption"] = "none"
+				enc := outbounditem.Encryption
+				if enc == "" {
+					enc = "none"
+				}
+				jsonsettings["encryption"] = enc
 				if outbounditem.Flow != "" {
 					jsonsettings["flow"] = outbounditem.Flow
 				}

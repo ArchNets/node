@@ -21,6 +21,7 @@ type Node struct {
 	shadowtlsControllers []*ShadowTLSController
 	wireguardControllers []*WireGuardController
 	amneziawgControllers []*AmneziaWGController
+	ipsecControllers     []*IPsecController
 	tunnelController     *TunnelController
 }
 
@@ -31,6 +32,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		shadowtlsControllers: make([]*ShadowTLSController, 0),
 		wireguardControllers: make([]*WireGuardController, 0),
 		amneziawgControllers: make([]*AmneziaWGController, 0),
+		ipsecControllers:     make([]*IPsecController, 0),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -125,6 +127,12 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"type": "shadowtls",
 				"port": nodeconfig.Port,
 			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
+		} else if nodeconfig.Type == "ikev2" || nodeconfig.Type == "l2tp" || nodeconfig.Type == "ipsec" {
+			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(p, n, isPrimaryReporter))
+			log.WithFields(log.Fields{
+				"type": nodeconfig.Type,
+				"port": nodeconfig.Port,
+			}).Info("IPsec/IKEv2 protocol detected, using IPsec controller")
 		} else {
 			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter))
 		}
@@ -182,6 +190,16 @@ func (n *Node) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to start amneziawg node [%s]: %s",
 				n.amneziawgControllers[i].tag,
+				err)
+		}
+	}
+
+	// Start IPsec controllers
+	for i := range n.ipsecControllers {
+		err := n.ipsecControllers[i].Start()
+		if err != nil {
+			return fmt.Errorf("failed to start ipsec node [%s]: %s",
+				n.ipsecControllers[i].tag,
 				err)
 		}
 	}
@@ -244,6 +262,15 @@ func (n *Node) Close() {
 		}
 	}
 	n.amneziawgControllers = nil
+
+	// Close IPsec controllers
+	for _, c := range n.ipsecControllers {
+		err := c.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing IPsec controller")
+		}
+	}
+	n.ipsecControllers = nil
 
 	// Close Tunnel controller
 	if n.tunnelController != nil {
