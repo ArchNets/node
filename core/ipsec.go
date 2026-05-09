@@ -119,7 +119,7 @@ func (c *IPsecCore) Stop() {
 		c.stopXl2tpd()
 		os.Remove(fmt.Sprintf("/etc/xl2tpd/%s.conf", c.Tag))
 		os.Remove(fmt.Sprintf("/etc/ppp/options.xl2tpd.%s", c.Tag))
-		os.Remove(fmt.Sprintf("/etc/ppp/chap-secrets.%s", c.Tag))
+		os.Remove("/etc/ppp/chap-secrets")
 		os.Remove(fmt.Sprintf("/etc/ppp/ip-up.d/%s", c.Tag))
 		os.Remove(fmt.Sprintf("/etc/ppp/ip-down.d/%s", c.Tag))
 		os.Remove(fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag))
@@ -173,9 +173,6 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 	if err := c.reloadStrongSwan(); err != nil {
 		log.WithError(err).Error("Failed to reload strongSwan after adding users")
 	}
-	if c.Mode == "l2tp" {
-		c.restartXl2tpd()
-	}
 
 	log.WithFields(log.Fields{
 		"tag":   c.Tag,
@@ -198,9 +195,6 @@ func (c *IPsecCore) DelUsers(users []panel.UserInfo) {
 	}
 	if err := c.reloadStrongSwan(); err != nil {
 		log.WithError(err).Error("Failed to reload strongSwan after deleting users")
-	}
-	if c.Mode == "l2tp" {
-		c.restartXl2tpd()
 	}
 
 	log.WithFields(log.Fields{
@@ -280,7 +274,7 @@ func (c *IPsecCore) writeConfigs() error {
 		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/options.xl2tpd.%s", c.Tag), []byte(c.generatePPPOptions()), 0644); err != nil {
 			return err
 		}
-		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/chap-secrets.%s", c.Tag), []byte(c.generateChapSecrets()), 0600); err != nil {
+		if err := os.WriteFile("/etc/ppp/chap-secrets", []byte(c.generateChapSecrets()), 0600); err != nil {
 			return err
 		}
 		// PPP ip-up script: logs which ppp interface belongs to which user
@@ -356,7 +350,7 @@ func (c *IPsecCore) generateL2TPSwanctlConf() string {
         children {
             %s-l2tp {
                 local_ts = dynamic[udp]
-                remote_ts = dynamic[1701/udp]
+                remote_ts = dynamic[udp/1701]
                 mode = transport
                 esp_proposals = aes256-sha1,aes128-sha1,default
             }
@@ -378,9 +372,8 @@ require chap = yes
 refuse pap = yes
 require authentication = yes
 pppoptfile = /etc/ppp/options.xl2tpd.%s
-chap-secrets = /etc/ppp/chap-secrets.%s
 length bit = yes
-`, c.Tag, c.Tag)
+`, c.Tag)
 }
 
 // generatePPPOptions generates PPP options.
