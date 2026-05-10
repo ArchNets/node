@@ -1,8 +1,16 @@
 package core
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -22,6 +30,7 @@ type IPsecCore struct {
 	PSK              string // Pre-Shared Key from Protocol config
 	L2TPSharedSecret string // L2TP shared secret (for L2TP IPSec PSK)
 	AuthMethod       string // "eap-mschapv2" or "psk"
+	TProxyPort       int    // Xray TPROXY port for routing traffic
 
 	mu    sync.RWMutex
 	users map[int]*IPsecUser // key: subscription ID
@@ -245,6 +254,10 @@ func (c *IPsecCore) writeConfigs() error {
 	if c.Mode == "l2tp" {
 		conf = c.generateL2TPSwanctlConf()
 	} else {
+		// Ensure server certificate exists for IKEv2
+		if err := c.ensureServerCert(); err != nil {
+			log.WithError(err).Warn("Failed to generate server certificate, falling back to PSK")
+		}
 		conf = c.generateIKEv2SwanctlConf()
 	}
 
@@ -299,39 +312,132 @@ sed -i "/^$PEERNAME $IFNAME$/d" /tmp/archnet-ppp-%s.map 2>/dev/null
 
 // generateIKEv2SwanctlConf generates IKEv2 swanctl.conf.
 func (c *IPsecCore) generateIKEv2SwanctlConf() string {
-	return fmt.Sprintf(`connections {
-    %s {
+	// Use certificate-based server auth if cert exists, otherwise PSK
+	certPath := fmt.Sprintf("/etc/swanctl/x509/server-%s.pem", c.Tag)
+	localAuth := "auth = psk\n            id = %any"
+	if _, err := os.Stat(certPath); err == nil {
+		localAuth = fmt.Sprintf("auth = pubkey\n            certs = server-%s.pem", c.Tag)
+	}
+
+	r := strings.NewReplacer(
+		"{{TAG}}", c.Tag,
+		"{{LOCAL_AUTH}}", localAuth,
+		"{{REMOTE_AUTH}}", c.AuthMethod,
+	)
+
+	return r.Replace(`connections {
+    {{TAG}} {
         version = 2
-        proposals = aes256-sha256-modp2048,aes128-sha256-modp2048,default
+        proposals = aes256gcm16-sha384-ecp256,aes256gcm16-sha256-modp2048,aes128gcm16-sha256-ecp256,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp1024,default
         rekey_time = 0s
-        pools = pool-%s
+        pools = pool-{{TAG}}
         fragmentation = yes
         dpd_delay = 30s
         local {
-            auth = psk
-            id = %%any
+            {{LOCAL_AUTH}}
         }
         remote {
-            auth = %s
-            eap_id = %%any
+            auth = {{REMOTE_AUTH}}
+            eap_id = %any
         }
         children {
-            %s-child {
+            {{TAG}}-child {
                 local_ts = 0.0.0.0/0
                 rekey_time = 0s
                 dpd_action = clear
-                esp_proposals = aes256-sha256,aes128-sha256,default
+                esp_proposals = aes256gcm16,aes128gcm16,aes256-sha256,aes128-sha256,aes256-sha1,aes128-sha1,default
             }
         }
     }
 }
 pools {
-    pool-%s {
+    pool-{{TAG}} {
         addrs = 10.10.0.0/16
         dns = 8.8.8.8,1.1.1.1
     }
 }
-`, c.Tag, c.Tag, c.AuthMethod, c.Tag, c.Tag)
+`)
+}
+
+// ensureServerCert generates a self-signed certificate for IKEv2 server auth if one doesn't exist.
+func (c *IPsecCore) ensureServerCert() error {
+	certPath := fmt.Sprintf("/etc/swanctl/x509/server-%s.pem", c.Tag)
+	keyPath := fmt.Sprintf("/etc/swanctl/private/server-%s.pem", c.Tag)
+
+	// Skip if cert already exists
+	if _, err := os.Stat(certPath); err == nil {
+		return nil
+	}
+
+	// Ensure directories exist
+	for _, dir := range []string{"/etc/swanctl/x509", "/etc/swanctl/private"} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", dir, err)
+		}
+	}
+
+	// Generate ECDSA P-256 key
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate key: %w", err)
+	}
+
+	// Detect server IP from swanctl socket or use a wildcard
+	serverIP := "0.0.0.0"
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+				serverIP = ipNet.IP.String()
+				break
+			}
+		}
+	}
+
+	// Create self-signed certificate
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: serverIP,
+		},
+		IPAddresses:           []net.IP{net.ParseIP(serverIP)},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Write certificate
+	certFile, err := os.Create(certPath)
+	if err != nil {
+		return fmt.Errorf("failed to create cert file: %w", err)
+	}
+	defer certFile.Close()
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return err
+	}
+
+	// Write private key
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return fmt.Errorf("failed to marshal key: %w", err)
+	}
+	keyFile, err := os.OpenFile(keyPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create key file: %w", err)
+	}
+	defer keyFile.Close()
+	if err := pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		return err
+	}
+
+	log.WithField("tag", c.Tag).Info("Generated self-signed certificate for IKEv2 server auth")
+	return nil
 }
 
 // generateL2TPSwanctlConf generates IKEv1 Transport mode swanctl.conf for L2TP.
@@ -339,7 +445,8 @@ func (c *IPsecCore) generateL2TPSwanctlConf() string {
 	return fmt.Sprintf(`connections {
     %s {
         version = 1
-        proposals = aes256-sha1-modp2048,aes128-sha1-modp1024,default
+        proposals = aes256-sha1-modp2048,aes128-sha1-modp1024,3des-sha1-modp1024,default
+        encap = yes
         local {
             auth = psk
             id = %%any
@@ -349,10 +456,11 @@ func (c *IPsecCore) generateL2TPSwanctlConf() string {
         }
         children {
             %s-l2tp {
-                local_ts = dynamic[udp]
+                local_ts = dynamic[udp/1701]
                 remote_ts = dynamic[udp/1701]
                 mode = transport
-                esp_proposals = aes256-sha1,aes128-sha1,default
+                esp_proposals = aes256-sha1,aes128-sha1,3des-sha1,default
+                dpd_action = clear
             }
         }
     }
@@ -431,8 +539,19 @@ func (c *IPsecCore) generateSecrets() string {
 	return sb.String()
 }
 
-// reloadStrongSwan reloads strongSwan configuration.
+// reloadStrongSwan ensures charon is running and loads configuration.
 func (c *IPsecCore) reloadStrongSwan() error {
+	// Ensure strongSwan daemon (charon) is running.
+	// Try systemd first, fall back to ipsec command.
+	if err := exec.Command("systemctl", "start", "strongswan-starter").Run(); err != nil {
+		// Some distros use "strongswan" or "ipsec" service name
+		if err2 := exec.Command("systemctl", "start", "strongswan").Run(); err2 != nil {
+			_ = exec.Command("ipsec", "start").Run()
+		}
+	}
+	// Brief pause for charon to initialize
+	time.Sleep(500 * time.Millisecond)
+
 	if out, err := exec.Command("swanctl", "--load-all").CombinedOutput(); err != nil {
 		return fmt.Errorf("swanctl --load-all failed: %s, output: %s", err, string(out))
 	}
@@ -466,31 +585,75 @@ func (c *IPsecCore) stopXl2tpd() {
 	}
 }
 
-// setupNAT configures MASQUERADE for the VPN subnet
+// SetTProxyPort sets the local Xray port to route traffic to.
+func (c *IPsecCore) SetTProxyPort(port int) {
+	c.TProxyPort = port
+}
+
+// setupNAT configures TPROXY or MASQUERADE for the VPN subnet
 func (c *IPsecCore) setupNAT() error {
 	subnet := "10.10.0.0/16"
 	if c.Mode == "l2tp" {
 		subnet = "10.11.0.0/16"
 	}
 
-	// Basic masquerade rule (assuming eth0 as default iface for simplicity, or just let iptables auto-detect output iface)
-	checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
-	if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
-		addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet)
-		if err := exec.Command("sh", "-c", addCmd).Run(); err != nil {
-			return err
+	if c.TProxyPort > 0 {
+		// TPROXY mode: route VPN traffic through Xray.
+		// TPROXY preserves original destination for both TCP and UDP.
+		// Note: REDIRECT can't recover original dest for UDP (SO_ORIGINAL_DST
+		// doesn't work for connectionless protocols), so TPROXY is required.
+		_ = exec.Command("sh", "-c", "ip rule add fwmark 1 lookup 100").Run()
+		_ = exec.Command("sh", "-c", "ip route add local 0.0.0.0/0 dev lo table 100").Run()
+
+		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
+
+		// Create chain in mangle table (ignore error if exists)
+		if err := exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -N %s", chainName)).Run(); err != nil {
+			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -F %s", chainName)).Run()
+		}
+
+		// Skip traffic destined to VPN subnet itself
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A %s -d %s -j RETURN", chainName, subnet)).Run()
+
+		// TPROXY capture rules for TCP and UDP
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
+
+		// Apply to PREROUTING for packets from VPN subnet
+		checkCmd := fmt.Sprintf("iptables -t mangle -C PREROUTING -s %s -j %s", subnet, chainName)
+		if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
+			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A PREROUTING -s %s -j %s", subnet, chainName)).Run()
+		}
+
+		log.WithFields(log.Fields{"tag": c.Tag, "port": c.TProxyPort}).Info("IPsec TPROXY routing enabled")
+	} else {
+		// Standard masquerade (direct internet)
+		checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
+		if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
+			addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet)
+			if err := exec.Command("sh", "-c", addCmd).Run(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-// teardownNAT removes MASQUERADE for the VPN subnet
+// teardownNAT removes NAT/TPROXY rules for the VPN subnet
 func (c *IPsecCore) teardownNAT() {
 	subnet := "10.10.0.0/16"
 	if c.Mode == "l2tp" {
 		subnet = "10.11.0.0/16"
 	}
-	_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet)).Run()
+
+	if c.TProxyPort > 0 {
+		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -D PREROUTING -s %s -j %s", subnet, chainName)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -F %s", chainName)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -X %s", chainName)).Run()
+	} else {
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet)).Run()
+	}
 }
 
 type sasStats struct {

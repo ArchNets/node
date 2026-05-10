@@ -128,7 +128,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"port": nodeconfig.Port,
 			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
 		} else if nodeconfig.Type == "ikev2" || nodeconfig.Type == "l2tp" || nodeconfig.Type == "ipsec" {
-			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(p, n, isPrimaryReporter))
+			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(core, p, n, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": nodeconfig.Type,
 				"port": nodeconfig.Port,

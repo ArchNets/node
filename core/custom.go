@@ -141,7 +141,7 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 		"outboundTag": "dns_out",
 	})
 	coreRouterConfig := &coreConf.RouterConfig{
-		RuleList:       []json.RawMessage{dnsRule},
+		RuleList:       []json.RawMessage{},
 		DomainStrategy: &domainStrategy,
 	}
 
@@ -362,7 +362,8 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 		}
 	}
 
-	// custom routing rules
+	// custom routing rules — placed BEFORE dns_out so inbound-tag rules
+	// (e.g. ikev2:28 → Main Panel) take priority for IPsec/WG traffic.
 	if routingList := serverconfig.Data.Routing; routingList != nil {
 		for _, rule := range *routingList {
 			splitFunc := func(items []string) []string {
@@ -420,6 +421,9 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			}
 		}
 	}
+
+	// dns_out rule AFTER custom rules — catches remaining UDP DNS from standard inbounds
+	coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, dnsRule)
 	//build config
 	DnsConfig, err := coreDnsConfig.Build()
 	if err != nil {

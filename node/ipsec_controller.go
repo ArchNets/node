@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -11,15 +12,18 @@ import (
 	vCore "github.com/archnets/node/core"
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
+	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 // IPsecController manages IKEv2/L2TP protocol nodes.
 type IPsecController struct {
-	tag       string
+	tag     string // internal tag for iptables/limiter (e.g. "ipsec-28-443")
+	xrayTag string // Xray inbound tag matching panel routing rules (e.g. "ikev2:28")
 	info      *panel.NodeInfo
 	apiClient *panel.ClientV1
 	ipsecCore *vCore.IPsecCore
 	limiter   *limiter.Limiter
+	xrayCore  *vCore.XrayCore
 
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
@@ -28,12 +32,16 @@ type IPsecController struct {
 }
 
 // NewIPsecController creates a new IPsec controller.
-func NewIPsecController(apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *IPsecController {
+func NewIPsecController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *IPsecController {
+	// xrayTag matches the panel routing rule format: "type:nodeId" (e.g. "ikev2:28", "l2tp:28")
+	xrayTag := info.Protocol.Type + ":" + strconv.Itoa(info.Id)
 	return &IPsecController{
 		tag:               generateIPsecTag(info),
+		xrayTag:           xrayTag,
 		info:              info,
 		apiClient:         apiClient,
 		isPrimaryReporter: isPrimaryReporter,
+		xrayCore:          core,
 	}
 }
 
@@ -85,6 +93,48 @@ func (c *IPsecController) Start() error {
 
 	// Create and start IPsec core
 	c.ipsecCore = vCore.NewIPsecCore(c.tag, mode, psk, l2tpSecret, authMethod)
+
+	// Inject Xray TPROXY inbound for routing traffic through Xray outbounds
+	// Use unique ports per protocol type to avoid collisions with WireGuard (10800+id)
+	var tproxyPort int
+	switch mode {
+	case "ikev2":
+		tproxyPort = 12000 + c.info.Id
+	case "l2tp":
+		tproxyPort = 13000 + c.info.Id
+	default:
+		tproxyPort = 14000 + c.info.Id
+	}
+
+	// Use xrayTag (e.g. "ikev2:28") to match panel routing rules, NOT internal tag
+	inboundJSON := fmt.Sprintf(`{
+		"tag": "%s",
+		"port": %d,
+		"protocol": "dokodemo-door",
+		"settings": {
+			"network": "tcp,udp",
+			"followRedirect": true
+		},
+		"streamSettings": {
+			"sockopt": {
+				"tproxy": "tproxy"
+			}
+		}
+	}`, c.xrayTag, tproxyPort)
+
+	var inConf coreConf.InboundDetourConfig
+	if err := json.Unmarshal([]byte(inboundJSON), &inConf); err != nil {
+		return fmt.Errorf("failed to parse tproxy inbound for %s: %v", c.xrayTag, err)
+	}
+	inboundConfig, err2 := inConf.Build()
+	if err2 != nil {
+		return fmt.Errorf("failed to build tproxy inbound for %s: %v", c.xrayTag, err2)
+	}
+	if err := c.xrayCore.AddInbound(inboundConfig); err != nil {
+		return fmt.Errorf("failed to add tproxy inbound for %s: %v", c.xrayTag, err)
+	}
+	c.ipsecCore.SetTProxyPort(tproxyPort)
+
 	if err := c.ipsecCore.Start(); err != nil {
 		return fmt.Errorf("failed to start IPsec core: %w", err)
 	}
@@ -111,6 +161,10 @@ func (c *IPsecController) Close() error {
 	}
 	if c.userReportPeriodic != nil {
 		c.userReportPeriodic.Close()
+	}
+	// Remove Xray TPROXY inbound (uses xrayTag, not internal tag)
+	if err := c.xrayCore.RemoveInbound(c.xrayTag); err != nil {
+		log.WithError(err).WithField("tag", c.xrayTag).Warn("Failed to remove Xray inbound")
 	}
 	if c.ipsecCore != nil {
 		c.ipsecCore.Stop()
