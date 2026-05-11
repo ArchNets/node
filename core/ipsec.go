@@ -23,14 +23,26 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// IPsecCore manages strongSwan IKEv2 and xl2tpd L2TP servers.
-type IPsecCore struct {
+// IPsecConfig holds all configuration for an IPsec core instance.
+type IPsecConfig struct {
 	Tag              string
 	Mode             string // "ikev2" or "l2tp"
-	PSK              string // Pre-Shared Key from Protocol config
-	L2TPSharedSecret string // L2TP shared secret (for L2TP IPSec PSK)
+	PSK              string // Pre-Shared Key for IPsec
+	L2TPSharedSecret string // L2TP shared secret
 	AuthMethod       string // "eap-mschapv2" or "psk"
-	TProxyPort       int    // Xray TPROXY port for routing traffic
+	Domain           string // SNI domain for cert (e.g. "ik1.archlio.com")
+	CertMode         string // "none", "file", "http", "self"
+	CertFile         string // Inline cert content (for cert_mode=file)
+	KeyFile          string // Inline key content (for cert_mode=file)
+	DNS              string // DNS servers for VPN clients (e.g. "8.8.8.8,1.1.1.1")
+	Subnet           string // IP pool subnet (e.g. "10.10.0.0/16")
+	MTU              int    // MTU for L2TP PPP links
+}
+
+// IPsecCore manages strongSwan IKEv2 and xl2tpd L2TP servers.
+type IPsecCore struct {
+	IPsecConfig
+	TProxyPort int // Xray TPROXY port for routing traffic
 
 	mu    sync.RWMutex
 	users map[int]*IPsecUser // key: subscription ID
@@ -51,23 +63,47 @@ type IPsecUser struct {
 }
 
 // NewIPsecCore creates a new IPsec core manager.
-func NewIPsecCore(tag, mode, psk, l2tpSecret, authMethod string) *IPsecCore {
-	if mode == "" {
-		mode = "ikev2"
+func NewIPsecCore(cfg IPsecConfig) *IPsecCore {
+	if cfg.Mode == "" {
+		cfg.Mode = "ikev2"
 	}
-	if authMethod == "" {
-		authMethod = "eap-mschapv2"
+	cfg.Mode = strings.ToLower(cfg.Mode)
+	if cfg.AuthMethod == "" {
+		cfg.AuthMethod = "eap-mschapv2"
 	}
 	return &IPsecCore{
-		Tag:              tag,
-		Mode:             strings.ToLower(mode),
-		PSK:              psk,
-		L2TPSharedSecret: l2tpSecret,
-		AuthMethod:       authMethod,
-		users:            make(map[int]*IPsecUser),
-		traffic:          make(map[int]*UserTraffic),
-		lastSasStats:     make(map[string]*sasStats),
+		IPsecConfig:  cfg,
+		users:        make(map[int]*IPsecUser),
+		traffic:      make(map[int]*UserTraffic),
+		lastSasStats: make(map[string]*sasStats),
 	}
+}
+
+// getSubnet returns the configured subnet or a default based on mode.
+func (c *IPsecCore) getSubnet() string {
+	if c.Subnet != "" {
+		return c.Subnet
+	}
+	if c.Mode == "l2tp" {
+		return "10.11.0.0/16"
+	}
+	return "10.10.0.0/16"
+}
+
+// getDNS returns the configured DNS servers or defaults.
+func (c *IPsecCore) getDNS() string {
+	if c.DNS != "" {
+		return c.DNS
+	}
+	return "8.8.8.8,1.1.1.1"
+}
+
+// getMTU returns the configured MTU or default 1400.
+func (c *IPsecCore) getMTU() int {
+	if c.MTU > 0 {
+		return c.MTU
+	}
+	return 1400
 }
 
 // Start initializes strongSwan and xl2tpd.
@@ -254,9 +290,9 @@ func (c *IPsecCore) writeConfigs() error {
 	if c.Mode == "l2tp" {
 		conf = c.generateL2TPSwanctlConf()
 	} else {
-		// Ensure server certificate exists for IKEv2
-		if err := c.ensureServerCert(); err != nil {
-			log.WithError(err).Warn("Failed to generate server certificate, falling back to PSK")
+		// Ensure server certificate for IKEv2 based on CertMode
+		if err := c.setupCertificate(); err != nil {
+			log.WithError(err).Warn("Failed to setup IKEv2 certificate")
 		}
 		conf = c.generateIKEv2SwanctlConf()
 	}
@@ -312,17 +348,55 @@ sed -i "/^$PEERNAME $IFNAME$/d" /tmp/archnet-ppp-%s.map 2>/dev/null
 
 // generateIKEv2SwanctlConf generates IKEv2 swanctl.conf.
 func (c *IPsecCore) generateIKEv2SwanctlConf() string {
-	// Use certificate-based server auth if cert exists, otherwise PSK
-	certPath := fmt.Sprintf("/etc/swanctl/x509/server-%s.pem", c.Tag)
+	// Server (local) auth selection based on CertMode:
+	// 1. "http"/"file" + domain → pubkey + eap-mschapv2 (iPhone/iOS compatible)
+	// 2. "self" → pubkey with self-signed cert (Android only)
+	// 3. "none"/"" or PSK auth → PSK server auth
 	localAuth := "auth = psk\n            id = %any"
-	if _, err := os.Stat(certPath); err == nil {
-		localAuth = fmt.Sprintf("auth = pubkey\n            certs = server-%s.pem", c.Tag)
+	remoteAuth := c.AuthMethod
+
+	certName := c.Domain + ".pem"
+	switch c.CertMode {
+	case "http", "dns":
+		// Let's Encrypt / ACME: use trusted cert with domain identity
+		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", certName)
+		if _, err := os.Stat(certPath); err == nil {
+			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s\n            id = %s", certName, c.Domain)
+			remoteAuth = "eap-mschapv2"
+			log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Using trusted cert for IKEv2")
+		}
+	case "file":
+		// Inline cert from panel
+		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", certName)
+		if _, err := os.Stat(certPath); err == nil {
+			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s\n            id = %s", certName, c.Domain)
+			remoteAuth = "eap-mschapv2"
+			log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Using file cert for IKEv2")
+		}
+	case "self":
+		// Self-signed cert (Android strongSwan only, not iOS)
+		selfCertName := fmt.Sprintf("server-%s.pem", c.Tag)
+		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", selfCertName)
+		if _, err := os.Stat(certPath); err == nil {
+			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s", selfCertName)
+		}
+	default:
+		// "none" or "" → PSK mode (or EAP with self-signed fallback)
+		if strings.HasPrefix(c.AuthMethod, "eap") {
+			selfCertName := fmt.Sprintf("server-%s.pem", c.Tag)
+			certPath := fmt.Sprintf("/etc/swanctl/x509/%s", selfCertName)
+			if _, err := os.Stat(certPath); err == nil {
+				localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s", selfCertName)
+			}
+		}
 	}
 
 	r := strings.NewReplacer(
 		"{{TAG}}", c.Tag,
 		"{{LOCAL_AUTH}}", localAuth,
-		"{{REMOTE_AUTH}}", c.AuthMethod,
+		"{{REMOTE_AUTH}}", remoteAuth,
+		"{{SUBNET}}", c.getSubnet(),
+		"{{DNS}}", c.getDNS(),
 	)
 
 	return r.Replace(`connections {
@@ -331,8 +405,9 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
         proposals = aes256gcm16-sha384-ecp256,aes256gcm16-sha256-modp2048,aes128gcm16-sha256-ecp256,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp1024,default
         rekey_time = 0s
         pools = pool-{{TAG}}
-        fragmentation = yes
+        fragmentation = force
         dpd_delay = 30s
+        send_cert = always
         local {
             {{LOCAL_AUTH}}
         }
@@ -352,8 +427,8 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 }
 pools {
     pool-{{TAG}} {
-        addrs = 10.10.0.0/16
-        dns = 8.8.8.8,1.1.1.1
+        addrs = {{SUBNET}}
+        dns = {{DNS}}
     }
 }
 `)
@@ -440,6 +515,102 @@ func (c *IPsecCore) ensureServerCert() error {
 	return nil
 }
 
+// setupCertificate installs certificates for IKEv2 based on CertMode.
+func (c *IPsecCore) setupCertificate() error {
+	// Ensure strongSwan directories exist
+	for _, dir := range []string{"/etc/swanctl/x509", "/etc/swanctl/x509ca", "/etc/swanctl/private"} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", dir, err)
+		}
+	}
+
+	switch c.CertMode {
+	case "http", "dns":
+		// Let's Encrypt / ACME cert from standard certbot path
+		return c.installLetsEncryptCert()
+	case "file":
+		// Inline cert content from panel API
+		return c.installFileCert()
+	case "self":
+		// Self-signed certificate
+		return c.ensureServerCert()
+	default:
+		// "none" or "" → try self-signed for EAP fallback, skip for PSK
+		if strings.HasPrefix(c.AuthMethod, "eap") {
+			return c.ensureServerCert()
+		}
+		return nil // PSK mode, no cert needed
+	}
+}
+
+// installLetsEncryptCert copies Let's Encrypt certificates into strongSwan directories.
+func (c *IPsecCore) installLetsEncryptCert() error {
+	if c.Domain == "" {
+		return fmt.Errorf("no domain configured for Let's Encrypt cert")
+	}
+
+	leDir := fmt.Sprintf("/etc/letsencrypt/live/%s", c.Domain)
+	certSrc := leDir + "/cert.pem"
+	chainSrc := leDir + "/chain.pem"
+	keySrc := leDir + "/privkey.pem"
+
+	// Verify Let's Encrypt files exist
+	for _, f := range []string{certSrc, chainSrc, keySrc} {
+		if _, err := os.Stat(f); err != nil {
+			return fmt.Errorf("Let's Encrypt file not found: %s", f)
+		}
+	}
+
+	// Copy cert (not symlink — Let's Encrypt live/ files are already symlinks)
+	copies := []struct {
+		src, dst string
+	}{
+		{certSrc, fmt.Sprintf("/etc/swanctl/x509/%s.pem", c.Domain)},
+		{chainSrc, fmt.Sprintf("/etc/swanctl/x509ca/%s-chain.pem", c.Domain)},
+		{keySrc, fmt.Sprintf("/etc/swanctl/private/%s.pem", c.Domain)},
+	}
+
+	for _, cp := range copies {
+		data, err := os.ReadFile(cp.src)
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", cp.src, err)
+		}
+		perm := os.FileMode(0644)
+		if strings.Contains(cp.dst, "private") {
+			perm = 0600
+		}
+		if err := os.WriteFile(cp.dst, data, perm); err != nil {
+			return fmt.Errorf("failed to write %s: %w", cp.dst, err)
+		}
+	}
+
+	log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Installed Let's Encrypt certificate for IKEv2")
+	return nil
+}
+
+// installFileCert writes inline certificate content from the panel to strongSwan directories.
+func (c *IPsecCore) installFileCert() error {
+	if c.Domain == "" {
+		return fmt.Errorf("no domain configured for file cert")
+	}
+	if c.IPsecConfig.CertFile == "" || c.IPsecConfig.KeyFile == "" {
+		return fmt.Errorf("cert_mode is 'file' but cert_file or key_file is empty")
+	}
+
+	certDst := fmt.Sprintf("/etc/swanctl/x509/%s.pem", c.Domain)
+	keyDst := fmt.Sprintf("/etc/swanctl/private/%s.pem", c.Domain)
+
+	if err := os.WriteFile(certDst, []byte(c.IPsecConfig.CertFile), 0644); err != nil {
+		return fmt.Errorf("failed to write cert: %w", err)
+	}
+	if err := os.WriteFile(keyDst, []byte(c.IPsecConfig.KeyFile), 0600); err != nil {
+		return fmt.Errorf("failed to write key: %w", err)
+	}
+
+	log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Installed file certificate for IKEv2")
+	return nil
+}
+
 // generateL2TPSwanctlConf generates IKEv1 Transport mode swanctl.conf for L2TP.
 func (c *IPsecCore) generateL2TPSwanctlConf() string {
 	return fmt.Sprintf(`connections {
@@ -470,34 +641,51 @@ func (c *IPsecCore) generateL2TPSwanctlConf() string {
 
 // generateXl2tpdConf generates xl2tpd.conf (tag-scoped).
 func (c *IPsecCore) generateXl2tpdConf() string {
+	// Derive IP range from subnet (e.g. 10.11.0.0/16 → local=10.11.0.1, range=10.11.1.2-10.11.254.254)
+	subnet := c.getSubnet()
+	parts := strings.Split(strings.Split(subnet, "/")[0], ".")
+	base := "10.11"
+	if len(parts) >= 2 {
+		base = parts[0] + "." + parts[1]
+	}
+
 	return fmt.Sprintf(`[global]
 port = 1701
 
 [lns default]
-ip range = 10.11.1.2-10.11.254.254
-local ip = 10.11.0.1
+ip range = %s.1.2-%s.254.254
+local ip = %s.0.1
 require chap = yes
 refuse pap = yes
 require authentication = yes
 pppoptfile = /etc/ppp/options.xl2tpd.%s
 length bit = yes
-`, c.Tag)
+`, base, base, base, c.Tag)
 }
 
 // generatePPPOptions generates PPP options.
 func (c *IPsecCore) generatePPPOptions() string {
-	return `ipcp-accept-local
+	// Split DNS string into individual ms-dns lines
+	dnsServers := strings.Split(c.getDNS(), ",")
+	var dnsLines string
+	for _, dns := range dnsServers {
+		dns = strings.TrimSpace(dns)
+		if dns != "" {
+			dnsLines += fmt.Sprintf("ms-dns %s\n", dns)
+		}
+	}
+
+	mtu := c.getMTU()
+	return fmt.Sprintf(`ipcp-accept-local
 ipcp-accept-remote
-ms-dns 8.8.8.8
-ms-dns 1.1.1.1
-noccp
+%snoccp
 auth
-mtu 1400
-mru 1400
+mtu %d
+mru %d
 nodefaultroute
 lock
 proxyarp
-`
+`, dnsLines, mtu, mtu)
 }
 
 // generateChapSecrets generates PPP CHAP secrets.
@@ -592,10 +780,7 @@ func (c *IPsecCore) SetTProxyPort(port int) {
 
 // setupNAT configures TPROXY or MASQUERADE for the VPN subnet
 func (c *IPsecCore) setupNAT() error {
-	subnet := "10.10.0.0/16"
-	if c.Mode == "l2tp" {
-		subnet = "10.11.0.0/16"
-	}
+	subnet := c.getSubnet()
 
 	if c.TProxyPort > 0 {
 		// TPROXY mode: route VPN traffic through Xray.
@@ -641,10 +826,7 @@ func (c *IPsecCore) setupNAT() error {
 
 // teardownNAT removes NAT/TPROXY rules for the VPN subnet
 func (c *IPsecCore) teardownNAT() {
-	subnet := "10.10.0.0/16"
-	if c.Mode == "l2tp" {
-		subnet = "10.11.0.0/16"
-	}
+	subnet := c.getSubnet()
 
 	if c.TProxyPort > 0 {
 		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)

@@ -179,6 +179,9 @@ type Protocol struct {
 	IPsecPSK         string `json:"ipsec_psk"`          // Pre-Shared Key for IPsec
 	L2TPSharedSecret string `json:"l2tp_shared_secret"` // L2TP shared secret
 	IPsecAuthMethod  string `json:"ipsec_auth_method"`  // Authentication method: eap-mschapv2, psk
+	IPsecDNS         string `json:"ipsec_dns"`          // DNS servers for VPN clients (e.g. "8.8.8.8,1.1.1.1")
+	IPsecSubnet      string `json:"ipsec_subnet"`       // IP pool subnet (e.g. "10.10.0.0/16")
+	IPsecMTU         int    `json:"ipsec_mtu"`          // MTU for L2TP PPP links (default: 1400)
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {

@@ -69,35 +69,46 @@ func (c *IPsecController) Start() error {
 	// Create limiter
 	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, users, aliveList)
 
-	// Get PSK and Auth from protocol config
-	psk := "archnet-default-psk"
-	authMethod := "eap-mschapv2"
-	l2tpSecret := ""
-	mode := "ikev2"
+	// Build IPsec config from panel protocol config
+	cfg := vCore.IPsecConfig{
+		Tag:        c.tag,
+		Mode:       "ikev2",
+		PSK:        "archnet-default-psk",
+		AuthMethod: "eap-mschapv2",
+	}
 
 	if c.info.Type == "l2tp" {
-		mode = "l2tp"
+		cfg.Mode = "l2tp"
 	}
 
 	if c.info.Protocol != nil {
 		if c.info.Protocol.IPsecPSK != "" {
-			psk = c.info.Protocol.IPsecPSK
+			cfg.PSK = c.info.Protocol.IPsecPSK
 		}
 		if c.info.Protocol.L2TPSharedSecret != "" {
-			l2tpSecret = c.info.Protocol.L2TPSharedSecret
+			cfg.L2TPSharedSecret = c.info.Protocol.L2TPSharedSecret
 		}
 		if c.info.Protocol.IPsecAuthMethod != "" {
-			authMethod = c.info.Protocol.IPsecAuthMethod
+			cfg.AuthMethod = c.info.Protocol.IPsecAuthMethod
 		}
+		// Cert configuration from panel
+		cfg.Domain = c.info.Protocol.SNI
+		cfg.CertMode = c.info.Protocol.CertMode
+		cfg.CertFile = c.info.Protocol.CertFile
+		cfg.KeyFile = c.info.Protocol.KeyFile
+		// Configurable IPsec params
+		cfg.DNS = c.info.Protocol.IPsecDNS
+		cfg.Subnet = c.info.Protocol.IPsecSubnet
+		cfg.MTU = c.info.Protocol.IPsecMTU
 	}
 
 	// Create and start IPsec core
-	c.ipsecCore = vCore.NewIPsecCore(c.tag, mode, psk, l2tpSecret, authMethod)
+	c.ipsecCore = vCore.NewIPsecCore(cfg)
 
 	// Inject Xray TPROXY inbound for routing traffic through Xray outbounds
 	// Use unique ports per protocol type to avoid collisions with WireGuard (10800+id)
 	var tproxyPort int
-	switch mode {
+	switch cfg.Mode {
 	case "ikev2":
 		tproxyPort = 12000 + c.info.Id
 	case "l2tp":
