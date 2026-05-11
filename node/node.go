@@ -198,9 +198,10 @@ func (n *Node) Start() error {
 	for i := range n.ipsecControllers {
 		err := n.ipsecControllers[i].Start()
 		if err != nil {
-			return fmt.Errorf("failed to start ipsec node [%s]: %s",
-				n.ipsecControllers[i].tag,
-				err)
+			log.WithFields(log.Fields{
+				"tag": n.ipsecControllers[i].tag,
+				"err": err,
+			}).Error("Failed to start IPsec node (strongSwan may not be installed)")
 		}
 	}
 

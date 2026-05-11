@@ -197,6 +197,26 @@ install_base() {
     fi
 }
 
+# Enable and start strongSwan charon daemon (required for IPsec/IKEv2/L2TP)
+setup_strongswan() {
+    if [[ x"${release}" == x"alpine" ]]; then
+        rc-update add strongswan default 2>/dev/null || true
+        service strongswan start 2>/dev/null || true
+        return
+    fi
+
+    # Try known systemd service names in order of preference
+    for svc in strongswan-swanctl strongswan-starter strongswan; do
+        if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+            systemctl enable "$svc" >/dev/null 2>&1 || true
+            systemctl start "$svc" >/dev/null 2>&1 || true
+            echo -e "${green}strongSwan service '${svc}' enabled and started${plain}"
+            return
+        fi
+    done
+    echo -e "${yellow}Warning: Could not find strongSwan systemd service to enable${plain}"
+}
+
 # 0: running, 1: not running, 2: not installed
 check_status() {
     if [[ ! -f /usr/local/archnets/node ]]; then
@@ -327,7 +347,7 @@ EOF
         cat <<EOF > /etc/systemd/system/archnets.service
 [Unit]
 Description=archnets Service
-After=network.target nss-lookup.target
+After=network.target nss-lookup.target strongswan-swanctl.service strongswan-starter.service strongswan.service
 Wants=network.target
 
 [Service]
@@ -424,4 +444,5 @@ EOF
 parse_args "$@"
 echo -e "${green}Starting installation${plain}"
 install_base
+setup_strongswan
 install_ppnode "$VERSION_ARG"
