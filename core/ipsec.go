@@ -729,6 +729,11 @@ func (c *IPsecCore) generateSecrets() string {
 
 // reloadStrongSwan ensures charon is running and loads configuration.
 func (c *IPsecCore) reloadStrongSwan() error {
+	// Check if swanctl binary exists
+	if _, err := exec.LookPath("swanctl"); err != nil {
+		return fmt.Errorf("strongSwan not installed (swanctl not found). Install: apt install -y strongswan strongswan-swanctl xl2tpd")
+	}
+
 	// Ensure strongSwan daemon (charon) is running.
 	// Service name varies by distro/package:
 	//   - strongswan-starter : classic strongSwan (charon-starter)
@@ -740,14 +745,25 @@ func (c *IPsecCore) reloadStrongSwan() error {
 	for _, svc := range serviceNames {
 		if err := exec.Command("systemctl", "start", svc).Run(); err == nil {
 			started = true
+			log.WithField("service", svc).Info("strongSwan service started")
 			break
 		}
 	}
 	if !started {
 		_ = exec.Command("ipsec", "start").Run()
 	}
-	// Wait for charon to initialize and open the VICI socket
-	time.Sleep(2 * time.Second)
+
+	// Wait for charon VICI socket with retries
+	viciSocket := "/var/run/charon.vici"
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(viciSocket); err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if _, err := os.Stat(viciSocket); err != nil {
+		return fmt.Errorf("charon VICI socket not found after 5s. strongSwan daemon failed to start")
+	}
 
 	if out, err := exec.Command("swanctl", "--load-all").CombinedOutput(); err != nil {
 		return fmt.Errorf("swanctl --load-all failed: %s, output: %s", err, string(out))
