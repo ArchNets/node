@@ -14,17 +14,20 @@ type ServerConfigResponse struct {
 }
 
 type Data struct {
-	TrafficReportThreshold int            `json:"traffic_report_threshold"`
-	PushInterval           int            `json:"push_interval"`
-	PullInterval           int            `json:"pull_interval"`
-	IPStrategy             string         `json:"ip_strategy"`
-	DNS                    *[]DNSItem     `json:"dns"`
-	Block                  *[]string      `json:"block"`
-	Outbound               *[]Outbound    `json:"outbound"`
-	Routing                *[]RoutingRule `json:"routing"`
-	StatsPolicy            *StatsPolicy   `json:"stats_policy"`
-	Protocols              *[]Protocol    `json:"protocols"`
-	Total                  int            `json:"total"`
+	TrafficReportThreshold int                `json:"traffic_report_threshold"`
+	PushInterval           int                `json:"push_interval"`
+	PullInterval           int                `json:"pull_interval"`
+	IPStrategy             string             `json:"ip_strategy"`
+	DNS                    *[]DNSItem         `json:"dns"`
+	Block                  *[]string          `json:"block"`
+	Outbound               *[]Outbound        `json:"outbound"`
+	Routing                *[]RoutingRule     `json:"routing"`
+	Balancers              *[]Balancer        `json:"balancers"`
+	Observatory            *Observatory       `json:"observatory"`
+	BurstObservatory       *BurstObservatory  `json:"burst_observatory"`
+	StatsPolicy            *StatsPolicy       `json:"stats_policy"`
+	Protocols              *[]Protocol        `json:"protocols"`
+	Total                  int                `json:"total"`
 }
 
 type DNSItem struct {
@@ -65,6 +68,33 @@ type Outbound struct {
 	WireguardPeerPublicKey string `json:"wireguard_peer_public_key,omitempty"`
 	WireguardPeerEndpoint  string `json:"wireguard_peer_endpoint,omitempty"`
 	WireguardReserved      string `json:"wireguard_reserved,omitempty"`
+}
+
+type Balancer struct {
+	Tag         string   `json:"tag"`
+	Selector    []string `json:"selector"`
+	Strategy    string   `json:"strategy,omitempty"`
+	FallbackTag string   `json:"fallback_tag,omitempty"`
+}
+
+type Observatory struct {
+	SubjectSelector   []string `json:"subject_selector"`
+	ProbeURL          string   `json:"probe_url,omitempty"`
+	ProbeInterval     string   `json:"probe_interval,omitempty"`
+	EnableConcurrency bool     `json:"enable_concurrency,omitempty"`
+}
+
+type BurstObservatory struct {
+	SubjectSelector []string    `json:"subject_selector"`
+	PingConfig      *PingConfig `json:"ping_config,omitempty"`
+}
+
+type PingConfig struct {
+	Destination  string `json:"destination,omitempty"`
+	Connectivity string `json:"connectivity,omitempty"`
+	Interval     string `json:"interval,omitempty"`
+	Timeout      string `json:"timeout,omitempty"`
+	Sampling     int    `json:"sampling,omitempty"`
 }
 
 type RoutingRule struct {

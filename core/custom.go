@@ -382,11 +382,10 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			if len(rule.InboundTags) > 0 {
 				xrayRule["inboundTag"] = splitFunc(rule.InboundTags)
 			}
-			if rule.OutboundTag != "" {
-				xrayRule["outboundTag"] = rule.OutboundTag
-			}
 			if rule.BalancerTag != "" {
 				xrayRule["balancerTag"] = rule.BalancerTag
+			} else if rule.OutboundTag != "" {
+				xrayRule["outboundTag"] = rule.OutboundTag
 			}
 			if rule.Network != "" {
 				xrayRule["network"] = rule.Network
@@ -419,6 +418,28 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			if err == nil {
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			}
+		}
+	}
+
+	// custom balancers — referenced by routing rules via balancerTag
+	if balancerList := serverconfig.Data.Balancers; balancerList != nil {
+		for _, b := range *balancerList {
+			if b.Tag == "" || len(b.Selector) == 0 {
+				continue
+			}
+			strategy := b.Strategy
+			if strategy == "" {
+				strategy = "random"
+			}
+			balancer := &coreConf.BalancingRule{
+				Tag:         b.Tag,
+				Selectors:   b.Selector,
+				FallbackTag: b.FallbackTag,
+				Strategy: coreConf.StrategyConfig{
+					Type: strategy,
+				},
+			}
+			coreRouterConfig.Balancers = append(coreRouterConfig.Balancers, balancer)
 		}
 	}
 

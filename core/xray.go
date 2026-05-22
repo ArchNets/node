@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -156,6 +157,60 @@ func getCore(c *conf.Conf, serverconfig *panel.ServerConfigResponse) *core.Insta
 		},
 		Inbound:  inBoundConfig,
 		Outbound: outBoundConfig,
+	}
+
+	// Observatory for leastPing strategy
+	if obs := serverconfig.Data.Observatory; obs != nil && len(obs.SubjectSelector) > 0 {
+		obsConfig := &coreConf.ObservatoryConfig{
+			SubjectSelector:   obs.SubjectSelector,
+			ProbeURL:          obs.ProbeURL,
+			EnableConcurrency: obs.EnableConcurrency,
+		}
+		if obs.ProbeInterval != "" {
+			if err := obsConfig.ProbeInterval.UnmarshalJSON([]byte(`"` + obs.ProbeInterval + `"`)); err != nil {
+				log.WithField("err", err).Warn("invalid observatory probe_interval, using default")
+			}
+		}
+		if obsMsg, err := obsConfig.Build(); err == nil {
+			config.App = append(config.App, serial.ToTypedMessage(obsMsg))
+		} else {
+			log.WithField("err", err).Warn("failed to build observatory config")
+		}
+	}
+
+	// BurstObservatory for leastLoad strategy
+	if bobs := serverconfig.Data.BurstObservatory; bobs != nil && len(bobs.SubjectSelector) > 0 {
+		pingCfg := bobs.PingConfig
+		if pingCfg == nil {
+			pingCfg = &panel.PingConfig{
+				Destination: "http://www.google.com/gen_204",
+				Interval:    "30s",
+				Timeout:     "10s",
+				Sampling:    3,
+			}
+		}
+		// Build as JSON and unmarshal since healthCheckSettings is unexported
+		bobsJSON := map[string]interface{}{
+			"subjectSelector": bobs.SubjectSelector,
+			"pingConfig": map[string]interface{}{
+				"destination":  pingCfg.Destination,
+				"connectivity": pingCfg.Connectivity,
+				"interval":     pingCfg.Interval,
+				"timeout":      pingCfg.Timeout,
+				"sampling":     pingCfg.Sampling,
+			},
+		}
+		bobsBytes, _ := json.Marshal(bobsJSON)
+		var bobsConfig coreConf.BurstObservatoryConfig
+		if err := json.Unmarshal(bobsBytes, &bobsConfig); err == nil {
+			if bobsMsg, err := bobsConfig.Build(); err == nil {
+				config.App = append(config.App, serial.ToTypedMessage(bobsMsg))
+			} else {
+				log.WithField("err", err).Warn("failed to build burst observatory config")
+			}
+		} else {
+			log.WithField("err", err).Warn("failed to unmarshal burst observatory config")
+		}
 	}
 	server, err := core.New(config)
 	if err != nil {

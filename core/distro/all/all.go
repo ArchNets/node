@@ -15,7 +15,7 @@ import (
 	//_ "github.com/xtls/xray-core/app/stats/command"
 
 	// Developer preview services
-	//_ "github.com/xtls/xray-core/app/observatory/command"
+	_ "github.com/xtls/xray-core/app/observatory/command"
 
 	// Other optional features.
 	_ "github.com/xtls/xray-core/app/dns"
@@ -30,8 +30,8 @@ import (
 	// Fix dependency cycle caused by core import in internet package
 	_ "github.com/xtls/xray-core/transport/internet/tagged/taggedimpl"
 
-	// Developer preview features
-	//_ "github.com/xtls/xray-core/app/observatory"
+	// Observatory for load balancer strategies (leastPing, leastLoad)
+	_ "github.com/xtls/xray-core/app/observatory"
 
 	// Inbound and outbound proxies.
 	_ "github.com/xtls/xray-core/proxy/anytls"
