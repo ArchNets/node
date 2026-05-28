@@ -364,6 +364,15 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 
 	// custom routing rules — placed BEFORE dns_out so inbound-tag rules
 	// (e.g. ikev2:28 → Main Panel) take priority for IPsec/WG traffic.
+	// Pre-compute valid balancer tags to validate references in routing rules
+	validBalancerTags := make(map[string]bool)
+	if balancerList := serverconfig.Data.Balancers; balancerList != nil {
+		for _, b := range *balancerList {
+			if b.Tag != "" {
+				validBalancerTags[b.Tag] = true
+			}
+		}
+	}
 	if routingList := serverconfig.Data.Routing; routingList != nil {
 		for _, rule := range *routingList {
 			splitFunc := func(items []string) []string {
@@ -378,14 +387,18 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				return res
 			}
 
+
 			xrayRule := map[string]interface{}{"type": "field"}
 			if len(rule.InboundTags) > 0 {
 				xrayRule["inboundTag"] = splitFunc(rule.InboundTags)
 			}
-			if rule.BalancerTag != "" {
+			if rule.BalancerTag != "" && validBalancerTags[rule.BalancerTag] {
 				xrayRule["balancerTag"] = rule.BalancerTag
 			} else if rule.OutboundTag != "" {
 				xrayRule["outboundTag"] = rule.OutboundTag
+			} else {
+				// Neither valid balancer nor outbound — skip this rule
+				continue
 			}
 			if rule.Network != "" {
 				xrayRule["network"] = rule.Network
