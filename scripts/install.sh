@@ -109,6 +109,87 @@ elif [[ x"${release}" == x"debian" ]]; then
     fi
 fi
 
+# Install AmneziaWG with DKMS fallback to source build
+# DKMS fails on non-stock kernels (XanMod, Liquorix, etc.) because:
+#   1. The PPA source doesn't support newer kernel APIs
+#   2. Custom kernels are often built with Clang/LLVM, not GCC
+install_amneziawg() {
+    echo -e "${green}Installing AmneziaWG...${plain}"
+
+    # Try DKMS install first
+    if [[ x"${release}" == x"ubuntu" ]]; then
+        add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
+        apt-get update -y >/dev/null 2>&1
+    fi
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-tools >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-dkms 2>&1 | tee /tmp/awg-dkms-install.log
+    local dkms_exit=${PIPESTATUS[0]}
+
+    # Check if the module actually loaded
+    modprobe amneziawg 2>/dev/null
+    if lsmod | grep -q amneziawg; then
+        echo -e "${green}AmneziaWG DKMS module loaded successfully${plain}"
+        return 0
+    fi
+
+    echo -e "${yellow}DKMS build failed for kernel $(uname -r), building from source...${plain}"
+
+    # Clean up broken DKMS state
+    dpkg --remove --force-remove-reinstreq amneziawg amneziawg-dkms 2>/dev/null || true
+    apt-get -f install -y >/dev/null 2>&1 || true
+    # Reinstall tools only (no dkms)
+    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-tools >/dev/null 2>&1 || true
+
+    # Install build dependencies
+    apt-get install -y git build-essential "linux-headers-$(uname -r)" >/dev/null 2>&1
+
+    # Detect if kernel was built with Clang/LLVM
+    local make_flags=""
+    if grep -qi clang /proc/version 2>/dev/null || \
+       ([ -f "/lib/modules/$(uname -r)/build/.config" ] && grep -q 'CONFIG_CC_IS_CLANG=y' "/lib/modules/$(uname -r)/build/.config"); then
+        echo -e "${yellow}Kernel built with Clang/LLVM detected, installing clang...${plain}"
+        apt-get install -y clang llvm lld >/dev/null 2>&1
+        make_flags="LLVM=1"
+    fi
+
+    # Clone and build from source
+    local build_dir="/tmp/amneziawg-linux-kernel-module"
+    rm -rf "$build_dir"
+    git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git "$build_dir"
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}Failed to clone AmneziaWG source. Check network/GitHub access.${plain}"
+        return 1
+    fi
+
+    cd "$build_dir/src"
+    make -j$(nproc) KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}AmneziaWG source build failed. Check /tmp/amneziawg-linux-kernel-module/src/ for details.${plain}"
+        cd /tmp
+        return 1
+    fi
+
+    make install KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags 2>/dev/null || true
+    depmod -a
+    modprobe amneziawg
+
+    if lsmod | grep -q amneziawg; then
+        echo -e "${green}AmneziaWG built from source and loaded successfully${plain}"
+        # Persist across reboots
+        echo "amneziawg" > /etc/modules-load.d/amneziawg.conf
+    else
+        echo -e "${red}Failed to load AmneziaWG module after source build${plain}"
+        cd /tmp
+        return 1
+    fi
+
+    # Cleanup
+    cd /tmp
+    rm -rf "$build_dir"
+    return 0
+}
+
 install_base() {
     need_install_apt() {
         local packages=("$@")
@@ -181,13 +262,13 @@ install_base() {
         need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv amneziawg-tools amneziawg-dkms wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)"
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)"
         update-ca-certificates >/dev/null 2>&1 || true
+        install_amneziawg
     elif [[ x"${release}" == x"ubuntu" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)"
-        add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
-        need_install_apt amneziawg-tools amneziawg-dkms wireguard-tools strongswan strongswan-swanctl xl2tpd
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)" wireguard-tools strongswan strongswan-swanctl xl2tpd
         update-ca-certificates >/dev/null 2>&1 || true
+        install_amneziawg
     elif [[ x"${release}" == x"arch" ]]; then
         echo "Updating package database..."
         pacman -Sy --noconfirm >/dev/null 2>&1
