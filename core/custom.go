@@ -342,6 +342,13 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					}
 				}
 
+				if outbounditem.DialerProxy != "" {
+					if streamSettings.SocketSettings == nil {
+						streamSettings.SocketSettings = &coreConf.SocketConfig{}
+					}
+					streamSettings.SocketSettings.DialerProxy = outbounditem.DialerProxy
+				}
+
 				outbound = &coreConf.OutboundDetourConfig{
 					Tag:           outbounditem.Name,
 					Protocol:      outbounditem.Protocol,

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -540,4 +541,43 @@ func ExtractFromTarGz(src string, targetFile string, dest string) error {
 	}
 
 	return fmt.Errorf("target file %s not found in %s", targetFile, src)
+}
+
+// InstallNipovpn compiles and installs NipoVPN from source to /usr/local/bin/nipovpn
+func InstallNipovpn() error {
+	dest := "/usr/local/bin/nipovpn"
+	log.Infof("Installing NipoVPN from source to %s", dest)
+
+	tmpDir := "/tmp/nipovpn-build"
+	_ = os.RemoveAll(tmpDir)
+
+	cmdClone := exec.Command("git", "clone", "--depth", "1", "https://github.com/EbadiDev/nipovpn", tmpDir)
+	if out, err := cmdClone.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to clone: %s, output: %s", err, string(out))
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cmdCMake := exec.Command("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release")
+	cmdCMake.Dir = tmpDir
+	if out, err := cmdCMake.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to configure cmake: %s, output: %s", err, string(out))
+	}
+
+	cmdBuild := exec.Command("cmake", "--build", "build", "-j")
+	cmdBuild.Dir = tmpDir
+	if out, err := cmdBuild.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to build: %s, output: %s", err, string(out))
+	}
+
+	binaryPath := filepath.Join(tmpDir, "build/core/nipovpn")
+	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
+		return fmt.Errorf("nipovpn binary not found after build")
+	}
+
+	_ = os.Remove(dest)
+	if err := CopyFile(binaryPath, dest); err != nil {
+		return fmt.Errorf("failed to copy binary to destination: %w", err)
+	}
+
+	return os.Chmod(dest, 0755)
 }

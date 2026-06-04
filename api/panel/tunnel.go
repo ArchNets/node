@@ -36,8 +36,25 @@ type TunnelInfo struct {
 	RemoteIP        string              `json:"remote_ip"` // Remote tunnel IP for health checks
 	XrayConfig      *XrayTunnelProtocol `json:"xray_config,omitempty"`
 	WaterwallConfig string              `json:"waterwall_config,omitempty"`
+	NipovpnConfig   *NipovpnConfig      `json:"nipovpn_config,omitempty"`
+	ExitServerIP    string              `json:"exit_server_ip,omitempty"`
+	ExitXrayPort    int                 `json:"exit_xray_port,omitempty"`
+	ExitXrayUUID    string              `json:"exit_xray_uuid,omitempty"`
 	Forwarders      []Forwarder         `json:"forwarders"`
 	ScanCommand     *ScanCommand        `json:"scan_command,omitempty"`
+}
+
+type NipovpnConfig struct {
+	Token       string   `json:"token"`
+	FakeUrls    []string `json:"fake_urls"`
+	Methods     []string `json:"methods"`
+	Endpoints   []string `json:"endpoints"`
+	AgentPort   int      `json:"agent_port"`
+	ServerPort  int      `json:"server_port"`
+	TlsEnable   bool     `json:"tls_enable"`
+	TunnelMode  string   `json:"tunnel_mode"`
+	Timeout     int      `json:"timeout"`
+	PullTimeout int      `json:"pull_timeout"`
 }
 
 // XrayTunnelProtocol matches the backend Protocol type with tunnel-specific fields

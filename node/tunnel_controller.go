@@ -18,6 +18,7 @@ import (
 
 	"github.com/archnets/node/api/panel"
 	certutil "github.com/archnets/node/common/cert"
+	nodeCore "github.com/archnets/node/core"
 	"github.com/archnets/node/common/file"
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
@@ -84,6 +85,9 @@ type TunnelController struct {
 	// Xray instances
 	xrayInstances map[int]*core.Instance
 	xrayMu        sync.Mutex
+	// NipoVPN instances
+	nipovpnManagers map[int]*nodeCore.NipovpnManager
+	nipovpnMu       sync.Mutex
 }
 
 // NewTunnelController creates a new tunnel controller
@@ -100,6 +104,7 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		lastTraffic:        make(map[int]trafficSnapshot),
 		tunnelDeviceNames:  make(map[int]string),
 		xrayInstances:      make(map[int]*core.Instance),
+		nipovpnManagers:    make(map[int]*nodeCore.NipovpnManager),
 	}
 }
 
@@ -219,6 +224,14 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 		}
 	}
 
+	// Check Nipovpn
+	if _, err := os.Stat(nodeCore.NipovpnBinary); os.IsNotExist(err) {
+		c.logger.Info("NipoVPN binary missing, attempting auto-installation...")
+		if err := installer.InstallNipovpn(); err != nil {
+			c.logger.WithField("err", err).Warn("NipoVPN auto-installation failed")
+		}
+	}
+
 	return nil
 }
 
@@ -262,6 +275,9 @@ func (c *TunnelController) Close() error {
 
 	// Stop all Xray instances
 	c.stopAllXrayInstances()
+
+	// Stop all NipoVPN managers
+	c.stopAllNipovpnManagers()
 
 	// Close log files
 	if c.waterwallLogFile != nil {
@@ -386,7 +402,14 @@ func (c *TunnelController) statusReport() error {
 		// Read TUN device traffic
 		var deltaUpload, deltaDownload int64
 
-		if t.Method == "xray" {
+		if t.Method == "nipovpn" {
+			c.nipovpnMu.Lock()
+			mgr := c.nipovpnManagers[t.Id]
+			c.nipovpnMu.Unlock()
+			if mgr != nil {
+				online = mgr.IsAlive()
+			}
+		} else if t.Method == "xray" {
 			// Pull Xray stats directly from memory
 			c.xrayMu.Lock()
 			instance := c.xrayInstances[t.Id]
@@ -485,9 +508,11 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	c.stopWaterwall()
 	c.stopAllForwarders()
 	c.stopAllXrayInstances()
+	c.stopAllNipovpnManagers()
 
 	var waterwallTunnels []panel.TunnelInfo
 	var xrayTunnels []panel.TunnelInfo
+	var nipovpnTunnels []panel.TunnelInfo
 
 	// Generate and write core.json
 	for _, t := range data.Tunnels {
@@ -495,6 +520,8 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 			waterwallTunnels = append(waterwallTunnels, t)
 		} else if t.Method == "xray" {
 			xrayTunnels = append(xrayTunnels, t)
+		} else if t.Method == "nipovpn" {
+			nipovpnTunnels = append(nipovpnTunnels, t)
 		}
 	}
 
@@ -552,11 +579,43 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
+	// Start NipoVPN tunnels
+	for _, t := range nipovpnTunnels {
+		mgr := nodeCore.NewNipovpnManager(t, c.logger)
+		if err := mgr.GenerateConfig(c.tunnelDir); err != nil {
+			c.logger.WithFields(log.Fields{
+				"tunnelId": t.Id,
+				"err":      err,
+			}).Warn("Failed to generate NipoVPN config")
+			continue
+		}
+		if err := mgr.Start(); err != nil {
+			c.logger.WithFields(log.Fields{
+				"tunnelId": t.Id,
+				"err":      err,
+			}).Warn("Failed to start NipoVPN")
+			continue
+		}
+		c.nipovpnMu.Lock()
+		c.nipovpnManagers[t.Id] = mgr
+		c.nipovpnMu.Unlock()
+
+		if t.Role == "exit" {
+			// Start plain Xray instance (VLESS on 127.0.0.1:ExitXrayPort, freedom outbound)
+			if err := c.startNipovpnXrayInstance(t); err != nil {
+				c.logger.WithFields(log.Fields{
+					"tunnelId": t.Id,
+					"err":      err,
+				}).Warn("Failed to start exit Xray for NipoVPN")
+			}
+		}
+	}
+
 	// Start forwarders
 	for _, t := range data.Tunnels {
-		if t.Method == "xray" {
+		if t.Method == "xray" || t.Method == "nipovpn" {
 			// Skip starting Gost/Paqet/Nodepass/Waterwall wrapper
-			// The Xray core instance handles the forwarding
+			// NipoVPN and Xray cores handle their own forwarding
 			continue
 		}
 		for _, f := range t.Forwarders {
@@ -1252,4 +1311,102 @@ func extractDeviceNameFromConfig(configJSON string) string {
 		return matches[1]
 	}
 	return ""
+}
+
+func (c *TunnelController) stopAllNipovpnManagers() {
+	c.nipovpnMu.Lock()
+	defer c.nipovpnMu.Unlock()
+
+	for id, mgr := range c.nipovpnManagers {
+		if mgr != nil {
+			mgr.Stop()
+			c.logger.WithField("tunnelId", id).Info("NipoVPN process stopped")
+		}
+	}
+	c.nipovpnManagers = make(map[int]*nodeCore.NipovpnManager)
+}
+
+func (c *TunnelController) startNipovpnXrayInstance(t panel.TunnelInfo) error {
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+	xrayJSON := c.buildNipovpnXrayJSON(t, logLevel)
+
+	c.logger.WithField("json", xrayJSON).Debug("Generated NipoVPN exit Xray JSON")
+
+	reader := bytes.NewReader([]byte(xrayJSON))
+	confObj, err := confserial.DecodeJSONConfig(reader)
+	if err != nil {
+		return fmt.Errorf("failed to parse nipovpn xray config JSON: %v", err)
+	}
+
+	configObj, err := confObj.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build nipovpn xray config protobuf: %v", err)
+	}
+
+	coreLogConfig := &coreConf.LogConfig{
+		LogLevel:  logLevel,
+		ErrorLog:  c.nodeConfig.LogConfig.Output,
+		AccessLog: c.nodeConfig.LogConfig.Access,
+	}
+	appLogMsg := serial.ToTypedMessage(coreLogConfig.Build())
+	configObj.App = append([]*serial.TypedMessage{appLogMsg}, configObj.App...)
+
+	instance, err := core.New(configObj)
+	if err != nil {
+		return fmt.Errorf("failed to initialize nipovpn xray instance: %v", err)
+	}
+
+	if err := instance.Start(); err != nil {
+		return fmt.Errorf("failed to start nipovpn xray instance: %v", err)
+	}
+
+	c.xrayMu.Lock()
+	if c.xrayInstances == nil {
+		c.xrayInstances = make(map[int]*core.Instance)
+	}
+	c.xrayInstances[t.Id] = instance
+	c.xrayMu.Unlock()
+
+	c.logger.WithField("tunnelId", t.Id).Info("NipoVPN exit Xray instance started natively in Go")
+	return nil
+}
+
+func (c *TunnelController) buildNipovpnXrayJSON(t panel.TunnelInfo, logLevel string) string {
+	obj := map[string]interface{}{
+		"log": map[string]interface{}{
+			"loglevel": logLevel,
+		},
+		"inbounds": []interface{}{
+			map[string]interface{}{
+				"listen":   "127.0.0.1",
+				"port":     t.ExitXrayPort,
+				"protocol": "vless",
+				"settings": map[string]interface{}{
+					"clients": []interface{}{
+						map[string]interface{}{
+							"id": t.ExitXrayUUID,
+						},
+					},
+					"decryption": "none",
+				},
+				"streamSettings": map[string]interface{}{
+					"network":  "tcp",
+					"security": "none",
+				},
+				"tag": "vless-in",
+			},
+		},
+		"outbounds": []interface{}{
+			map[string]interface{}{
+				"protocol": "freedom",
+				"settings": map[string]interface{}{},
+				"tag":      "direct",
+			},
+		},
+	}
+	b, _ := json.Marshal(obj)
+	return string(b)
 }

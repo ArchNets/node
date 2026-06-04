@@ -68,6 +68,8 @@ type Outbound struct {
 	WireguardPeerPublicKey string `json:"wireguard_peer_public_key,omitempty"`
 	WireguardPeerEndpoint  string `json:"wireguard_peer_endpoint,omitempty"`
 	WireguardReserved      string `json:"wireguard_reserved,omitempty"`
+
+	DialerProxy string `json:"dialer_proxy,omitempty"`
 }
 
 type Balancer struct {
