@@ -45,18 +45,27 @@ type TunnelInfo struct {
 }
 
 type NipovpnConfig struct {
-	Token       string   `json:"token"`
-	FakeUrls    []string `json:"fake_urls"`
-	Methods     []string `json:"methods"`
-	Endpoints   []string `json:"endpoints"`
-	AgentPort   int      `json:"agent_port"`
-	ServerPort  int      `json:"server_port"`
-	TlsEnable   bool     `json:"tls_enable"`
-	TlsCertPath string   `json:"tls_cert_path"`
-	TlsKeyPath  string   `json:"tls_key_path"`
-	TunnelMode  string   `json:"tunnel_mode"`
-	Timeout     int      `json:"timeout"`
-	PullTimeout int      `json:"pull_timeout"`
+	Token           string   `json:"token"`
+	FakeUrls        []string `json:"fake_urls"`
+	Methods         []string `json:"methods"`
+	Endpoints       []string `json:"endpoints"`
+	AgentPort       int      `json:"agent_port"`
+	ServerPort      int      `json:"server_port"`
+	TlsEnable       bool     `json:"tls_enable"`
+	TlsCertPath     string   `json:"tls_cert_path"` // Backwards compatibility
+	TlsKeyPath      string   `json:"tls_key_path"`  // Backwards compatibility
+	TunnelMode      string   `json:"tunnel_mode"`
+	Timeout         int      `json:"timeout"`
+	PullTimeout     int      `json:"pull_timeout"`
+	ConnectionReuse bool     `json:"connection_reuse"`
+	LogLevel        string   `json:"log_level"`
+	ServerThreads   int      `json:"server_threads"`
+	AgentThreads    int      `json:"agent_threads"`
+	TlsCertFile     string   `json:"tls_cert_file"`
+	TlsKeyFile      string   `json:"tls_key_file"`
+	TlsCaFile       string   `json:"tls_ca_file"`
+	HttpVersion     string   `json:"http_version"`
+	UserAgent       string   `json:"user_agent"`
 }
 
 // XrayTunnelProtocol matches the backend Protocol type with tunnel-specific fields

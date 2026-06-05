@@ -408,6 +408,28 @@ func (c *TunnelController) statusReport() error {
 			c.nipovpnMu.Unlock()
 			if mgr != nil {
 				online = mgr.IsAlive()
+				pid := mgr.GetPID()
+				if online && pid > 0 {
+					rchar, wchar, err := readProcessIO(pid)
+					if err == nil {
+						// Divide by 2 because in user-space proxies, data is read and written twice (Client <-> Proxy <-> Remote)
+						rxBytes := rchar / 2
+						txBytes := wchar / 2
+						if last, exists := c.lastTraffic[t.Id]; exists {
+							if rxBytes >= last.rxBytes {
+								deltaDownload = rxBytes - last.rxBytes
+							} else {
+								deltaDownload = rxBytes
+							}
+							if txBytes >= last.txBytes {
+								deltaUpload = txBytes - last.txBytes
+							} else {
+								deltaUpload = txBytes
+							}
+						}
+						c.lastTraffic[t.Id] = trafficSnapshot{rxBytes: rxBytes, txBytes: txBytes}
+					}
+				}
 			}
 		} else if t.Method == "xray" {
 			// Pull Xray stats directly from memory
@@ -1409,4 +1431,24 @@ func (c *TunnelController) buildNipovpnXrayJSON(t panel.TunnelInfo, logLevel str
 	}
 	b, _ := json.Marshal(obj)
 	return string(b)
+}
+
+func readProcessIO(pid int) (rchar, wchar int64, err error) {
+	path := fmt.Sprintf("/proc/%d/io", pid)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			if fields[0] == "rchar:" {
+				rchar, _ = strconv.ParseInt(fields[1], 10, 64)
+			} else if fields[0] == "wchar:" {
+				wchar, _ = strconv.ParseInt(fields[1], 10, 64)
+			}
+		}
+	}
+	return rchar, wchar, nil
 }

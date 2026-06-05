@@ -43,7 +43,6 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 	if cfg == nil {
 		return fmt.Errorf("missing nipovpn_config")
 	}
-
 	type General struct {
 		Token           string   `yaml:"token"`
 		FakeUrls        []string `yaml:"fakeUrls"`
@@ -83,25 +82,29 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 		Server  Server  `yaml:"server"`
 		Agent   Agent   `yaml:"agent"`
 	}
-
 	var certPath, keyPath string
 	if cfg.TlsEnable {
-		certPath = cfg.TlsCertPath
-		keyPath = cfg.TlsKeyPath
+		// Use new custom path fields if provided; fallback to backwards-compatible paths
+		certPath = cfg.TlsCertFile
+		if certPath == "" {
+			certPath = cfg.TlsCertPath
+		}
+		keyPath = cfg.TlsKeyFile
+		if keyPath == "" {
+			keyPath = cfg.TlsKeyPath
+		}
 		if certPath == "" {
 			certPath = filepath.Join(dir, fmt.Sprintf("nipovpn_%d.crt", m.tunnel.Id))
 		}
 		if keyPath == "" {
 			keyPath = filepath.Join(dir, fmt.Sprintf("nipovpn_%d.key", m.tunnel.Id))
 		}
-
 		if err := os.MkdirAll(filepath.Dir(certPath), 0755); err != nil {
 			return fmt.Errorf("failed to create cert directory: %w", err)
 		}
 		if err := os.MkdirAll(filepath.Dir(keyPath), 0755); err != nil {
 			return fmt.Errorf("failed to create key directory: %w", err)
 		}
-
 		if _, err := os.Stat(certPath); os.IsNotExist(err) {
 			m.logger.Infof("TLS enabled but certificate files not found. Generating self-signed certificates at %s", certPath)
 			if err := generateSelfSignedCert(certPath, keyPath); err != nil {
@@ -109,8 +112,31 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 			}
 		}
 	}
-
-	// Default template configs to satisfy parser constraints
+	// Map backend parameters with default fallbacks for unassigned fields
+	connectionReuse := true
+	if m.tunnel.NipovpnConfig.ConnectionReuse {
+		connectionReuse = m.tunnel.NipovpnConfig.ConnectionReuse
+	}
+	logLevel := "INFO"
+	if cfg.LogLevel != "" {
+		logLevel = cfg.LogLevel
+	}
+	serverThreads := 8
+	if cfg.ServerThreads > 0 {
+		serverThreads = cfg.ServerThreads
+	}
+	agentThreads := 8
+	if cfg.AgentThreads > 0 {
+		agentThreads = cfg.AgentThreads
+	}
+	httpVersion := "1.1"
+	if cfg.HttpVersion != "" {
+		httpVersion = cfg.HttpVersion
+	}
+	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0"
+	if cfg.UserAgent != "" {
+		userAgent = cfg.UserAgent
+	}
 	c := Config{
 		General: General{
 			Token:           cfg.Token,
@@ -120,37 +146,36 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 			Timeout:         cfg.Timeout,
 			PullTimeout:     cfg.PullTimeout,
 			TunnelEnable:    true,
-			ConnectionReuse: true,
+			ConnectionReuse: connectionReuse,
 			TlsEnable:       cfg.TlsEnable,
 			TlsVerifyPeer:   false,
 			TlsCertFile:     certPath,
 			TlsKeyFile:      keyPath,
+			TlsCaFile:       cfg.TlsCaFile,
 		},
 		Log: Log{
-			LogLevel: "DEBUG",
+			LogLevel: logLevel,
 			LogFile:  filepath.Join(dir, fmt.Sprintf("log/nipovpn_%d.log", m.tunnel.Id)),
 		},
 		Server: Server{
-			Threads:    8,
+			Threads:    serverThreads,
 			ListenIp:   "0.0.0.0",
 			ListenPort: cfg.ServerPort,
 		},
 		Agent: Agent{
-			Threads:     8,
+			Threads:     agentThreads,
 			ListenIp:    "127.0.0.1",
 			ListenPort:  cfg.AgentPort,
 			ServerIp:    m.tunnel.ExitServerIP,
 			ServerPort:  cfg.ServerPort,
-			HttpVersion: "1.1",
-			UserAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+			HttpVersion: httpVersion,
+			UserAgent:   userAgent,
 		},
 	}
-
 	data, err := yaml.Marshal(&c)
 	if err != nil {
 		return err
 	}
-
 	m.cfgPath = filepath.Join(dir, fmt.Sprintf("nipovpn_%d.yaml", m.tunnel.Id))
 	return os.WriteFile(m.cfgPath, data, 0644)
 }
@@ -211,6 +236,15 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	}
 
 	return nil
+}
+
+func (m *NipovpnManager) GetPID() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cmd != nil && m.cmd.Process != nil {
+		return m.cmd.Process.Pid
+	}
+	return 0
 }
 
 
