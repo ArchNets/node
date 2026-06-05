@@ -191,6 +191,21 @@ install_amneziawg() {
 }
 
 install_base() {
+    wait_for_dpkg_lock() {
+        local count=0
+        while pgrep -f "apt-get|dpkg|unattended-upgr" >/dev/null 2>&1; do
+            if [ $count -eq 0 ]; then
+                echo -e "${yellow}Waiting for other package manager processes (apt/dpkg) to exit...${plain}"
+            fi
+            sleep 3
+            count=$((count+1))
+            if [ $count -gt 100 ]; then
+                echo -e "${red}Error: Package manager lock timeout. Another package manager process is running.${plain}"
+                exit 1
+            fi
+        done
+    }
+
     need_install_apt() {
         local packages=("$@")
         local missing=()
@@ -205,6 +220,7 @@ install_base() {
         done
         
         if [[ ${#missing[@]} -gt 0 ]]; then
+            wait_for_dpkg_lock
             echo "Installing missing packages: ${missing[*]}"
             apt-get update -y >/dev/null 2>&1
             DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1
@@ -256,17 +272,17 @@ install_base() {
             echo "Installing EPEL repository..."
             yum install -y epel-release >/dev/null 2>&1
         fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools kernel-devel kernel-headers strongswan xl2tpd cmake gcc-c++ boost-devel yaml-cpp-devel openssl-devel git
+        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools kernel-devel kernel-headers strongswan xl2tpd cmake gcc-c++ boost-devel yaml-cpp-devel openssl-devel git make
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
         need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd cmake build-base boost-dev yaml-cpp-dev openssl-dev git
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)" cmake g++ libboost-system-dev libboost-regex-dev libyaml-cpp-dev libssl-dev git
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)" cmake g++ libboost-system-dev libboost-regex-dev libyaml-cpp-dev libssl-dev git make build-essential
         update-ca-certificates >/dev/null 2>&1 || true
         install_amneziawg
     elif [[ x"${release}" == x"ubuntu" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)" wireguard-tools strongswan strongswan-swanctl xl2tpd cmake g++ libboost-system-dev libboost-regex-dev libyaml-cpp-dev libssl-dev git
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)" wireguard-tools strongswan strongswan-swanctl xl2tpd cmake g++ libboost-system-dev libboost-regex-dev libyaml-cpp-dev libssl-dev git make build-essential
         update-ca-certificates >/dev/null 2>&1 || true
         install_amneziawg
     elif [[ x"${release}" == x"arch" ]]; then

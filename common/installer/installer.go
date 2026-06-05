@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -543,6 +544,47 @@ func ExtractFromTarGz(src string, targetFile string, dest string) error {
 	return fmt.Errorf("target file %s not found in %s", targetFile, src)
 }
 
+// getOptimalJobCount returns a safe number of build jobs based on available system memory.
+// Heavy C++ compilations can consume ~1.5GB to 2GB per job.
+func getOptimalJobCount() int {
+	cores := runtime.NumCPU()
+
+	// Read total memory
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		// Fallback to 1 job if we can't read memory to be safe on small systems
+		return 1
+	}
+
+	// Parse MemTotal (in kB)
+	lines := strings.Split(string(data), "\n")
+	var memTotalKb int64
+	for _, line := range lines {
+		if strings.HasPrefix(line, "MemTotal:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				_, _ = fmt.Sscanf(fields[1], "%d", &memTotalKb)
+			}
+			break
+		}
+	}
+
+	if memTotalKb == 0 {
+		return 1
+	}
+
+	// 1 job per 1.5 GB of RAM, min 1
+	memGb := float64(memTotalKb) / (1024 * 1024)
+	jobs := int(memGb / 1.5)
+	if jobs < 1 {
+		jobs = 1
+	}
+	if jobs > cores {
+		jobs = cores
+	}
+	return jobs
+}
+
 // InstallNipovpn compiles and installs NipoVPN from source to /usr/local/bin/nipovpn
 func InstallNipovpn() error {
 	dest := "/usr/local/bin/nipovpn"
@@ -563,7 +605,9 @@ func InstallNipovpn() error {
 		return fmt.Errorf("failed to configure cmake: %s, output: %s", err, string(out))
 	}
 
-	cmdBuild := exec.Command("cmake", "--build", "build", "-j")
+	jobs := getOptimalJobCount()
+	log.Infof("Compiling NipoVPN with %d parallel jobs (based on system memory)", jobs)
+	cmdBuild := exec.Command("cmake", "--build", "build", "-j", strconv.Itoa(jobs))
 	cmdBuild.Dir = tmpDir
 	if out, err := cmdBuild.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to build: %s, output: %s", err, string(out))
