@@ -1,11 +1,18 @@
 package core
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/archnets/node/api/panel"
 	log "github.com/sirupsen/logrus"
@@ -77,6 +84,32 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 		Agent   Agent   `yaml:"agent"`
 	}
 
+	var certPath, keyPath string
+	if cfg.TlsEnable {
+		certPath = cfg.TlsCertPath
+		keyPath = cfg.TlsKeyPath
+		if certPath == "" {
+			certPath = filepath.Join(dir, fmt.Sprintf("nipovpn_%d.crt", m.tunnel.Id))
+		}
+		if keyPath == "" {
+			keyPath = filepath.Join(dir, fmt.Sprintf("nipovpn_%d.key", m.tunnel.Id))
+		}
+
+		if err := os.MkdirAll(filepath.Dir(certPath), 0755); err != nil {
+			return fmt.Errorf("failed to create cert directory: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(keyPath), 0755); err != nil {
+			return fmt.Errorf("failed to create key directory: %w", err)
+		}
+
+		if _, err := os.Stat(certPath); os.IsNotExist(err) {
+			m.logger.Infof("TLS enabled but certificate files not found. Generating self-signed certificates at %s", certPath)
+			if err := generateSelfSignedCert(certPath, keyPath); err != nil {
+				return fmt.Errorf("failed to generate self-signed certificate: %w", err)
+			}
+		}
+	}
+
 	// Default template configs to satisfy parser constraints
 	c := Config{
 		General: General{
@@ -90,6 +123,8 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 			ConnectionReuse: true,
 			TlsEnable:       cfg.TlsEnable,
 			TlsVerifyPeer:   false,
+			TlsCertFile:     certPath,
+			TlsKeyFile:      keyPath,
 		},
 		Log: Log{
 			LogLevel: "DEBUG",
@@ -118,6 +153,64 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 
 	m.cfgPath = filepath.Join(dir, fmt.Sprintf("nipovpn_%d.yaml", m.tunnel.Id))
 	return os.WriteFile(m.cfgPath, data, 0644)
+}
+
+func generateSelfSignedCert(certPath, keyPath string) error {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(3650 * 24 * time.Hour) // 10 years
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "nipovpn",
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return err
+	}
+
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		return err
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
+		return err
+	}
+
+	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer keyOut.Close()
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 

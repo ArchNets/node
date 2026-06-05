@@ -52,6 +52,8 @@ type NipovpnConfig struct {
 	AgentPort   int      `json:"agent_port"`
 	ServerPort  int      `json:"server_port"`
 	TlsEnable   bool     `json:"tls_enable"`
+	TlsCertPath string   `json:"tls_cert_path"`
+	TlsKeyPath  string   `json:"tls_key_path"`
 	TunnelMode  string   `json:"tunnel_mode"`
 	Timeout     int      `json:"timeout"`
 	PullTimeout int      `json:"pull_timeout"`
