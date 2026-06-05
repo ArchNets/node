@@ -193,7 +193,26 @@ install_amneziawg() {
 install_base() {
     wait_for_dpkg_lock() {
         local count=0
-        while pgrep -f "apt-get|dpkg|unattended-upgr" >/dev/null 2>&1; do
+        while true; do
+            local locked=false
+            if pgrep -f "apt-get|dpkg" >/dev/null 2>&1; then
+                locked=true
+            fi
+            
+            # Check if unattended-upgrade is running (not the shutdown daemon)
+            for pid in $(pgrep -f "unattended-upgrade" 2>/dev/null); do
+                if [ -f "/proc/$pid/cmdline" ]; then
+                    if ! grep -q "unattended-upgrade-shutdown" "/proc/$pid/cmdline"; then
+                        locked=true
+                        break
+                    fi
+                fi
+            done
+
+            if [ "$locked" = false ]; then
+                break
+            fi
+
             if [ $count -eq 0 ]; then
                 echo -e "${yellow}Waiting for other package manager processes (apt/dpkg) to exit...${plain}"
             fi
