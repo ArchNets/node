@@ -114,8 +114,8 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 	}
 	// Map backend parameters with default fallbacks for unassigned fields
 	connectionReuse := true
-	if m.tunnel.NipovpnConfig.ConnectionReuse {
-		connectionReuse = m.tunnel.NipovpnConfig.ConnectionReuse
+	if cfg.ConnectionReuse != nil {
+		connectionReuse = *cfg.ConnectionReuse
 	}
 	logLevel := "INFO"
 	if cfg.LogLevel != "" {

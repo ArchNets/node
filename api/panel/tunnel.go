@@ -57,7 +57,7 @@ type NipovpnConfig struct {
 	TunnelMode      string   `json:"tunnel_mode"`
 	Timeout         int      `json:"timeout"`
 	PullTimeout     int      `json:"pull_timeout"`
-	ConnectionReuse bool     `json:"connection_reuse"`
+	ConnectionReuse *bool    `json:"connection_reuse"`
 	LogLevel        string   `json:"log_level"`
 	ServerThreads   int      `json:"server_threads"`
 	AgentThreads    int      `json:"agent_threads"`
