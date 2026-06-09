@@ -64,8 +64,11 @@ type NipovpnConfig struct {
 	TlsCertFile     string   `json:"tls_cert_file"`
 	TlsKeyFile      string   `json:"tls_key_file"`
 	TlsCaFile       string   `json:"tls_ca_file"`
-	HttpVersion     string   `json:"http_version"`
-	UserAgent       string   `json:"user_agent"`
+	HttpVersion      string `json:"http_version"`
+	UserAgent        string `json:"user_agent"`
+	Protocol         string `json:"protocol"`           // "socks5" or "http" (default: "http")
+	NipoExitXrayPort int    `json:"nipo_exit_xray_port,omitempty"`
+	NipoExitXrayUUID string `json:"nipo_exit_xray_uuid,omitempty"`
 }
 
 // XrayTunnelProtocol matches the backend Protocol type with tunnel-specific fields

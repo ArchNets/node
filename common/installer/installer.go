@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -544,84 +543,33 @@ func ExtractFromTarGz(src string, targetFile string, dest string) error {
 	return fmt.Errorf("target file %s not found in %s", targetFile, src)
 }
 
-// getOptimalJobCount returns a safe number of build jobs based on available system memory.
-// Heavy C++ compilations can consume ~1.5GB to 2GB per job.
-func getOptimalJobCount() int {
-	cores := runtime.NumCPU()
-
-	// Read total memory
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		// Fallback to 1 job if we can't read memory to be safe on small systems
-		return 1
-	}
-
-	// Parse MemTotal (in kB)
-	lines := strings.Split(string(data), "\n")
-	var memTotalKb int64
-	for _, line := range lines {
-		if strings.HasPrefix(line, "MemTotal:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				_, _ = fmt.Sscanf(fields[1], "%d", &memTotalKb)
-			}
-			break
-		}
-	}
-
-	if memTotalKb == 0 {
-		return 1
-	}
-
-	// 1 job per 1.5 GB of RAM, min 1
-	memGb := float64(memTotalKb) / (1024 * 1024)
-	jobs := int(memGb / 1.5)
-	if jobs < 1 {
-		jobs = 1
-	}
-	if jobs > cores {
-		jobs = cores
-	}
-	return jobs
-}
-
-// InstallNipovpn compiles and installs NipoVPN from source to /usr/local/bin/nipovpn
+// InstallNipovpn downloads and installs NipoVPN from a .deb package
 func InstallNipovpn() error {
-	dest := "/usr/local/bin/nipovpn"
-	log.Infof("Installing NipoVPN from source to %s", dest)
-
-	tmpDir := "/tmp/nipovpn-build"
-	_ = os.RemoveAll(tmpDir)
-
-	cmdClone := exec.Command("git", "clone", "--depth", "1", "https://github.com/EbadiDev/nipovpn", tmpDir)
-	if out, err := cmdClone.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to clone: %s, output: %s", err, string(out))
+	// Check if already installed
+	if _, err := os.Stat("/usr/bin/nipovpn"); err == nil {
+		log.Info("NipoVPN already installed at /usr/bin/nipovpn, skipping")
+		return nil
 	}
-	defer os.RemoveAll(tmpDir)
-
-	cmdCMake := exec.Command("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release")
-	cmdCMake.Dir = tmpDir
-	if out, err := cmdCMake.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to configure cmake: %s, output: %s", err, string(out))
+	if _, err := os.Stat("/usr/local/bin/nipovpn"); err == nil {
+		log.Info("NipoVPN found at /usr/local/bin/nipovpn (old location), skipping")
+		return nil
 	}
 
-	jobs := getOptimalJobCount()
-	log.Infof("Compiling NipoVPN with %d parallel jobs (based on system memory)", jobs)
-	cmdBuild := exec.Command("cmake", "--build", "build", "-j", strconv.Itoa(jobs))
-	cmdBuild.Dir = tmpDir
-	if out, err := cmdBuild.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to build: %s, output: %s", err, string(out))
+	const version = "1.1.57"
+	url := fmt.Sprintf("https://github.com/MortezaBashsiz/nipovpn/releases/download/v%s/nipovpn_%s_amd64.deb", version, version)
+	log.Infof("Downloading NipoVPN v%s from %s", version, url)
+
+	debPath := "/tmp/nipovpn.deb"
+	if err := DownloadFile(url, debPath); err != nil {
+		return fmt.Errorf("failed to download nipovpn .deb: %w", err)
+	}
+	defer os.Remove(debPath)
+
+	cmd := exec.Command("apt", "install", "-y", debPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to install nipovpn .deb: %s, output: %s", err, string(out))
 	}
 
-	binaryPath := filepath.Join(tmpDir, "build/core/nipovpn")
-	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
-		return fmt.Errorf("nipovpn binary not found after build")
-	}
-
-	_ = os.Remove(dest)
-	if err := CopyFile(binaryPath, dest); err != nil {
-		return fmt.Errorf("failed to copy binary to destination: %w", err)
-	}
-
-	return os.Chmod(dest, 0755)
+	log.Info("NipoVPN installed successfully from .deb package")
+	return nil
 }

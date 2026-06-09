@@ -19,7 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const NipovpnBinary = "/usr/local/bin/nipovpn"
+const NipovpnBinary = "/usr/bin/nipovpn"
 
 type NipovpnManager struct {
 	mu      sync.Mutex
@@ -45,6 +45,7 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 	}
 	type General struct {
 		Token           string   `yaml:"token"`
+		Protocol        string   `yaml:"protocol"`
 		FakeUrls        []string `yaml:"fakeUrls"`
 		Methods         []string `yaml:"methods"`
 		EndPoints       []string `yaml:"endPoints"`
@@ -137,9 +138,14 @@ func (m *NipovpnManager) GenerateConfig(dir string) error {
 	if cfg.UserAgent != "" {
 		userAgent = cfg.UserAgent
 	}
+	protocol := "http"
+	if cfg.Protocol != "" {
+		protocol = cfg.Protocol
+	}
 	c := Config{
 		General: General{
 			Token:           cfg.Token,
+			Protocol:        protocol,
 			FakeUrls:        cfg.FakeUrls,
 			Methods:         cfg.Methods,
 			EndPoints:       cfg.Endpoints,

@@ -392,6 +392,7 @@ show_status() {
         0)
             echo -e "archnets status: ${green}running${plain}"
             show_enable_status
+            show_tunnel_status
             ;;
         1)
             echo -e "archnets status: ${yellow}not running${plain}"
@@ -408,6 +409,23 @@ show_enable_status() {
         echo -e "Start at boot: ${green}yes${plain}"
     else
         echo -e "Start at boot: ${red}no${plain}"
+    fi
+}
+
+show_tunnel_status() {
+    if pgrep -x nipovpn >/dev/null 2>&1; then
+        echo -e "Tunnel: ${green}running${plain} (method: nipovpn)"
+    elif pgrep -x Waterwall >/dev/null 2>&1; then
+        echo -e "Tunnel: ${green}running${plain} (method: waterwall)"
+    elif [[ -f /var/run/archnets-tunnel.pid ]]; then
+        local pid=$(cat /var/run/archnets-tunnel.pid)
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "Tunnel: ${green}running${plain} (controller PID $pid)"
+        else
+            echo -e "Tunnel: ${yellow}not running${plain} (stale PID file)"
+        fi
+    else
+        echo -e "Tunnel: ${yellow}not running${plain}"
     fi
 }
 
@@ -545,6 +563,7 @@ tunnel_stop() {
     killall -9 paqet 2>/dev/null
     killall -9 gost 2>/dev/null
     killall -9 nodepass 2>/dev/null
+    killall -9 nipovpn 2>/dev/null
     if [[ $? == 0 ]]; then
         echo -e "${green}Tunnel processes stopped successfully${plain}"
     else
@@ -561,6 +580,7 @@ tunnel_restart() {
     killall -9 paqet 2>/dev/null
     killall -9 gost 2>/dev/null
     killall -9 nodepass 2>/dev/null
+    killall -9 nipovpn 2>/dev/null
     sleep 1
     nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
     sleep 2
@@ -596,7 +616,8 @@ tunnel_log() {
     echo -e "  1. WaterWall Logs (Tunnel Connectivity)"
     echo -e "  2. Controller Logs (Management/Updates)"
     echo -e "  3. Forwarder Logs (Gost/NodePass)"
-    echo && read -rp "Please choose [1-3] (default 1): " log_choice
+    echo -e "  4. NipoVPN Logs"
+    echo && read -rp "Please choose [1-4] (default 1): " log_choice
     [[ -z "$log_choice" ]] && log_choice=1
 
     case "$log_choice" in
@@ -611,6 +632,10 @@ tunnel_log() {
         3)
             echo -e "${green}Viewing Forwarder logs (Ctrl+C to exit)...${plain}"
             tail -f /etc/archnets/tunnel/log/forwarder.log
+            ;;
+        4)
+            echo -e "${green}Viewing NipoVPN logs (Ctrl+C to exit)...${plain}"
+            tail -f /etc/archnets/tunnel/log/nipovpn_*.log
             ;;
         *)
             echo -e "${red}Invalid choice${plain}"

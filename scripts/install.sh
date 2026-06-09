@@ -291,17 +291,17 @@ install_base() {
             echo "Installing EPEL repository..."
             yum install -y epel-release >/dev/null 2>&1
         fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools kernel-devel kernel-headers strongswan xl2tpd cmake gcc-c++ boost-devel yaml-cpp-devel openssl-devel git make
+        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools kernel-devel kernel-headers strongswan xl2tpd git make
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd cmake build-base boost-dev yaml-cpp-dev openssl-dev git
+        need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd git
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)" cmake g++ libboost-system-dev libboost-regex-dev libyaml-cpp-dev libssl-dev git make build-essential
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)" git make build-essential
         update-ca-certificates >/dev/null 2>&1 || true
         install_amneziawg
     elif [[ x"${release}" == x"ubuntu" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)" wireguard-tools strongswan strongswan-swanctl xl2tpd cmake g++ libboost-system-dev libboost-regex-dev libyaml-cpp-dev libssl-dev git make build-essential
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)" wireguard-tools strongswan strongswan-swanctl xl2tpd git make build-essential
         update-ca-certificates >/dev/null 2>&1 || true
         install_amneziawg
     elif [[ x"${release}" == x"arch" ]]; then
@@ -309,7 +309,7 @@ install_base() {
         pacman -Sy --noconfirm >/dev/null 2>&1
         # --needed skips already installed packages; very efficient
         echo "Installing required packages..."
-        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd cmake boost yaml-cpp openssl git >/dev/null 2>&1
+        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd git >/dev/null 2>&1
     fi
 }
 
