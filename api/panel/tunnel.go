@@ -141,8 +141,10 @@ type XrayTunnelProtocol struct {
 
 // Forwarder represents a port forwarder configuration (gost/nodepass)
 type Forwarder struct {
+	Id            int64  `json:"id"`
 	Protocol      string `json:"protocol"` // "tcp" or "udp"
 	ListenPort    int    `json:"listen_port"`
+	ListenIP      string `json:"listen_ip"`
 	TargetIP      string `json:"target_ip"`
 	TargetPort    int    `json:"target_port"`
 	ForwarderType string `json:"forwarder_type"` // "gost", "nodepass", "paqet"

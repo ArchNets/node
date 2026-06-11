@@ -1231,7 +1231,11 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 		// Entry node: Create dokodemo-door forwarders + outbound client proxy connection
 		for _, f := range t.Forwarders {
 			listen := "0.0.0.0"
-			if cfg.ListenIP != "" {
+			if f.ListenIP != "" {
+				listen = f.ListenIP
+			} else if cfg.ListenIP != "" {
+				// Fallback to global ListenIP ONLY for backward compatibility 
+				// (ideally dokodemo-door should bind to 0.0.0.0 by default)
 				listen = cfg.ListenIP
 			}
 			inb := map[string]interface{}{
