@@ -43,6 +43,24 @@ type TunnelInfo struct {
 	ExitXrayUUID      string              `json:"exit_xray_uuid,omitempty"`
 	Forwarders        []Forwarder         `json:"forwarders"`
 	ScanCommand       *ScanCommand        `json:"scan_command,omitempty"`
+	SniSpoofingConfig *SniSpoofingConfig  `json:"sni_spoofing_config,omitempty"`
+	XrayStealthConfig string              `json:"xray_stealth_config,omitempty"`
+}
+
+// SniSpoofingConfig represents the sidecar config for SNI-Spoofing
+type SniSpoofingConfig struct {
+	ListenPort     int    `json:"listen_port"`
+	ConnectIP      string `json:"connect_ip"`
+	ConnectPort    int    `json:"connect_port"`
+	FakeSNI        string `json:"fake_sni"`
+	UTLS           string `json:"utls,omitempty"`
+	FakeRepeat     int    `json:"fake_repeat,omitempty"`
+	FakeDelay      string `json:"fake_delay,omitempty"`
+	AckTimeout     string `json:"ack_timeout,omitempty"`
+	Injector       string `json:"injector,omitempty"`
+	EnableFragment bool   `json:"enable_fragment,omitempty"`
+	FragmentDelay  string `json:"fragment_delay,omitempty"`
+	SniChunk       int    `json:"sni_chunk,omitempty"`
 }
 
 type NipovpnConfig struct {

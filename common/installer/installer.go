@@ -338,6 +338,22 @@ func InstallPaqet() error {
 	return os.Chmod(dest, 0755)
 }
 
+// InstallSniSpoofing downloads and installs SNI-Spoofing to /usr/local/bin
+func InstallSniSpoofing() error {
+	dest := "/usr/local/bin/sni-spoofing"
+	log.Infof("Installing SNI-Spoofing to %s", dest)
+
+	// Since we only install sni-spoofing on the Iran side, we use the specific mirror
+	downloadURL := "https://storage.archnets.com/linux/mirror/sni/sni-spoofing-linux-amd64"
+	log.Infof("Downloading SNI-Spoofing from mirror: %s", downloadURL)
+
+	if err := DownloadFile(downloadURL, dest); err != nil {
+		return err
+	}
+
+	return os.Chmod(dest, 0755)
+}
+
 // CopyFile copies a file from src to dst
 func CopyFile(src, dst string) error {
 	in, err := os.Open(src)

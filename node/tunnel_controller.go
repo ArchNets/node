@@ -88,6 +88,10 @@ type TunnelController struct {
 	// NipoVPN instances
 	nipovpnManagers map[int]*nodeCore.NipovpnManager
 	nipovpnMu       sync.Mutex
+	// SNI-Spoofing
+	sniSpoofingProcesses map[int]*exec.Cmd
+	sniSpoofingMu        sync.Mutex
+	sniSpoofingWg        sync.WaitGroup
 }
 
 // NewTunnelController creates a new tunnel controller
@@ -102,9 +106,10 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		forwarderProcesses: make(map[int]*exec.Cmd),
 		logger:             log.WithField("tag", tag), // Initialize with default logger
 		lastTraffic:        make(map[int]trafficSnapshot),
-		tunnelDeviceNames:  make(map[int]string),
-		xrayInstances:      make(map[int]*core.Instance),
-		nipovpnManagers:    make(map[int]*nodeCore.NipovpnManager),
+		tunnelDeviceNames:    make(map[int]string),
+		xrayInstances:        make(map[int]*core.Instance),
+		nipovpnManagers:      make(map[int]*nodeCore.NipovpnManager),
+		sniSpoofingProcesses: make(map[int]*exec.Cmd),
 	}
 }
 
@@ -232,6 +237,14 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 		}
 	}
 
+	// Check SNI-Spoofing
+	if _, err := os.Stat("/usr/local/bin/sni-spoofing"); os.IsNotExist(err) {
+		c.logger.Info("SNI-Spoofing binary missing, attempting auto-installation...")
+		if err := installer.InstallSniSpoofing(); err != nil {
+			c.logger.WithField("err", err).Warn("SNI-Spoofing auto-installation failed")
+		}
+	}
+
 	return nil
 }
 
@@ -278,6 +291,9 @@ func (c *TunnelController) Close() error {
 
 	// Stop all NipoVPN managers
 	c.stopAllNipovpnManagers()
+
+	// Stop all SNI-Spoofing processes
+	c.stopAllSniSpoofingProcesses()
 
 	// Close log files
 	if c.waterwallLogFile != nil {
@@ -431,7 +447,7 @@ func (c *TunnelController) statusReport() error {
 					}
 				}
 			}
-		} else if t.Method == "xray" || t.Method == "xray-reverse" {
+		} else if t.Method == "xray" || t.Method == "xray-reverse" || t.Method == "xray-stealth" {
 			// Pull Xray stats directly from memory
 			c.xrayMu.Lock()
 			instance := c.xrayInstances[t.Id]
@@ -454,6 +470,13 @@ func (c *TunnelController) statusReport() error {
 					// Instead of reading traffic dynamically, Xray currently provides `proxy` or `inbound-0` as defaults.
 					// We'll hardcode checking the standard expected tags for tunnels:
 					possibleTags := []string{"proxy", "inbound-0", "dokodemo-0", "dokodemo-1", "dokodemo-2"}
+					if t.Method == "xray-stealth" {
+						if t.Role == "entry" {
+							possibleTags = append(possibleTags, "stealth-out")
+						} else {
+							possibleTags = append(possibleTags, "stealth-inbound")
+						}
+					}
 					for _, tag := range possibleTags {
 						downName := fmt.Sprintf("inbound>>>%s>>>traffic>>>downlink", tag)
 						upName := fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", tag)
@@ -536,6 +559,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	var xrayTunnels []panel.TunnelInfo
 	var nipovpnTunnels []panel.TunnelInfo
 	var xrayReverseTunnels []panel.TunnelInfo
+	var xrayStealthTunnels []panel.TunnelInfo
 
 	// Generate and write core.json
 	for _, t := range data.Tunnels {
@@ -547,6 +571,8 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 			nipovpnTunnels = append(nipovpnTunnels, t)
 		} else if t.Method == "xray-reverse" {
 			xrayReverseTunnels = append(xrayReverseTunnels, t)
+		} else if t.Method == "xray-stealth" {
+			xrayStealthTunnels = append(xrayStealthTunnels, t)
 		}
 	}
 
@@ -614,6 +640,16 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
+	// Start Xray-stealth tunnels natively in Go
+	for _, t := range xrayStealthTunnels {
+		if err := c.startXrayStealthInstance(t); err != nil {
+			c.logger.WithFields(log.Fields{
+				"tunnelId": t.Id,
+				"err":      err,
+			}).Warn("Failed to start Xray-stealth tunnel instance")
+		}
+	}
+
 	// Start NipoVPN tunnels
 	for _, t := range nipovpnTunnels {
 		mgr := nodeCore.NewNipovpnManager(t, c.logger)
@@ -648,7 +684,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 
 	// Start forwarders
 	for _, t := range data.Tunnels {
-		if t.Method == "xray" || t.Method == "nipovpn" || t.Method == "xray-reverse" {
+		if t.Method == "xray" || t.Method == "nipovpn" || t.Method == "xray-reverse" || t.Method == "xray-stealth" {
 			// Skip starting Gost/Paqet/Nodepass/Waterwall wrapper
 			// NipoVPN and Xray cores handle their own forwarding
 			continue
@@ -1526,4 +1562,143 @@ func readProcessIO(pid int) (rchar, wchar int64, err error) {
 		}
 	}
 	return rchar, wchar, nil
+}
+
+func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
+	if t.XrayStealthConfig == "" {
+		return fmt.Errorf("xray_stealth_config is missing for xray-stealth tunnel")
+	}
+
+	// For entry role, we have sni_spoofing_config and need to start the sidecar
+	if t.Role == "entry" && t.SniSpoofingConfig != nil {
+		if err := c.startSniSpoofingProcess(t); err != nil {
+			return fmt.Errorf("failed to start sni-spoofing: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond) // Wait for it to bind
+	}
+
+	// Write Xray config to disk
+	configPath := filepath.Join(c.tunnelDir, fmt.Sprintf("xray_stealth_%d.json", t.Id))
+	if err := os.WriteFile(configPath, []byte(t.XrayStealthConfig), 0644); err != nil {
+		c.logger.WithFields(log.Fields{
+			"tunnelId": t.Id,
+			"err":      err,
+		}).Warn("Failed to write xray_stealth config to disk")
+	}
+
+	// Start Xray
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+	reader := bytes.NewReader([]byte(t.XrayStealthConfig))
+	confObj, err := confserial.DecodeJSONConfig(reader)
+	if err != nil {
+		return fmt.Errorf("failed to parse xray-stealth config JSON: %v", err)
+	}
+
+	configObj, err := confObj.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build xray-stealth config protobuf: %v", err)
+	}
+
+	coreLogConfig := &coreConf.LogConfig{
+		LogLevel:  logLevel,
+		ErrorLog:  c.nodeConfig.LogConfig.Output,
+		AccessLog: c.nodeConfig.LogConfig.Access,
+	}
+	appLogMsg := serial.ToTypedMessage(coreLogConfig.Build())
+	configObj.App = append([]*serial.TypedMessage{appLogMsg}, configObj.App...)
+
+	instance, err := core.New(configObj)
+	if err != nil {
+		return fmt.Errorf("failed to initialize xray-stealth instance: %v", err)
+	}
+
+	if err := instance.Start(); err != nil {
+		return fmt.Errorf("failed to start xray-stealth instance: %v", err)
+	}
+
+	c.xrayMu.Lock()
+	if c.xrayInstances == nil {
+		c.xrayInstances = make(map[int]*core.Instance)
+	}
+	c.xrayInstances[t.Id] = instance
+	c.xrayMu.Unlock()
+
+	c.logger.WithField("tunnelId", t.Id).Info("Xray-stealth tunnel instance started natively in Go")
+	return nil
+}
+
+func (c *TunnelController) startSniSpoofingProcess(t panel.TunnelInfo) error {
+	cfg := t.SniSpoofingConfig
+	
+	iniContent := fmt.Sprintf(`listen = 127.0.0.1:%d
+connect = %s:%d
+fake-sni = %s
+utls = %s
+fake-repeat = %d
+fake-delay = %s
+ack-timeout = %s
+injector = %s
+enable-fragment = %t
+fragment-delay = %s
+sni-chunk = %d
+`,
+		cfg.ListenPort, cfg.ConnectIP, cfg.ConnectPort, cfg.FakeSNI,
+		cfg.UTLS, cfg.FakeRepeat, cfg.FakeDelay, cfg.AckTimeout,
+		cfg.Injector, cfg.EnableFragment, cfg.FragmentDelay, cfg.SniChunk)
+
+	iniPath := filepath.Join(c.tunnelDir, fmt.Sprintf("sni_spoofing_%d.ini", t.Id))
+	if err := os.WriteFile(iniPath, []byte(iniContent), 0644); err != nil {
+		return fmt.Errorf("failed to write sni_spoofing ini: %v", err)
+	}
+
+	cmd := exec.Command("/usr/local/bin/sni-spoofing", "-config", iniPath)
+	
+	if c.forwarderLogFile != nil {
+		cmd.Stdout = c.forwarderLogFile
+		cmd.Stderr = c.forwarderLogFile
+	}
+
+	setProcessGroup(cmd)
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	c.sniSpoofingMu.Lock()
+	c.sniSpoofingProcesses[t.Id] = cmd
+	c.sniSpoofingMu.Unlock()
+
+	c.sniSpoofingWg.Add(1)
+	go func() {
+		defer c.sniSpoofingWg.Done()
+		cmd.Wait()
+		c.sniSpoofingMu.Lock()
+		delete(c.sniSpoofingProcesses, t.Id)
+		c.sniSpoofingMu.Unlock()
+	}()
+
+	c.logger.WithField("tunnelId", t.Id).Info("SNI-Spoofing process started")
+	return nil
+}
+
+func (c *TunnelController) stopAllSniSpoofingProcesses() {
+	c.sniSpoofingMu.Lock()
+	for _, cmd := range c.sniSpoofingProcesses {
+		if cmd != nil && cmd.Process != nil {
+			killProcessGroup(cmd)
+			go func(proc *os.Process) {
+				time.Sleep(2 * time.Second)
+				if proc != nil {
+					_ = proc.Kill()
+				}
+			}(cmd.Process)
+		}
+	}
+	c.sniSpoofingMu.Unlock()
+
+	c.sniSpoofingWg.Wait()
+	c.logger.Info("All SNI-Spoofing processes stopped")
 }
