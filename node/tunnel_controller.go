@@ -454,6 +454,7 @@ func (c *TunnelController) statusReport() error {
 			c.xrayMu.Unlock()
 
 			if instance != nil {
+				online = true
 				// Note: Currently Xray tunnels don't have their configs individually read back here for stats
 				// because they are natively loaded.
 				f := instance.GetFeature(xraystats.ManagerType())
@@ -1882,16 +1883,16 @@ func (c *TunnelController) stopAllSniSpoofingProcesses() {
 	c.sniSpoofingMu.Lock()
 	for _, cmd := range c.sniSpoofingProcesses {
 		if cmd != nil && cmd.Process != nil {
-			killProcessGroup(cmd)
-			go func(proc *os.Process) {
-				time.Sleep(2 * time.Second)
-				if proc != nil {
-					_ = proc.Kill()
-				}
-			}(cmd.Process)
+			// Kill the process group to ensure child processes are also terminated
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			cmd.Process.Kill()
 		}
 	}
+	c.sniSpoofingProcesses = make(map[int]*exec.Cmd)
 	c.sniSpoofingMu.Unlock()
+	
+	// Also brutally kill any orphaned sni-spoofing processes that might have survived a node crash
+	exec.Command("pkill", "-f", "sni-spoofing").Run()
 
 	c.sniSpoofingWg.Wait()
 	c.logger.Info("All SNI-Spoofing processes stopped")

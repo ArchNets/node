@@ -564,6 +564,7 @@ tunnel_stop() {
     killall -9 gost 2>/dev/null
     killall -9 nodepass 2>/dev/null
     killall -9 nipovpn 2>/dev/null
+    killall -9 sni-spoofing 2>/dev/null
     if [[ $? == 0 ]]; then
         echo -e "${green}Tunnel processes stopped successfully${plain}"
     else
@@ -581,6 +582,7 @@ tunnel_restart() {
     killall -9 gost 2>/dev/null
     killall -9 nodepass 2>/dev/null
     killall -9 nipovpn 2>/dev/null
+    killall -9 sni-spoofing 2>/dev/null
     sleep 1
     nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
     sleep 2
@@ -615,9 +617,10 @@ tunnel_log() {
     echo -e "${green}Select log to view:${plain}"
     echo -e "  1. WaterWall Logs (Tunnel Connectivity)"
     echo -e "  2. Controller Logs (Management/Updates)"
-    echo -e "  3. Forwarder Logs (Gost/NodePass)"
+    echo -e "  3. Forwarder Logs (Gost/NodePass/SNI-Spoofing)"
     echo -e "  4. NipoVPN Logs"
-    echo && read -rp "Please choose [1-4] (default 1): " log_choice
+    echo -e "  5. Xray Stealth Config (Written JSON)"
+    echo && read -rp "Please choose [1-5] (default 1): " log_choice
     [[ -z "$log_choice" ]] && log_choice=1
 
     case "$log_choice" in
@@ -636,6 +639,19 @@ tunnel_log() {
         4)
             echo -e "${green}Viewing NipoVPN logs (Ctrl+C to exit)...${plain}"
             tail -f /etc/archnets/tunnel/log/nipovpn_*.log
+            ;;
+        5)
+            echo -e "${green}Xray Stealth generated configs:${plain}"
+            ls -la /etc/archnets/tunnel/xray_stealth_*.json /etc/archnets/tunnel/sni_spoofing_*.ini 2>/dev/null
+            echo ""
+            for f in /etc/archnets/tunnel/xray_stealth_*.json; do
+                [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f" | python3 -m json.tool 2>/dev/null || cat "$f"
+                echo ""
+            done
+            for f in /etc/archnets/tunnel/sni_spoofing_*.ini; do
+                [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f"
+                echo ""
+            done
             ;;
         *)
             echo -e "${red}Invalid choice${plain}"

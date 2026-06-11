@@ -195,7 +195,7 @@ install_base() {
         local count=0
         while true; do
             local locked=false
-            if pgrep -f "apt-get|dpkg" >/dev/null 2>&1; then
+            if pgrep -x "apt-get|dpkg|apt" >/dev/null 2>&1; then
                 locked=true
             fi
             
