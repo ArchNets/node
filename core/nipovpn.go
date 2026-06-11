@@ -252,5 +252,3 @@ func (m *NipovpnManager) GetPID() int {
 	}
 	return 0
 }
-
-

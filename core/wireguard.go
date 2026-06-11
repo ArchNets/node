@@ -624,7 +624,7 @@ func (w *WireGuardCore) setupNAT() error {
 
 		// 2. Interface-specific mangle chain
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
-		
+
 		// Create chain if it doesn't exist
 		if err := execCommand(fmt.Sprintf("iptables -t mangle -N %s", chainName)); err != nil {
 			// Ignore error if chain already exists
@@ -633,7 +633,7 @@ func (w *WireGuardCore) setupNAT() error {
 
 		// Return traffic destined to the local WG network itself (e.g. DNS)
 		execCommand(fmt.Sprintf("iptables -t mangle -A %s -d %s -j RETURN", chainName, subnet))
-		
+
 		// TPROXY capture rules
 		execCommand(fmt.Sprintf("iptables -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort))
 		execCommand(fmt.Sprintf("iptables -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort))
@@ -689,7 +689,7 @@ func (w *WireGuardCore) teardownNAT() {
 		// Flush and delete custom chain
 		_ = execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
 		_ = execCommand(fmt.Sprintf("iptables -t mangle -X %s", chainName))
-		
+
 		// Note: We leave `ip rule` and `ip route` intact since other interfaces might be using them
 	} else {
 		defaultIface, err := getDefaultInterface()

@@ -17,8 +17,8 @@ import (
 
 // IPsecController manages IKEv2/L2TP protocol nodes.
 type IPsecController struct {
-	tag     string // internal tag for iptables/limiter (e.g. "ipsec-28-443")
-	xrayTag string // Xray inbound tag matching panel routing rules (e.g. "ikev2:28")
+	tag       string // internal tag for iptables/limiter (e.g. "ipsec-28-443")
+	xrayTag   string // Xray inbound tag matching panel routing rules (e.g. "ikev2:28")
 	info      *panel.NodeInfo
 	apiClient *panel.ClientV1
 	ipsecCore *vCore.IPsecCore

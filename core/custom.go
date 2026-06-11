@@ -394,7 +394,6 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				return res
 			}
 
-
 			xrayRule := map[string]interface{}{"type": "field"}
 			if len(rule.InboundTags) > 0 {
 				xrayRule["inboundTag"] = splitFunc(rule.InboundTags)

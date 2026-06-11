@@ -14,20 +14,20 @@ type ServerConfigResponse struct {
 }
 
 type Data struct {
-	TrafficReportThreshold int                `json:"traffic_report_threshold"`
-	PushInterval           int                `json:"push_interval"`
-	PullInterval           int                `json:"pull_interval"`
-	IPStrategy             string             `json:"ip_strategy"`
-	DNS                    *[]DNSItem         `json:"dns"`
-	Block                  *[]string          `json:"block"`
-	Outbound               *[]Outbound        `json:"outbound"`
-	Routing                *[]RoutingRule     `json:"routing"`
-	Balancers              *[]Balancer        `json:"balancers"`
-	Observatory            *Observatory       `json:"observatory"`
-	BurstObservatory       *BurstObservatory  `json:"burst_observatory"`
-	StatsPolicy            *StatsPolicy       `json:"stats_policy"`
-	Protocols              *[]Protocol        `json:"protocols"`
-	Total                  int                `json:"total"`
+	TrafficReportThreshold int               `json:"traffic_report_threshold"`
+	PushInterval           int               `json:"push_interval"`
+	PullInterval           int               `json:"pull_interval"`
+	IPStrategy             string            `json:"ip_strategy"`
+	DNS                    *[]DNSItem        `json:"dns"`
+	Block                  *[]string         `json:"block"`
+	Outbound               *[]Outbound       `json:"outbound"`
+	Routing                *[]RoutingRule    `json:"routing"`
+	Balancers              *[]Balancer       `json:"balancers"`
+	Observatory            *Observatory      `json:"observatory"`
+	BurstObservatory       *BurstObservatory `json:"burst_observatory"`
+	StatsPolicy            *StatsPolicy      `json:"stats_policy"`
+	Protocols              *[]Protocol       `json:"protocols"`
+	Total                  int               `json:"total"`
 }
 
 type DNSItem struct {

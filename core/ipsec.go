@@ -942,7 +942,7 @@ func (c *IPsecCore) collectStats() {
 		usernameToUID[user.Username] = user.UID
 	}
 	c.mu.RUnlock()
-	
+
 	c.trafficMu.Lock()
 	defer c.trafficMu.Unlock()
 	for _, sa := range sas {

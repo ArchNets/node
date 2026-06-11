@@ -18,11 +18,11 @@ import (
 
 	"github.com/archnets/node/api/panel"
 	certutil "github.com/archnets/node/common/cert"
-	nodeCore "github.com/archnets/node/core"
 	"github.com/archnets/node/common/file"
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
 	"github.com/archnets/node/conf"
+	nodeCore "github.com/archnets/node/core"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
@@ -431,7 +431,7 @@ func (c *TunnelController) statusReport() error {
 					}
 				}
 			}
-		} else if t.Method == "xray" {
+		} else if t.Method == "xray" || t.Method == "xray-reverse" {
 			// Pull Xray stats directly from memory
 			c.xrayMu.Lock()
 			instance := c.xrayInstances[t.Id]
@@ -535,6 +535,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	var waterwallTunnels []panel.TunnelInfo
 	var xrayTunnels []panel.TunnelInfo
 	var nipovpnTunnels []panel.TunnelInfo
+	var xrayReverseTunnels []panel.TunnelInfo
 
 	// Generate and write core.json
 	for _, t := range data.Tunnels {
@@ -544,6 +545,8 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 			xrayTunnels = append(xrayTunnels, t)
 		} else if t.Method == "nipovpn" {
 			nipovpnTunnels = append(nipovpnTunnels, t)
+		} else if t.Method == "xray-reverse" {
+			xrayReverseTunnels = append(xrayReverseTunnels, t)
 		}
 	}
 
@@ -601,6 +604,16 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
+	// Start Xray-reverse tunnels natively in Go
+	for _, t := range xrayReverseTunnels {
+		if err := c.startXrayReverseInstance(t); err != nil {
+			c.logger.WithFields(log.Fields{
+				"tunnelId": t.Id,
+				"err":      err,
+			}).Warn("Failed to start Xray-reverse tunnel instance")
+		}
+	}
+
 	// Start NipoVPN tunnels
 	for _, t := range nipovpnTunnels {
 		mgr := nodeCore.NewNipovpnManager(t, c.logger)
@@ -635,7 +648,7 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 
 	// Start forwarders
 	for _, t := range data.Tunnels {
-		if t.Method == "xray" || t.Method == "nipovpn" {
+		if t.Method == "xray" || t.Method == "nipovpn" || t.Method == "xray-reverse" {
 			// Skip starting Gost/Paqet/Nodepass/Waterwall wrapper
 			// NipoVPN and Xray cores handle their own forwarding
 			continue
@@ -941,6 +954,68 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	c.xrayMu.Unlock()
 
 	c.logger.WithField("tunnelId", t.Id).Info("Xray tunnel instance started natively in Go")
+	return nil
+}
+
+func (c *TunnelController) startXrayReverseInstance(t panel.TunnelInfo) error {
+	if t.XrayReverseConfig == "" {
+		return fmt.Errorf("xray_reverse_config is missing for xray-reverse tunnel")
+	}
+
+	// 1. Write config to disk for debugging/persisting
+	configPath := filepath.Join(c.tunnelDir, fmt.Sprintf("xray-reverse-%d.json", t.Id))
+	if err := os.WriteFile(configPath, []byte(t.XrayReverseConfig), 0644); err != nil {
+		c.logger.WithFields(log.Fields{
+			"tunnelId": t.Id,
+			"err":      err,
+		}).Warn("Failed to write xray-reverse config to disk")
+	}
+
+	// 2. Start Xray-core process natively
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+
+	c.logger.WithField("json", t.XrayReverseConfig).Debug("Generated Xray Reverse JSON")
+
+	reader := bytes.NewReader([]byte(t.XrayReverseConfig))
+	confObj, err := confserial.DecodeJSONConfig(reader)
+	if err != nil {
+		return fmt.Errorf("failed to parse xray-reverse config JSON: %v", err)
+	}
+
+	configObj, err := confObj.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build xray-reverse config protobuf: %v", err)
+	}
+
+	coreLogConfig := &coreConf.LogConfig{
+		LogLevel:  logLevel,
+		ErrorLog:  c.nodeConfig.LogConfig.Output,
+		AccessLog: c.nodeConfig.LogConfig.Access,
+	}
+	appLogMsg := serial.ToTypedMessage(coreLogConfig.Build())
+
+	configObj.App = append([]*serial.TypedMessage{appLogMsg}, configObj.App...)
+
+	instance, err := core.New(configObj)
+	if err != nil {
+		return fmt.Errorf("failed to initialize xray-reverse instance: %v", err)
+	}
+
+	if err := instance.Start(); err != nil {
+		return fmt.Errorf("failed to start xray-reverse instance: %v", err)
+	}
+
+	c.xrayMu.Lock()
+	if c.xrayInstances == nil {
+		c.xrayInstances = make(map[int]*core.Instance)
+	}
+	c.xrayInstances[t.Id] = instance
+	c.xrayMu.Unlock()
+
+	c.logger.WithField("tunnelId", t.Id).Info("Xray-reverse tunnel instance started natively in Go")
 	return nil
 }
 
