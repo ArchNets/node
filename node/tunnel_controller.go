@@ -993,14 +993,180 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	return nil
 }
 
+func (c *TunnelController) buildXrayReverseJSON(t panel.TunnelInfo, cfg *panel.XrayReverseTunnelConfig, logLevel string) string {
+	obj := map[string]interface{}{
+		"log": map[string]interface{}{
+			"loglevel": logLevel,
+		},
+		"inbounds":  []interface{}{},
+		"outbounds": []interface{}{},
+		"routing": map[string]interface{}{
+			"rules": []interface{}{},
+		},
+	}
+
+	streamSettings := map[string]interface{}{
+		"network": cfg.Transport,
+	}
+
+	if cfg.Transport == "ws" {
+		wsSettings := map[string]interface{}{}
+		if cfg.Path != "" {
+			wsSettings["path"] = cfg.Path
+		}
+		if cfg.Host != "" {
+			wsSettings["headers"] = map[string]interface{}{
+				"Host": cfg.Host,
+			}
+		}
+		streamSettings["wsSettings"] = wsSettings
+	} else if cfg.Transport == "grpc" {
+		streamSettings["grpcSettings"] = map[string]interface{}{
+			"serviceName": cfg.Path,
+		}
+	} else if cfg.Transport == "tcp" {
+		if cfg.Path != "" { // Using HTTP obfs
+			streamSettings["tcpSettings"] = map[string]interface{}{
+				"header": map[string]interface{}{
+					"type": "http",
+					"request": map[string]interface{}{
+						"path": []string{cfg.Path},
+					},
+				},
+			}
+		}
+	}
+
+	if cfg.Security == "tls" || cfg.Security == "reality" {
+		streamSettings["security"] = cfg.Security
+		if cfg.Security == "tls" {
+			tlsSettings := map[string]interface{}{}
+			if cfg.ServerName != "" {
+				tlsSettings["serverName"] = cfg.ServerName
+			}
+			if cfg.Fingerprint != "" {
+				tlsSettings["fingerprint"] = cfg.Fingerprint
+			}
+			streamSettings["tlsSettings"] = tlsSettings
+		} else if cfg.Security == "reality" {
+			realitySettings := map[string]interface{}{
+				"publicKey": cfg.RealityPublicKey,
+				"shortId":   cfg.RealityShortId,
+			}
+			if cfg.ServerName != "" {
+				realitySettings["serverName"] = cfg.ServerName
+			}
+			if cfg.Fingerprint != "" {
+				realitySettings["fingerprint"] = cfg.Fingerprint
+			}
+			if cfg.RealitySpiderX != "" {
+				realitySettings["spiderX"] = cfg.RealitySpiderX
+			}
+			streamSettings["realitySettings"] = realitySettings
+		}
+	}
+
+	if t.Role == "entry" {
+		// Portal node
+		// 1. Inbound for clients (Forwarders)
+		for _, f := range t.Forwarders {
+			inb := map[string]interface{}{
+				"listen":   "0.0.0.0",
+				"port":     f.ListenPort,
+				"protocol": "dokodemo-door",
+				"settings": map[string]interface{}{
+					"address": f.TargetIP,
+					"port":    f.TargetPort,
+					"network": f.Protocol,
+				},
+				"tag": fmt.Sprintf("dokodemo-%d", f.ListenPort),
+			}
+			obj["inbounds"] = append(obj["inbounds"].([]interface{}), inb)
+			
+			// Routing rule: forwarder -> portal
+			rule := map[string]interface{}{
+				"type":        "field",
+				"inboundTag":  []string{fmt.Sprintf("dokodemo-%d", f.ListenPort)},
+				"outboundTag": "portal",
+			}
+			obj["routing"].(map[string]interface{})["rules"] = append(obj["routing"].(map[string]interface{})["rules"].([]interface{}), rule)
+		}
+
+		// 2. Inbound for Bridge (Portal inbound)
+		inbPortal := map[string]interface{}{
+			"tag":      "inbound-portal",
+			"port":     cfg.PortalPort,
+			"protocol": "vless",
+			"settings": map[string]interface{}{
+				"clients": []interface{}{
+					map[string]interface{}{
+						"id": cfg.UUID,
+						"reverse": map[string]interface{}{
+							"tag": "portal",
+						},
+					},
+				},
+				"decryption": "none",
+			},
+			"streamSettings": streamSettings,
+		}
+		obj["inbounds"] = append(obj["inbounds"].([]interface{}), inbPortal)
+
+	} else {
+		// Bridge node
+		// 1. Outbound to Portal
+		outbBridge := map[string]interface{}{
+			"protocol": "vless",
+			"settings": map[string]interface{}{
+				"address":    cfg.PortalAddress,
+				"port":       cfg.PortalPublicPort,
+				"id":         cfg.UUID,
+				"encryption": "none",
+				"reverse": map[string]interface{}{
+					"tag": "bridge",
+				},
+			},
+			"tag":            "bridge-out",
+			"streamSettings": streamSettings,
+		}
+		obj["outbounds"] = append(obj["outbounds"].([]interface{}), outbBridge)
+
+		// 2. Default Outbound (Freedom)
+		outbFreedom := map[string]interface{}{
+			"protocol": "freedom",
+			"settings": map[string]interface{}{},
+			"tag":      "direct",
+		}
+		obj["outbounds"] = append(obj["outbounds"].([]interface{}), outbFreedom)
+
+		// 3. Routing from bridge to freedom
+		rule := map[string]interface{}{
+			"type":        "field",
+			"inboundTag":  []string{"bridge"},
+			"outboundTag": "direct",
+		}
+		obj["routing"].(map[string]interface{})["rules"] = append(obj["routing"].(map[string]interface{})["rules"].([]interface{}), rule)
+	}
+
+	b, _ := json.Marshal(obj)
+	return string(b)
+}
+
 func (c *TunnelController) startXrayReverseInstance(t panel.TunnelInfo) error {
-	if t.XrayReverseConfig == "" {
+	if t.XrayReverseConfig == nil {
 		return fmt.Errorf("xray_reverse_config is missing for xray-reverse tunnel")
 	}
 
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+
+	xrayJSON := c.buildXrayReverseJSON(t, t.XrayReverseConfig, logLevel)
+
 	// 1. Write config to disk for debugging/persisting
 	configPath := filepath.Join(c.tunnelDir, fmt.Sprintf("xray-reverse-%d.json", t.Id))
-	if err := os.WriteFile(configPath, []byte(t.XrayReverseConfig), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(xrayJSON), 0644); err != nil {
 		c.logger.WithFields(log.Fields{
 			"tunnelId": t.Id,
 			"err":      err,
@@ -1008,14 +1174,9 @@ func (c *TunnelController) startXrayReverseInstance(t panel.TunnelInfo) error {
 	}
 
 	// 2. Start Xray-core process natively
-	logLevel := c.nodeConfig.LogConfig.Level
-	if logLevel == "" {
-		logLevel = "warning"
-	}
+	c.logger.WithField("json", xrayJSON).Debug("Generated Xray Reverse JSON")
 
-	c.logger.WithField("json", t.XrayReverseConfig).Debug("Generated Xray Reverse JSON")
-
-	reader := bytes.NewReader([]byte(t.XrayReverseConfig))
+	reader := bytes.NewReader([]byte(xrayJSON))
 	confObj, err := confserial.DecodeJSONConfig(reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse xray-reverse config JSON: %v", err)
@@ -1565,8 +1726,8 @@ func readProcessIO(pid int) (rchar, wchar int64, err error) {
 }
 
 func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
-	if t.XrayStealthConfig == "" {
-		return fmt.Errorf("xray_stealth_config is missing for xray-stealth tunnel")
+	if t.XrayConfig == nil {
+		return fmt.Errorf("xray_config is missing for xray-stealth tunnel")
 	}
 
 	// For entry role, we have sni_spoofing_config and need to start the sidecar
@@ -1577,9 +1738,46 @@ func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
 		time.Sleep(500 * time.Millisecond) // Wait for it to bind
 	}
 
+	logLevel := c.nodeConfig.LogConfig.Level
+	if logLevel == "" {
+		logLevel = "warning"
+	}
+
+	rawJSON := c.buildXrayJSON(t, t.XrayConfig, logLevel)
+
+	// For stealth entry, point the outbound address and port to the SNI spoofing sidecar
+	var xrayJSON string
+	if t.Role == "entry" && t.SniSpoofingConfig != nil {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(rawJSON), &obj); err == nil {
+			if outbounds, ok := obj["outbounds"].([]interface{}); ok {
+				for _, ob := range outbounds {
+					if outb, ok := ob.(map[string]interface{}); ok {
+						if outb["protocol"] == t.XrayConfig.Type {
+							if settings, ok := outb["settings"].(map[string]interface{}); ok {
+								if vnext, ok := settings["vnext"].([]interface{}); ok && len(vnext) > 0 {
+									if target, ok := vnext[0].(map[string]interface{}); ok {
+										target["address"] = "127.0.0.1"
+										target["port"] = t.SniSpoofingConfig.ListenPort
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			b, _ := json.Marshal(obj)
+			xrayJSON = string(b)
+		} else {
+			xrayJSON = rawJSON
+		}
+	} else {
+		xrayJSON = rawJSON
+	}
+
 	// Write Xray config to disk
 	configPath := filepath.Join(c.tunnelDir, fmt.Sprintf("xray_stealth_%d.json", t.Id))
-	if err := os.WriteFile(configPath, []byte(t.XrayStealthConfig), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(xrayJSON), 0644); err != nil {
 		c.logger.WithFields(log.Fields{
 			"tunnelId": t.Id,
 			"err":      err,
@@ -1587,11 +1785,7 @@ func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
 	}
 
 	// Start Xray
-	logLevel := c.nodeConfig.LogConfig.Level
-	if logLevel == "" {
-		logLevel = "warning"
-	}
-	reader := bytes.NewReader([]byte(t.XrayStealthConfig))
+	reader := bytes.NewReader([]byte(xrayJSON))
 	confObj, err := confserial.DecodeJSONConfig(reader)
 	if err != nil {
 		return fmt.Errorf("failed to parse xray-stealth config JSON: %v", err)

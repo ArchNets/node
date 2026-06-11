@@ -34,17 +34,16 @@ type TunnelInfo struct {
 	Role              string              `json:"role"`      // "entry" or "exit"
 	Method            string              `json:"method"`    // "waterwall" or "xray" (NEW)
 	RemoteIP          string              `json:"remote_ip"` // Remote tunnel IP for health checks
-	XrayConfig        *XrayTunnelProtocol `json:"xray_config,omitempty"`
-	XrayReverseConfig string              `json:"xray_reverse_config,omitempty"`
-	WaterwallConfig   string              `json:"waterwall_config,omitempty"`
-	NipovpnConfig     *NipovpnConfig      `json:"nipovpn_config,omitempty"`
-	ExitServerIP      string              `json:"exit_server_ip,omitempty"`
-	ExitXrayPort      int                 `json:"exit_xray_port,omitempty"`
-	ExitXrayUUID      string              `json:"exit_xray_uuid,omitempty"`
-	Forwarders        []Forwarder         `json:"forwarders"`
-	ScanCommand       *ScanCommand        `json:"scan_command,omitempty"`
-	SniSpoofingConfig *SniSpoofingConfig  `json:"sni_spoofing_config,omitempty"`
-	XrayStealthConfig string              `json:"xray_stealth_config,omitempty"`
+	XrayConfig        *XrayTunnelProtocol      `json:"xray_config,omitempty"`
+	XrayReverseConfig *XrayReverseTunnelConfig `json:"xray_reverse_config,omitempty"`
+	WaterwallConfig   string                   `json:"waterwall_config,omitempty"`
+	NipovpnConfig     *NipovpnConfig           `json:"nipovpn_config,omitempty"`
+	ExitServerIP      string                   `json:"exit_server_ip,omitempty"`
+	ExitXrayPort      int                      `json:"exit_xray_port,omitempty"`
+	ExitXrayUUID      string                   `json:"exit_xray_uuid,omitempty"`
+	Forwarders        []Forwarder              `json:"forwarders"`
+	ScanCommand       *ScanCommand             `json:"scan_command,omitempty"`
+	SniSpoofingConfig *SniSpoofingConfig       `json:"sni_spoofing_config,omitempty"`
 }
 
 // SniSpoofingConfig represents the sidecar config for SNI-Spoofing
@@ -61,6 +60,22 @@ type SniSpoofingConfig struct {
 	EnableFragment bool   `json:"enable_fragment,omitempty"`
 	FragmentDelay  string `json:"fragment_delay,omitempty"`
 	SniChunk       int    `json:"sni_chunk,omitempty"`
+}
+
+type XrayReverseTunnelConfig struct {
+	UUID             string `json:"uuid"`
+	PortalPort       int    `json:"portal_port"`
+	Transport        string `json:"transport"`
+	Path             string `json:"path,omitempty"`
+	Host             string `json:"host,omitempty"`
+	Security         string `json:"security,omitempty"`
+	ServerName       string `json:"server_name,omitempty"`
+	Fingerprint      string `json:"fingerprint,omitempty"`
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	RealityShortId   string `json:"reality_short_id,omitempty"`
+	RealitySpiderX   string `json:"reality_spider_x,omitempty"`
+	PortalAddress    string `json:"portal_address"`
+	PortalPublicPort int    `json:"portal_public_port"`
 }
 
 type NipovpnConfig struct {
