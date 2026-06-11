@@ -1850,12 +1850,23 @@ sni-chunk = %d
 		return fmt.Errorf("failed to write sni_spoofing ini: %v", err)
 	}
 
+	// Kill existing process if it's already running (e.g. during config update)
+	c.sniSpoofingMu.Lock()
+	if oldCmd, exists := c.sniSpoofingProcesses[t.Id]; exists && oldCmd.Process != nil {
+		syscall.Kill(-oldCmd.Process.Pid, syscall.SIGKILL)
+		oldCmd.Process.Kill()
+	}
+	c.sniSpoofingMu.Unlock()
+
 	cmd := exec.Command("/usr/local/bin/sni-spoofing", "-config", iniPath)
 	
-	if c.forwarderLogFile != nil {
-		cmd.Stdout = c.forwarderLogFile
-		cmd.Stderr = c.forwarderLogFile
-	}
+	// Pipe logs directly to the beautiful logrus logger instead of raw forwarder.log
+	spoofLogger := c.logger.WithFields(log.Fields{
+		"tunnelId": t.Id,
+		"tag":      "sni-spoofing",
+	})
+	cmd.Stdout = spoofLogger.WriterLevel(log.InfoLevel)
+	cmd.Stderr = spoofLogger.WriterLevel(log.ErrorLevel)
 
 	setProcessGroup(cmd)
 
