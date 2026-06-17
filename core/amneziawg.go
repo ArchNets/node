@@ -36,10 +36,12 @@ type AmneziaWGCore struct {
 	Jmax int
 	S1   int
 	S2   int
-	H1   int
-	H2   int
-	H3   int
-	H4   int
+	S3   int
+	S4   int
+	H1   string
+	H2   string
+	H3   string
+	H4   string
 
 	peers      sync.Map // map[string]*WireGuardPeer (key: UUID)
 	users      *WGUserMap
@@ -63,7 +65,7 @@ func (w *AmneziaWGCore) SetTProxyPort(port int) {
 
 // NewAmneziaWGCore creates a new AmneziaWG VPN server
 func NewAmneziaWGCore(tag string, port int, address string, interfaceName string, mtu int, dns string, privateKeyStr string,
-	jc, jmin, jmax, s1, s2, h1, h2, h3, h4 int) (*AmneziaWGCore, error) {
+	jc, jmin, jmax, s1, s2, s3, s4 int, h1, h2, h3, h4 string) (*AmneziaWGCore, error) {
 
 	var privateKey wgtypes.Key
 	var err error
@@ -103,6 +105,8 @@ func NewAmneziaWGCore(tag string, port int, address string, interfaceName string
 		Jmax:          jmax,
 		S1:            s1,
 		S2:            s2,
+		S3:            s3,
+		S4:            s4,
 		H1:            h1,
 		H2:            h2,
 		H3:            h3,
@@ -297,9 +301,9 @@ func (w *AmneziaWGCore) configureInterface() error {
 	}
 
 	// 2. Set Amnezia params
-	// awg set <iface> jc <jc> jmin <jmin> jmax <jmax> s1 <s1> s2 <s2> h1 <code> h2 <code> h3 <code> h4 <code>
-	amneziaCmd := fmt.Sprintf("awg set %s jc %d jmin %d jmax %d s1 %d s2 %d h1 %d h2 %d h3 %d h4 %d",
-		w.InterfaceName, w.Jc, w.Jmin, w.Jmax, w.S1, w.S2, w.H1, w.H2, w.H3, w.H4)
+	// awg set <iface> jc <jc> jmin <jmin> jmax <jmax> s1 <s1> s2 <s2> s3 <s3> s4 <s4> h1 <code> h2 <code> h3 <code> h4 <code>
+	amneziaCmd := fmt.Sprintf("awg set %s jc %d jmin %d jmax %d s1 %d s2 %d s3 %d s4 %d h1 %s h2 %s h3 %s h4 %s",
+		w.InterfaceName, w.Jc, w.Jmin, w.Jmax, w.S1, w.S2, w.S3, w.S4, w.H1, w.H2, w.H3, w.H4)
 
 	if err := execCommand(amneziaCmd); err != nil {
 		return fmt.Errorf("failed to set amnezia params: %w", err)

@@ -5,7 +5,35 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
+
+// FlexString handles JSON values that can be either numbers or strings.
+type FlexString string
+
+func (fs *FlexString) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" || len(data) == 0 {
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*fs = FlexString(s)
+		return nil
+	}
+	var i int64
+	if err := json.Unmarshal(data, &i); err != nil {
+		return err
+	}
+	*fs = FlexString(strconv.FormatInt(i, 10))
+	return nil
+}
+
+func (fs FlexString) String() string {
+	return string(fs)
+}
 
 type ServerConfigResponse struct {
 	Code int    `json:"code"`
@@ -197,15 +225,17 @@ type Protocol struct {
 	WireguardDNS        string `json:"wireguard_dns"`         // DNS servers (e.g., 1.1.1.1,8.8.8.8)
 
 	// AmneziaWG-specific fields
-	AmneziaJc   int `json:"amnezia_jc"`
-	AmneziaJmin int `json:"amnezia_jmin"`
-	AmneziaJmax int `json:"amnezia_jmax"`
-	AmneziaS1   int `json:"amnezia_s1"`
-	AmneziaS2   int `json:"amnezia_s2"`
-	AmneziaH1   int `json:"amnezia_h1"`
-	AmneziaH2   int `json:"amnezia_h2"`
-	AmneziaH3   int `json:"amnezia_h3"`
-	AmneziaH4   int `json:"amnezia_h4"`
+	AmneziaJc   int        `json:"amnezia_jc"`
+	AmneziaJmin int        `json:"amnezia_jmin"`
+	AmneziaJmax int        `json:"amnezia_jmax"`
+	AmneziaS1   int        `json:"amnezia_s1"`
+	AmneziaS2   int        `json:"amnezia_s2"`
+	AmneziaS3   int        `json:"amnezia_s3"`
+	AmneziaS4   int        `json:"amnezia_s4"`
+	AmneziaH1   FlexString `json:"amnezia_h1"`
+	AmneziaH2   FlexString `json:"amnezia_h2"`
+	AmneziaH3   FlexString `json:"amnezia_h3"`
+	AmneziaH4   FlexString `json:"amnezia_h4"`
 
 	// IPsec/IKEv2/L2TP fields
 	IPsecPSK         string `json:"ipsec_psk"`          // Pre-Shared Key for IPsec

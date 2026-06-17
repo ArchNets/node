@@ -89,22 +89,25 @@ func (c *AmneziaWGController) Start() error {
 	}
 
 	// Amnezia Params
-	var jc, jmin, jmax, s1, s2, h1, h2, h3, h4 int
+	var jc, jmin, jmax, s1, s2, s3, s4 int
+	var h1, h2, h3, h4 string
 	if c.info.Protocol != nil {
 		jc = c.info.Protocol.AmneziaJc
 		jmin = c.info.Protocol.AmneziaJmin
 		jmax = c.info.Protocol.AmneziaJmax
 		s1 = c.info.Protocol.AmneziaS1
 		s2 = c.info.Protocol.AmneziaS2
-		h1 = c.info.Protocol.AmneziaH1
-		h2 = c.info.Protocol.AmneziaH2
-		h3 = c.info.Protocol.AmneziaH3
-		h4 = c.info.Protocol.AmneziaH4
+		s3 = c.info.Protocol.AmneziaS3
+		s4 = c.info.Protocol.AmneziaS4
+		h1 = c.info.Protocol.AmneziaH1.String()
+		h2 = c.info.Protocol.AmneziaH2.String()
+		h3 = c.info.Protocol.AmneziaH3.String()
+		h4 = c.info.Protocol.AmneziaH4.String()
 	}
 
 	// Create and start AmneziaWG server
 	wgCore, err := vCore.NewAmneziaWGCore(c.tag, c.info.Protocol.Port, address, interfaceName, mtu, dns, c.info.Protocol.WireguardPrivateKey,
-		jc, jmin, jmax, s1, s2, h1, h2, h3, h4)
+		jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4)
 	if err != nil {
 		return err
 	}

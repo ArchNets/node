@@ -29,10 +29,12 @@ type AmneziaWGCore struct {
 	Jmax int
 	S1   int
 	S2   int
-	H1   int
-	H2   int
-	H3   int
-	H4   int
+	S3   int
+	S4   int
+	H1   string
+	H2   string
+	H3   string
+	H4   string
 
 	peers      sync.Map
 	limiterRef *limiter.Limiter
@@ -43,7 +45,7 @@ type AmneziaWGCore struct {
 }
 
 // NewAmneziaWGCore creates a new AmneziaWG VPN server
-func NewAmneziaWGCore(tag string, port int, address string, interfaceName string, mtu int, dns string, privateKeyStr string, jc, jmin, jmax, s1, s2, h1, h2, h3, h4 int) (*AmneziaWGCore, error) {
+func NewAmneziaWGCore(tag string, port int, address string, interfaceName string, mtu int, dns string, privateKeyStr string, jc, jmin, jmax, s1, s2, s3, s4 int, h1, h2, h3, h4 string) (*AmneziaWGCore, error) {
 	return nil, fmt.Errorf("AmneziaWG is not supported on FreeBSD")
 }
 
