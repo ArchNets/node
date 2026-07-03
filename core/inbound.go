@@ -109,7 +109,13 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 			}
 			in.StreamSetting.Security = "tls"
 			certFile, keyFile := certutil.GetCertPaths(nodeInfo.Protocol.SNI, nodeInfo.Type, nodeInfo.Id)
+			var alpn *coreConf.StringList
+			if len(nodeInfo.Protocol.Alpn) > 0 {
+				a := coreConf.StringList(nodeInfo.Protocol.Alpn)
+				alpn = &a
+			}
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
+				ALPN: alpn,
 				Certs: []*coreConf.TLSCertConfig{
 					{
 						CertFile: certFile,
@@ -135,14 +141,18 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		if err != nil {
 			return nil, fmt.Errorf("marshal reality dest error: %s", err)
 		}
+		shortIds := v.RealityShortIds
+		if len(shortIds) == 0 && v.RealityShortID != "" {
+			shortIds = []string{v.RealityShortID}
+		}
 		in.StreamSetting.REALITYSettings = &coreConf.REALITYConfig{
 			Dest:        d,
 			Xver:        uint64(0),
 			Show:        false,
 			ServerNames: []string{v.SNI},
 			PrivateKey:  v.RealityPrivateKey,
-			ShortIds:    []string{v.RealityShortID},
-			//Mldsa65Seed: v.RealityMldsa65Seed,
+			ShortIds:    shortIds,
+			SpiderX:     v.RealitySpiderX,
 		}
 	default:
 		break
@@ -164,6 +174,25 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 				in.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
 			}
 			in.StreamSetting.SocketSettings.AcceptProxyProtocol = true
+		}
+	}
+
+	// Apply low-level sockopts
+	sockoptConfig := mapSockopt(&nodeInfo.Protocol.Sockopt)
+	if sockoptConfig != nil {
+		if in.StreamSetting == nil {
+			t := coreConf.TransportProtocol(nodeInfo.Protocol.Transport)
+			in.StreamSetting = &coreConf.StreamConfig{
+				Network: &t,
+			}
+		}
+		if in.StreamSetting.SocketSettings == nil {
+			in.StreamSetting.SocketSettings = sockoptConfig
+		} else {
+			// Merge with existing AcceptProxyProtocol logic
+			acceptProxy := in.StreamSetting.SocketSettings.AcceptProxyProtocol
+			in.StreamSetting.SocketSettings = sockoptConfig
+			in.StreamSetting.SocketSettings.AcceptProxyProtocol = acceptProxy
 		}
 	}
 
@@ -205,20 +234,30 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
 		// Add HTTP header obfuscation if configured
 		if nodeInfo.Protocol.TCPHeaderType == "http" {
-			httpHeader := map[string]interface{}{
-				"type":    "http",
-				"request": map[string]interface{}{},
-			}
-			request := httpHeader["request"].(map[string]interface{})
 			path := nodeInfo.Protocol.TCPHeaderPath
 			if path == "" {
 				path = "/"
 			}
-			request["path"] = []string{path}
+			method := nodeInfo.Protocol.TCPHeaderMethod
+			if method == "" {
+				method = "GET"
+			}
+			headers := make(map[string]interface{})
+			// Set host headers if configured
 			if len(nodeInfo.Protocol.TCPHeaderHost) > 0 {
-				request["headers"] = map[string]interface{}{
-					"Host": nodeInfo.Protocol.TCPHeaderHost,
-				}
+				headers["Host"] = nodeInfo.Protocol.TCPHeaderHost
+			}
+			// Set custom headers
+			for k, v := range nodeInfo.Protocol.TCPHeaderHeaders {
+				headers[k] = []string{v}
+			}
+			httpHeader := map[string]interface{}{
+				"type": "http",
+				"request": map[string]interface{}{
+					"method":  method,
+					"path":    []string{path},
+					"headers": headers,
+				},
 			}
 			headerJSON, err := json.Marshal(httpHeader)
 			if err == nil {
@@ -270,20 +309,30 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 		inbound.StreamSetting.TCPSettings = &coreConf.TCPConfig{}
 		// Add HTTP header obfuscation if configured
 		if nodeInfo.Protocol.TCPHeaderType == "http" {
-			httpHeader := map[string]interface{}{
-				"type":    "http",
-				"request": map[string]interface{}{},
-			}
-			request := httpHeader["request"].(map[string]interface{})
 			path := nodeInfo.Protocol.TCPHeaderPath
 			if path == "" {
 				path = "/"
 			}
-			request["path"] = []string{path}
+			method := nodeInfo.Protocol.TCPHeaderMethod
+			if method == "" {
+				method = "GET"
+			}
+			headers := make(map[string]interface{})
+			// Set host headers if configured
 			if len(nodeInfo.Protocol.TCPHeaderHost) > 0 {
-				request["headers"] = map[string]interface{}{
-					"Host": nodeInfo.Protocol.TCPHeaderHost,
-				}
+				headers["Host"] = nodeInfo.Protocol.TCPHeaderHost
+			}
+			// Set custom headers
+			for k, v := range nodeInfo.Protocol.TCPHeaderHeaders {
+				headers[k] = []string{v}
+			}
+			httpHeader := map[string]interface{}{
+				"type": "http",
+				"request": map[string]interface{}{
+					"method":  method,
+					"path":    []string{path},
+					"headers": headers,
+				},
 			}
 			headerJSON, err := json.Marshal(httpHeader)
 			if err == nil {
@@ -463,4 +512,63 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 		return fmt.Errorf("marshal anytls settings error: %s", err)
 	}
 	return nil
+}
+
+func mapSockopt(s *panel.Sockopt) *coreConf.SocketConfig {
+	cfg := &coreConf.SocketConfig{
+		Mark:                 int32(s.Mark),
+		TProxy:               s.TProxy,
+		DomainStrategy:       s.DomainStrategy,
+		DialerProxy:          s.DialerProxy,
+		TCPKeepAliveInterval: int32(s.TCPKeepAliveInterval),
+		TCPKeepAliveIdle:     int32(s.TCPKeepAliveIdle),
+		TCPCongestion:        s.TCPCongestion,
+		TCPWindowClamp:       int32(s.TCPWindowClamp),
+		TCPMaxSeg:            int32(s.TCPMaxSeg),
+		Penetrate:            s.Penetrate,
+		TCPUserTimeout:       int32(s.TCPUserTimeout),
+		V6only:               s.V6Only,
+		Interface:            s.InterfaceName,
+		TcpMptcp:             s.Mptcp,
+		AddressPortStrategy:  s.AddressPortStrategy,
+	}
+	if s.TCPFastOpen {
+		cfg.TFO = true
+	}
+	if s.HappyEyeballs {
+		cfg.HappyEyeballsSettings = &coreConf.HappyEyeballsConfig{
+			PrioritizeIPv6: true,
+		}
+	}
+	if len(s.TrustedXForwardedFor) > 0 {
+		cfg.TrustedXForwardedFor = s.TrustedXForwardedFor
+	}
+	if s.CustomSockopt != "" {
+		// Attempt to parse custom_sockopt if stored as JSON array:
+		var customConfigs []*coreConf.CustomSockoptConfig
+		if err := json.Unmarshal([]byte(s.CustomSockopt), &customConfigs); err == nil {
+			cfg.CustomSockopt = customConfigs
+		} else {
+			// Line-by-line fallback parsing (e.g. system,network,level,opt,value,type)
+			lines := strings.Split(s.CustomSockopt, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Split(line, ",")
+				if len(parts) >= 4 {
+					cfg.CustomSockopt = append(cfg.CustomSockopt, &coreConf.CustomSockoptConfig{
+						Syetem:  "all",
+						Network: "all",
+						Level:   strings.TrimSpace(parts[0]),
+						Type:    strings.TrimSpace(parts[1]),
+						Opt:     strings.TrimSpace(parts[2]),
+						Value:   strings.TrimSpace(parts[3]),
+					})
+				}
+			}
+		}
+	}
+	return cfg
 }

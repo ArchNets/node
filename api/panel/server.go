@@ -149,20 +149,45 @@ type StatsPolicy struct {
 	OutboundDownlink bool `json:"outbound_downlink"`
 }
 
+type Sockopt struct {
+	Mark                 int    `json:"mark"`
+	TCPFastOpen          bool   `json:"tcp_fast_open"`
+	TCPKeepAliveInterval int    `json:"tcp_keep_alive_interval"`
+	TCPKeepAliveIdle     int    `json:"tcp_keep_alive_idle"`
+	TCPMaxSeg            int    `json:"tcp_max_seg"`
+	TCPUserTimeout       int    `json:"tcp_user_timeout"`
+	TCPWindowClamp       int    `json:"tcp_window_clamp"`
+	Mptcp                bool   `json:"mptcp"`
+	Penetrate            bool   `json:"penetrate"`
+	V6Only               bool   `json:"v6_only"`
+	DomainStrategy       string `json:"domain_strategy"`
+	TCPCongestion        string `json:"tcp_congestion"`
+	TProxy               string `json:"tproxy"`
+	DialerProxy          string `json:"dialer_proxy"`
+	InterfaceName        string `json:"interface_name"`
+	TrustedXForwardedFor []string `json:"trusted_x_forwarded_for"`
+	AddressPortStrategy  string `json:"address_port_strategy"`
+	HappyEyeballs        bool   `json:"happy_eyeballs"`
+	CustomSockopt        string `json:"custom_sockopt"`
+}
+
 type Protocol struct {
-	Type                    string `json:"type"`
-	Port                    int    `json:"port"`
-	ListenIP                string `json:"listen_ip"` // Listen IP (default: 0.0.0.0, use 127.0.0.1 for reverse proxy)
-	Enable                  bool   `json:"enable"`
-	Security                string `json:"security"`
-	SNI                     string `json:"sni"`
-	AllowInsecure           bool   `json:"allow_insecure"`
-	Fingerprint             string `json:"fingerprint"`
-	RealityServerAddr       string `json:"reality_server_addr"`
-	RealityServerPort       int    `json:"reality_server_port"`
-	RealityPrivateKey       string `json:"reality_private_key"`
-	RealityPublicKey        string `json:"reality_public_key"`
-	RealityShortID          string `json:"reality_short_id"`
+	Type                    string            `json:"type"`
+	Port                    int               `json:"port"`
+	ListenIP                string            `json:"listen_ip"` // Listen IP (default: 0.0.0.0, use 127.0.0.1 for reverse proxy)
+	Enable                  bool              `json:"enable"`
+	Security                string            `json:"security"`
+	SNI                     string            `json:"sni"`
+	AllowInsecure           bool              `json:"allow_insecure"`
+	Fingerprint             string            `json:"fingerprint"`
+	Alpn                    []string          `json:"alpn"`
+	RealityServerAddr       string            `json:"reality_server_addr"`
+	RealityServerPort       int               `json:"reality_server_port"`
+	RealityPrivateKey       string            `json:"reality_private_key"`
+	RealityPublicKey        string            `json:"reality_public_key"`
+	RealityShortID          string            `json:"reality_short_id"`
+	RealityShortIds         []string          `json:"reality_short_ids"`
+	RealitySpiderX          string            `json:"reality_spider_x"`
 	Transport               string `json:"transport"`
 	Host                    string `json:"host"`
 	Path                    string `json:"path"`
@@ -202,9 +227,12 @@ type Protocol struct {
 	AcceptProxyProtocol     bool   `json:"accept_proxy_protocol"`
 
 	// TCP HTTP Header obfuscation (for VMess/VLESS with tcp transport)
-	TCPHeaderType string   `json:"tcp_header_type"` // "none" or "http"
-	TCPHeaderHost []string `json:"tcp_header_host"` // Host header values (e.g., ["www.digikala.com", "example.com"])
-	TCPHeaderPath string   `json:"tcp_header_path"` // Request path (e.g., "/incredible-offers")
+	TCPHeaderType   string            `json:"tcp_header_type"` // "none" or "http"
+	TCPHeaderHost   []string          `json:"tcp_header_host"` // Host header values (e.g., ["www.digikala.com", "example.com"])
+	TCPHeaderPath   string            `json:"tcp_header_path"` // Request path (e.g., "/incredible-offers")
+	TCPHeaderMethod string            `json:"tcp_header_method"`
+	TCPHeaderHeaders map[string]string `json:"tcp_header_headers"`
+	Sockopt         Sockopt           `json:"sockopt"`
 
 	// SSH-specific fields
 	SSHHostKeyPath string `json:"ssh_host_key_path"` // Path to SSH host key file
