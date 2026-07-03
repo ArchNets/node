@@ -165,7 +165,7 @@ type Sockopt struct {
 	TProxy               string `json:"tproxy"`
 	DialerProxy          string `json:"dialer_proxy"`
 	InterfaceName        string `json:"interface_name"`
-	TrustedXForwardedFor []string `json:"trusted_x_forwarded_for"`
+	TrustedXForwardedFor []string `json:"trustedXForwardedFor"`
 	AddressPortStrategy  string `json:"address_port_strategy"`
 	HappyEyeballs        bool   `json:"happy_eyeballs"`
 	CustomSockopt        string `json:"custom_sockopt"`
