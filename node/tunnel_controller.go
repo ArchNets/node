@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
+
 	"time"
 
 	"sync"
@@ -1856,9 +1856,8 @@ sni-chunk = %d
 
 	// Kill existing process if it's already running (e.g. during config update)
 	c.sniSpoofingMu.Lock()
-	if oldCmd, exists := c.sniSpoofingProcesses[t.Id]; exists && oldCmd.Process != nil {
-		syscall.Kill(-oldCmd.Process.Pid, syscall.SIGKILL)
-		oldCmd.Process.Kill()
+	if oldCmd, exists := c.sniSpoofingProcesses[t.Id]; exists {
+		killProcessGroup(oldCmd)
 	}
 	c.sniSpoofingMu.Unlock()
 
@@ -1898,11 +1897,7 @@ sni-chunk = %d
 func (c *TunnelController) stopAllSniSpoofingProcesses() {
 	c.sniSpoofingMu.Lock()
 	for _, cmd := range c.sniSpoofingProcesses {
-		if cmd != nil && cmd.Process != nil {
-			// Kill the process group to ensure child processes are also terminated
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			cmd.Process.Kill()
-		}
+		killProcessGroup(cmd)
 	}
 	c.sniSpoofingProcesses = make(map[int]*exec.Cmd)
 	c.sniSpoofingMu.Unlock()
