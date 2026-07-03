@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/archnets/node/api/panel"
+	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/router"
 	xnet "github.com/xtls/xray-core/common/net"
@@ -251,6 +252,11 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 						}
 					}
 				}
+
+				// Force gVisor userspace TUN to avoid kernel TUN failures on VPSes
+				// without /dev/net/tun, and to prevent sysctl side effects
+				// (rp_filter=0 globally) that kernel TUN would cause.
+				jsonsettings["noKernelTun"] = true
 			default:
 				continue
 			}
@@ -359,6 +365,11 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 
 			custom_outbound, err := outbound.Build()
 			if err != nil {
+				log.WithFields(log.Fields{
+					"name":     outbounditem.Name,
+					"protocol": outbounditem.Protocol,
+					"err":      err,
+				}).Warn("Failed to build custom outbound, skipping")
 				continue
 			}
 
