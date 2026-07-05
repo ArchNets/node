@@ -106,16 +106,11 @@ func (c *IPsecController) Start() error {
 	c.ipsecCore = vCore.NewIPsecCore(cfg)
 
 	// Inject Xray TPROXY inbound for routing traffic through Xray outbounds
-	// Use unique ports per protocol type to avoid collisions with WireGuard (10800+id)
-	var tproxyPort int
-	switch cfg.Mode {
-	case "ikev2":
-		tproxyPort = 12000 + c.info.Id
-	case "l2tp":
-		tproxyPort = 13000 + c.info.Id
-	default:
-		tproxyPort = 14000 + c.info.Id
-	}
+	// NOTE: previously `12000/13000/14000 + c.info.Id` per mode — same
+	// per-node-only collision bug as WireGuard/AmneziaWG; see
+	// node/tproxy_alloc.go. Mode no longer needs to select a port band since
+	// the allocator guarantees uniqueness regardless of mode.
+	tproxyPort := nextTProxyPort()
 
 	// Use xrayTag (e.g. "ikev2:28") to match panel routing rules, NOT internal tag
 	inboundJSON := fmt.Sprintf(`{

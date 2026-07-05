@@ -114,7 +114,9 @@ func (c *AmneziaWGController) Start() error {
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
 	// Inject Xray TPROXY Inbound
-	tproxyPort := 10800 + c.info.Id
+	// NOTE: previously `10800 + c.info.Id` — same collision bug as
+	// WireGuardController; see node/tproxy_alloc.go.
+	tproxyPort := nextTProxyPort()
 	inboundJSON := fmt.Sprintf(`{
 		"tag": "%s",
 		"port": %d,

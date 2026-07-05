@@ -94,8 +94,11 @@ func (c *WireGuardController) Start() error {
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
 
-	// Inject Xray TPROXY Inbound
-	tproxyPort := 10800 + c.info.Id
+	// NOTE: previously `10800 + c.info.Id` — collided across multiple
+	// WireGuard instances on the same node (same Id), since only one
+	// dokodemo-door inbound can actually bind a given port. See
+	// node/tproxy_alloc.go for the full explanation.
+	tproxyPort := nextTProxyPort()
 	inboundJSON := fmt.Sprintf(`{
 		"tag": "%s",
 		"port": %d,
