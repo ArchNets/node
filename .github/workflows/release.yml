@@ -124,13 +124,13 @@ jobs:
         run: |
           echo "version: $version"
           mkdir -p build_assets
-          GOEXPERIMENT=jsonv2 go build -v -o build_assets/node -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 go build -v -o build_assets/node -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=$version' -s -w -buildid= -checklinkname=0"
 
       - name: Build Mips softfloat
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
         run: |
           echo "version: $version"
-          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/ppnode_softfloat -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/ppnode_softfloat -trimpath -ldflags "-X 'github.com/archnets/node/cmd.version=$version' -s -w -buildid= -checklinkname=0"
       - name: Rename Windows
         if: matrix.goos == 'windows'
         run: |

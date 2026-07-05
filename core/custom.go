@@ -274,6 +274,16 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					Protocol: outbounditem.Protocol,
 					Settings: &rawSettings,
 				}
+				// Log the WireGuard outbound config for debugging
+				debugSettings := make(map[string]interface{})
+				json.Unmarshal(settings, &debugSettings)
+				if _, ok := debugSettings["secretKey"]; ok {
+					debugSettings["secretKey"] = "***REDACTED***"
+				}
+				log.WithFields(log.Fields{
+					"tag":      outbounditem.Name,
+					"settings": debugSettings,
+				}).Info("Built WireGuard outbound config")
 			} else {
 				// Setup transport network
 				transport := outbounditem.Transport

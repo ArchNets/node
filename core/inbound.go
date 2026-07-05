@@ -162,7 +162,12 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	// Set PROXY protocol (centralized handling via SocketSettings only)
 	if nodeInfo.Protocol.AcceptProxyProtocol {
 		if in.StreamSetting == nil {
-			t := coreConf.TransportProtocol(nodeInfo.Protocol.Transport)
+			// Default to "tcp" when transport is empty (e.g., Shadowsocks without obfs)
+			transport := nodeInfo.Protocol.Transport
+			if transport == "" {
+				transport = "tcp"
+			}
+			t := coreConf.TransportProtocol(transport)
 			in.StreamSetting = &coreConf.StreamConfig{
 				Network: &t,
 				SocketSettings: &coreConf.SocketConfig{
@@ -181,7 +186,12 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	sockoptConfig := mapSockopt(&nodeInfo.Protocol.Sockopt)
 	if sockoptConfig != nil {
 		if in.StreamSetting == nil {
-			t := coreConf.TransportProtocol(nodeInfo.Protocol.Transport)
+			// Default to "tcp" when transport is empty (e.g., Shadowsocks without obfs)
+			transport := nodeInfo.Protocol.Transport
+			if transport == "" {
+				transport = "tcp"
+			}
+			t := coreConf.TransportProtocol(transport)
 			in.StreamSetting = &coreConf.StreamConfig{
 				Network: &t,
 			}
