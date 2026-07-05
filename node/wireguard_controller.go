@@ -107,6 +107,10 @@ func (c *WireGuardController) Start() error {
 			"network": "tcp,udp",
 			"followRedirect": true
 		},
+		"sniffing": {
+			"enabled": true,
+			"destOverride": ["http", "tls", "quic"]
+		},
 		"streamSettings": {
 			"sockopt": {
 				"tproxy": "tproxy"
