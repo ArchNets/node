@@ -68,7 +68,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"amneziawg",
 		"ikev2",
 		"l2tp",
-		"ipsec":
+		"ipsec",
+		"openvpn":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}
