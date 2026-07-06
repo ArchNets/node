@@ -22,6 +22,7 @@ type Node struct {
 	wireguardControllers []*WireGuardController
 	amneziawgControllers []*AmneziaWGController
 	ipsecControllers     []*IPsecController
+	openvpnControllers   []*OpenVPNController
 	tunnelController     *TunnelController
 }
 
@@ -33,6 +34,7 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 		wireguardControllers: make([]*WireGuardController, 0),
 		amneziawgControllers: make([]*AmneziaWGController, 0),
 		ipsecControllers:     make([]*IPsecController, 0),
+		openvpnControllers:   make([]*OpenVPNController, 0),
 	}
 	pushinterval := serverconfig.Data.PushInterval
 	if pushinterval <= 0 {
@@ -133,6 +135,12 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"type": nodeconfig.Type,
 				"port": nodeconfig.Port,
 			}).Info("IPsec/IKEv2 protocol detected, using IPsec controller")
+		} else if nodeconfig.Type == "openvpn" {
+			node.openvpnControllers = append(node.openvpnControllers, NewOpenVPNController(core, p, n, isPrimaryReporter))
+			log.WithFields(log.Fields{
+				"type": "openvpn",
+				"port": nodeconfig.Port,
+			}).Info("OpenVPN protocol detected, using OpenVPN controller")
 		} else {
 			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter))
 		}
@@ -205,6 +213,17 @@ func (n *Node) Start() error {
 		}
 	}
 
+	// Start OpenVPN controllers
+	for i := range n.openvpnControllers {
+		err := n.openvpnControllers[i].Start()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"tag": n.openvpnControllers[i].tag,
+				"err": err,
+			}).Error("Failed to start OpenVPN node (openvpn binary may not be installed)")
+		}
+	}
+
 	// Start Tunnel controller
 	if n.tunnelController != nil {
 		err := n.tunnelController.Start()
@@ -272,6 +291,15 @@ func (n *Node) Close() {
 		}
 	}
 	n.ipsecControllers = nil
+
+	// Close OpenVPN controllers
+	for _, c := range n.openvpnControllers {
+		err := c.Close()
+		if err != nil {
+			log.WithError(err).Error("Error closing OpenVPN controller")
+		}
+	}
+	n.openvpnControllers = nil
 
 	// Close Tunnel controller
 	if n.tunnelController != nil {

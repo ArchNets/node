@@ -272,6 +272,10 @@ type Protocol struct {
 	IPsecDNS         string `json:"ipsec_dns"`          // DNS servers for VPN clients (e.g. "8.8.8.8,1.1.1.1")
 	IPsecSubnet      string `json:"ipsec_subnet"`       // IP pool subnet (e.g. "10.10.0.0/16")
 	IPsecMTU         int    `json:"ipsec_mtu"`          // MTU for L2TP PPP links (default: 1400)
+
+	// OpenVPN-specific fields
+	OpenVPNProto    string `json:"openvpn_proto"`     // Transport: "udp" or "tcp" (default: udp)
+	OpenVPNTlsCrypt string `json:"openvpn_tls_crypt"` // tls-crypt static key content (from admin panel)
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
