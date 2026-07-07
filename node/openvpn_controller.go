@@ -1,7 +1,6 @@
 package node
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -14,7 +13,6 @@ import (
 	vCore "github.com/archnets/node/core"
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
-	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 // OpenVPNController manages OpenVPN protocol nodes.
@@ -77,37 +75,13 @@ func (c *OpenVPNController) Start() error {
 		proto = "udp"
 	}
 
-	tproxyPort := nextTProxyPort()
-	inboundJSON := fmt.Sprintf(`{
-		"tag": "%s",
-		"port": %d,
-		"protocol": "dokodemo-door",
-		"settings": {
-			"network": "tcp,udp",
-			"followRedirect": true
-		},
-		"sniffing": {
-			"enabled": true,
-			"destOverride": ["http", "tls", "quic"]
-		},
-		"streamSettings": {
-			"sockopt": {
-				"tproxy": "tproxy"
-			}
-		}
-	}`, c.tag, tproxyPort)
-
-	var inConf coreConf.InboundDetourConfig
-	if err := json.Unmarshal([]byte(inboundJSON), &inConf); err != nil {
-		return fmt.Errorf("failed to parse tproxy inbound for %s: %v", c.tag, err)
-	}
-	inboundConfig, err := inConf.Build()
-	if err != nil {
-		return fmt.Errorf("failed to build tproxy inbound for %s: %v", c.tag, err)
-	}
-	if err := c.xrayCore.AddInbound(inboundConfig); err != nil {
-		return fmt.Errorf("failed to add tproxy inbound for %s: %v", c.tag, err)
-	}
+	// TODO: Re-enable TPROXY once Xray routing for OpenVPN traffic is debugged.
+	// For now, skip TPROXY and let setupNAT use MASQUERADE (direct NAT) instead.
+	// The TProxyPort stays at 0, so setupNAT takes the MASQUERADE-only path.
+	//
+	// tproxyPort := nextTProxyPort()
+	// ... (Xray dokodemo-door inbound on tproxyPort) ...
+	// c.openvpnCore.SetTProxyPort(tproxyPort)
 
 	workDir := filepath.Join("/etc/archnets/openvpn", c.tag)
 
@@ -124,7 +98,7 @@ func (c *OpenVPNController) Start() error {
 		return err
 	}
 	c.openvpnCore = openvpnCore
-	c.openvpnCore.SetTProxyPort(tproxyPort)
+	// TProxyPort left at 0 — setupNAT will use MASQUERADE only
 	c.openvpnCore.SetLimiter(c.limiter)
 	c.openvpnCore.AddUsers(users)
 
