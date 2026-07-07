@@ -240,25 +240,27 @@ func (o *OpenVPNCore) eventLoop() {
 }
 
 func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent) {
-	username := ev.env["username"]
+	// With per-user client certs, OpenVPN populates common_name from the
+	// cert's CN (which is the user's UUID). No username/password involved.
+	uuid := ev.env["common_name"]
 	ip := extractIP(ev.env["untrusted_ip"])
 	if ip == "" {
 		ip = extractIP(ev.env["trusted_ip"])
 	}
 
 	o.users.mu.RLock()
-	uid, ok := o.users.uuidToID[username]
+	uid, ok := o.users.uuidToID[uuid]
 	o.users.mu.RUnlock()
 
 	if !ok {
-		log.WithFields(log.Fields{"tag": o.Tag, "username": username, "ip": ip}).
+		log.WithFields(log.Fields{"tag": o.Tag, "cn": uuid, "ip": ip}).
 			Warn("OpenVPN auth rejected: unknown user")
 		_ = o.mgmt.denyClient(ev.cid, ev.kid, "unknown user")
 		return
 	}
 
 	if o.limiterRef != nil {
-		tagUUID := format.UserTag(o.Tag, username)
+		tagUUID := format.UserTag(o.Tag, uuid)
 		_, reject := o.limiterRef.CheckLimit(tagUUID, ip, true)
 		if reject {
 			log.WithFields(log.Fields{"tag": o.Tag, "uid": uid, "ip": ip}).
@@ -268,7 +270,7 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent) {
 		}
 	}
 
-	o.sessions.Store(ev.cid, &ovpnSession{UID: uid, UUID: username, IP: ip, CID: ev.cid})
+	o.sessions.Store(ev.cid, &ovpnSession{UID: uid, UUID: uuid, IP: ip, CID: ev.cid})
 
 	if err := o.mgmt.authorizeClient(ev.cid, ev.kid); err != nil {
 		log.WithError(err).Error("OpenVPN: failed to send client-auth-nt")
@@ -335,10 +337,16 @@ cert %s
 key %s
 tls-crypt %s
 
-# Username/password auth only — no per-client certs, which is what makes
-# runtime AddUsers/DelUsers possible without touching a PKI.
-verify-client-cert none
-username-as-common-name
+# Each user has a client certificate (CN = UUID) signed by the same CA.
+# OpenVPN verifies the cert is CA-signed; handleClientConnect still
+# enforces whether that UUID is currently allowed (userMap lookup) and
+# device limits (limiter.CheckLimit). Revocation = remove from userMap,
+# no CRL needed.
+
+# A single user may connect from multiple devices using the same cert/CN,
+# so duplicate-cn is still required. CheckLimit remains the sole enforcer
+# of the actual per-user device count.
+duplicate-cn
 
 # Hand every connection decision to this process instead of deciding locally.
 management %s unix
