@@ -240,27 +240,30 @@ func (o *OpenVPNCore) eventLoop() {
 }
 
 func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent) {
-	// With per-user client certs, OpenVPN populates common_name from the
-	// cert's CN (which is the user's UUID). No username/password involved.
-	uuid := ev.env["common_name"]
+	// management-client-auth defers username/password auth to this handler.
+	// The client profile includes <cert>/<key> to satisfy mobile/Windows apps
+	// that prompt when no cert is present, but actual auth is username-based:
+	// the UUID is sent as username via auth-user-pass, and username-as-common-name
+	// maps it to common_name on the server side.
+	username := ev.env["username"]
 	ip := extractIP(ev.env["untrusted_ip"])
 	if ip == "" {
 		ip = extractIP(ev.env["trusted_ip"])
 	}
 
 	o.users.mu.RLock()
-	uid, ok := o.users.uuidToID[uuid]
+	uid, ok := o.users.uuidToID[username]
 	o.users.mu.RUnlock()
 
 	if !ok {
-		log.WithFields(log.Fields{"tag": o.Tag, "cn": uuid, "ip": ip}).
+		log.WithFields(log.Fields{"tag": o.Tag, "username": username, "ip": ip}).
 			Warn("OpenVPN auth rejected: unknown user")
 		_ = o.mgmt.denyClient(ev.cid, ev.kid, "unknown user")
 		return
 	}
 
 	if o.limiterRef != nil {
-		tagUUID := format.UserTag(o.Tag, uuid)
+		tagUUID := format.UserTag(o.Tag, username)
 		_, reject := o.limiterRef.CheckLimit(tagUUID, ip, true)
 		if reject {
 			log.WithFields(log.Fields{"tag": o.Tag, "uid": uid, "ip": ip}).
@@ -270,7 +273,7 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent) {
 		}
 	}
 
-	o.sessions.Store(ev.cid, &ovpnSession{UID: uid, UUID: uuid, IP: ip, CID: ev.cid})
+	o.sessions.Store(ev.cid, &ovpnSession{UID: uid, UUID: username, IP: ip, CID: ev.cid})
 
 	if err := o.mgmt.authorizeClient(ev.cid, ev.kid); err != nil {
 		log.WithError(err).Error("OpenVPN: failed to send client-auth-nt")
@@ -337,15 +340,15 @@ cert %s
 key %s
 tls-crypt %s
 
-# Each user has a client certificate (CN = UUID) signed by the same CA.
-# OpenVPN verifies the cert is CA-signed; handleClientConnect still
-# enforces whether that UUID is currently allowed (userMap lookup) and
-# device limits (limiter.CheckLimit). Revocation = remove from userMap,
-# no CRL needed.
+# Client profiles include <cert>/<key> to satisfy OpenVPN Connect apps
+# (Windows/Android/iOS) that prompt when no cert is present. The server
+# does NOT verify those certs — auth is username-based via management.
+verify-client-cert none
+username-as-common-name
 
-# A single user may connect from multiple devices using the same cert/CN,
-# so duplicate-cn is still required. CheckLimit remains the sole enforcer
-# of the actual per-user device count.
+# Every device authenticates with the same UUID-as-username, so OpenVPN
+# would cap each user to one connection without this. CheckLimit remains
+# the sole enforcer of the actual per-user device count.
 duplicate-cn
 
 # Hand every connection decision to this process instead of deciding locally.
