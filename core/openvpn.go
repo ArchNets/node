@@ -123,7 +123,12 @@ func (o *OpenVPNCore) Start() error {
 	// Wait for the management socket to appear.
 	mgmt, err := waitForManagementSocket(o.socketPath, 5*time.Second)
 	if err != nil {
-		_ = o.cmd.Process.Kill()
+		// Check if OpenVPN exited early (config error, missing file, etc.)
+		if waitErr := o.cmd.Wait(); waitErr != nil {
+			log.WithFields(log.Fields{"tag": o.Tag, "exit_error": waitErr}).Error("openvpn process exited prematurely")
+		} else {
+			_ = o.cmd.Process.Kill()
+		}
 		return fmt.Errorf("connect to management socket: %w", err)
 	}
 	o.mgmt = mgmt
@@ -338,6 +343,7 @@ dev-type tun
 ca %s
 cert %s
 key %s
+dh none
 tls-crypt %s
 
 # Client profiles include <cert>/<key> to satisfy OpenVPN Connect apps
