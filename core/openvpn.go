@@ -1,7 +1,14 @@
 package core
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,7 +94,7 @@ func NewOpenVPNCore(tag string, port int, proto, workDir, certFile, keyFile, tls
 // Start writes the server config, ensures cert/key/tls-crypt material exists,
 // launches the real openvpn binary, and connects to its management socket.
 func (o *OpenVPNCore) Start() error {
-	certFile, keyFile, err := o.ensureCertMaterial()
+	caFile, serverCertFile, serverKeyFile, err := o.ensureCertMaterial()
 	if err != nil {
 		return fmt.Errorf("ensure cert material: %w", err)
 	}
@@ -101,7 +108,7 @@ func (o *OpenVPNCore) Start() error {
 	}
 
 	confPath := filepath.Join(o.WorkDir, "server.conf")
-	if err := o.writeServerConf(confPath, certFile, keyFile, taKeyPath); err != nil {
+	if err := o.writeServerConf(confPath, caFile, serverCertFile, serverKeyFile, taKeyPath); err != nil {
 		return fmt.Errorf("write server.conf: %w", err)
 	}
 
@@ -318,23 +325,141 @@ func (o *OpenVPNCore) handleByteCount(ev ovpnEvent) {
 	sess.LastBytesOut = ev.out
 }
 
-// ensureCertMaterial returns a usable cert/key pair.
-func (o *OpenVPNCore) ensureCertMaterial() (certFile, keyFile string, err error) {
+// ensureCertMaterial reads the CA cert/key from disk (written by requestCert),
+// generates a server certificate signed by that CA with TLS Web Server Auth EKU,
+// and returns (caFile, serverCertFile, serverKeyFile).
+func (o *OpenVPNCore) ensureCertMaterial() (caFile, serverCertFile, serverKeyFile string, err error) {
 	if o.CertFile == "" || o.KeyFile == "" {
-		return "", "", fmt.Errorf("missing cert or key path")
+		return "", "", "", fmt.Errorf("missing CA cert or key path")
 	}
-
 	if _, err := os.Stat(o.CertFile); err != nil {
-		return "", "", fmt.Errorf("cert file does not exist: %w", err)
+		return "", "", "", fmt.Errorf("CA cert file does not exist: %w", err)
 	}
 	if _, err := os.Stat(o.KeyFile); err != nil {
-		return "", "", fmt.Errorf("key file does not exist: %w", err)
+		return "", "", "", fmt.Errorf("CA key file does not exist: %w", err)
 	}
 
-	return o.CertFile, o.KeyFile, nil
+	// Paths for the generated server cert/key
+	srvCertPath := filepath.Join(o.WorkDir, "server.crt")
+	srvKeyPath := filepath.Join(o.WorkDir, "server.key")
+
+	// Regenerate on every start to pick up any CA rotation from the panel.
+	caCert, caKey, err := loadCACertAndKey(o.CertFile, o.KeyFile)
+	if err != nil {
+		return "", "", "", fmt.Errorf("load CA material: %w", err)
+	}
+
+	if err := generateServerCert(caCert, caKey, srvCertPath, srvKeyPath); err != nil {
+		return "", "", "", fmt.Errorf("generate server cert: %w", err)
+	}
+
+	log.WithField("tag", o.Tag).Info("OpenVPN server certificate generated and signed by CA")
+	return o.CertFile, srvCertPath, srvKeyPath, nil
 }
 
-func (o *OpenVPNCore) writeServerConf(path, certFile, keyFile, taKeyPath string) error {
+// loadCACertAndKey reads a PEM-encoded CA certificate and private key from disk.
+func loadCACertAndKey(certPath, keyPath string) (*x509.Certificate, interface{}, error) {
+	// Parse CA cert
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read CA cert: %w", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return nil, nil, fmt.Errorf("no PEM block found in CA cert")
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse CA cert: %w", err)
+	}
+
+	// Parse CA key (supports EC and PKCS8)
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read CA key: %w", err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, nil, fmt.Errorf("no PEM block found in CA key")
+	}
+
+	var caKey interface{}
+	switch keyBlock.Type {
+	case "EC PRIVATE KEY":
+		caKey, err = x509.ParseECPrivateKey(keyBlock.Bytes)
+	case "PRIVATE KEY":
+		caKey, err = x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	case "RSA PRIVATE KEY":
+		caKey, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	default:
+		return nil, nil, fmt.Errorf("unsupported CA key type: %s", keyBlock.Type)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse CA key: %w", err)
+	}
+
+	return caCert, caKey, nil
+}
+
+// generateServerCert creates an ECDSA P-256 server certificate signed by the CA,
+// with the TLS Web Server Authentication EKU that OpenVPN clients require
+// when configured with remote-cert-tls server.
+func generateServerCert(caCert *x509.Certificate, caKey interface{}, certPath, keyPath string) error {
+	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate server key: %w", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generate serial: %w", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "ArchNet OpenVPN Server",
+		},
+		NotBefore:             time.Now().Add(-5 * time.Minute),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &serverKey.PublicKey, caKey)
+	if err != nil {
+		return fmt.Errorf("sign server cert: %w", err)
+	}
+
+	// Write server cert
+	certOut, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("create server cert file: %w", err)
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return fmt.Errorf("write server cert PEM: %w", err)
+	}
+
+	// Write server key
+	keyDER, err := x509.MarshalECPrivateKey(serverKey)
+	if err != nil {
+		return fmt.Errorf("marshal server key: %w", err)
+	}
+	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create server key file: %w", err)
+	}
+	defer keyOut.Close()
+	if err := pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		return fmt.Errorf("write server key PEM: %w", err)
+	}
+
+	return nil
+}
+
+func (o *OpenVPNCore) writeServerConf(path, caFile, certFile, keyFile, taKeyPath string) error {
 	conf := fmt.Sprintf(`port %d
 proto %s
 dev %s
@@ -376,7 +501,7 @@ user nobody
 group nogroup
 
 verb 3
-`, o.Port, o.Proto, o.InterfaceName, certFile, certFile, keyFile, taKeyPath, o.socketPath)
+`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath)
 
 	return os.WriteFile(path, []byte(conf), 0600)
 }
