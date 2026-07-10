@@ -62,12 +62,14 @@ func (c *SSHController) Start() error {
 
 	// Determine host key path
 	hostKeyPath := ""
-	if c.info.Protocol != nil && c.info.Protocol.SSHHostKeyPath != "" {
+	udpgwAddr := ""
+	if c.info.Protocol != nil {
 		hostKeyPath = c.info.Protocol.SSHHostKeyPath
+		udpgwAddr = c.info.Protocol.SSHUdpgwAddr
 	}
 
 	// Create and start SSH server
-	sshCore, err := vCore.NewSSHCore(c.tag, c.info.Protocol.Port, hostKeyPath)
+	sshCore, err := vCore.NewSSHCore(c.tag, c.info.Protocol.Port, hostKeyPath, udpgwAddr)
 	if err != nil {
 		return err
 	}

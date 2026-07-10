@@ -26,6 +26,7 @@ import (
 type SSHCore struct {
 	Tag        string
 	Port       int
+	udpgwAddr  string // e.g. "127.0.0.1:7300"; empty disables udpgw interception
 	config     *ssh.ServerConfig
 	listener   net.Listener
 	users      *SSHUserMap
@@ -63,10 +64,14 @@ type UserTraffic struct {
 }
 
 // NewSSHCore creates a new SSH tunnel server
-func NewSSHCore(tag string, port int, hostKeyPath string) (*SSHCore, error) {
+func NewSSHCore(tag string, port int, hostKeyPath string, udpgwAddr string) (*SSHCore, error) {
+	if udpgwAddr == "" {
+		udpgwAddr = "127.0.0.1:7300" // default, matches badvpn-udpgw convention
+	}
 	sshCore := &SSHCore{
-		Tag:  tag,
-		Port: port,
+		Tag:       tag,
+		Port:      port,
+		udpgwAddr: udpgwAddr,
 		users: &SSHUserMap{
 			uuidToID: make(map[string]int),
 			idToUUID: make(map[int]string),
@@ -301,6 +306,20 @@ func (s *SSHCore) handleDirectTCPIP(newChannel ssh.NewChannel, uid int) {
 		"uid":  uid,
 		"dest": dest,
 	}).Info("SSH port forward request")
+
+	// Intercept the well-known udpgw address instead of dialing it as a
+	// real TCP destination. Clients (HTTP Injector, NPV Tunnel, etc.)
+	// speak the udpgw framing protocol over this channel to get UDP
+	// forwarding through what is otherwise a TCP-only SSH tunnel.
+	if s.udpgwAddr != "" && dest == s.udpgwAddr {
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			return
+		}
+		go ssh.DiscardRequests(requests)
+		s.handleUdpgwChannel(channel, uid)
+		return
+	}
 
 	// Connect to destination
 	destConn, err := net.DialTimeout("tcp", dest, 10*time.Second)

@@ -14,7 +14,7 @@ import (
 
 func TestNewSSHCore(t *testing.T) {
 	// Test creating SSH core with auto-generated host key
-	sshCore, err := NewSSHCore("test-ssh", 0, "") // port 0 = auto-assign
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "") // port 0 = auto-assign
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestNewSSHCore(t *testing.T) {
 }
 
 func TestSSHCoreAddDelUsers(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "")
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestSSHCoreAddDelUsers(t *testing.T) {
 }
 
 func TestSSHCoreTrafficAccounting(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "")
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestSSHCoreTrafficAccounting(t *testing.T) {
 }
 
 func TestSSHCoreStartStop(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "") // port 0 = auto-assign
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "") // port 0 = auto-assign
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestSSHCoreStartStop(t *testing.T) {
 }
 
 func TestSSHCoreAuthentication(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "")
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestSSHCoreAuthentication(t *testing.T) {
 }
 
 func TestSSHCoreShellRejected(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "")
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestSSHCoreShellRejected(t *testing.T) {
 }
 
 func TestSSHCorePortForward(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "")
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestSSHCorePortForward(t *testing.T) {
 }
 
 func TestSSHCoreGetOnlineUsers(t *testing.T) {
-	sshCore, err := NewSSHCore("test-ssh", 0, "")
+	sshCore, err := NewSSHCore("test-ssh", 0, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create SSHCore: %v", err)
 	}

@@ -237,6 +237,7 @@ type Protocol struct {
 	// SSH-specific fields
 	SSHHostKeyPath string `json:"ssh_host_key_path"` // Path to SSH host key file
 	SSHBanner      string `json:"ssh_banner"`        // Custom SSH banner message
+	SSHUdpgwAddr   string `json:"ssh_udpgw_addr"`     // Local addr to intercept as native udpgw (default "127.0.0.1:7300")
 
 	// ShadowTLS-specific fields
 	ShadowTLSVersion    int    `json:"shadowtls_version"`     // 1, 2 or 3
