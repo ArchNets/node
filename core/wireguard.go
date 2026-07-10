@@ -766,8 +766,19 @@ func getDefaultInterface() (string, error) {
 	return "", fmt.Errorf("default interface not found")
 }
 
+// execMu serializes all shell-outs from this package. iptables invocations
+// don't pass -w/--wait, so without this, concurrent Start()/Close() calls
+// across protocol controllers (see node.Start/node.Close) can race on the
+// kernel xtables lock and silently fail to add/remove a rule. These calls
+// are infrequent (only at controller start/stop, not a hot path), so
+// serializing them here costs nothing in practice.
+var execMu sync.Mutex
+
 // execCommand executes a shell command (helper for ip commands)
 func execCommand(cmd string) error {
+	execMu.Lock()
+	defer execMu.Unlock()
+
 	parts := strings.Fields(cmd)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")

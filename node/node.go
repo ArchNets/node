@@ -2,6 +2,7 @@ package node
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/conf"
@@ -149,82 +150,111 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	return node, nil
 }
 
+// startParallel runs start(item) for every item concurrently and returns
+// any errors collected, in no particular order. Used to start independent
+// controller instances (different ports/tags, no ordering dependency)
+// concurrently instead of blocking one after another.
+func startParallel[T any](items []T, start func(T) error) []error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(items))
+
+	for _, item := range items {
+		wg.Add(1)
+		go func(it T) {
+			defer wg.Done()
+			if err := start(it); err != nil {
+				errCh <- err
+			}
+		}(item)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errs
+}
+
 func (n *Node) Start() error {
 	// Start Xray controllers
-	for i := range n.xrayControllers {
-		err := n.xrayControllers[i].Start()
-		if err != nil {
-			return fmt.Errorf("failed to start xray node [%s-%s-%d]: %s",
-				n.xrayControllers[i].apiClient.APIHost,
-				n.xrayControllers[i].info.Type,
-				n.xrayControllers[i].info.Id,
-				err)
+	if errs := startParallel(n.xrayControllers, func(c *Controller) error {
+		if err := c.Start(); err != nil {
+			return fmt.Errorf("xray node [%s-%s-%d]: %w",
+				c.apiClient.APIHost, c.info.Type, c.info.Id, err)
 		}
+		return nil
+	}); len(errs) > 0 {
+		return fmt.Errorf("failed to start xray node: %s", errs[0])
 	}
 
 	// Start SSH controllers
-	for i := range n.sshControllers {
-		err := n.sshControllers[i].Start()
-		if err != nil {
-			return fmt.Errorf("failed to start ssh node [%s]: %s",
-				n.sshControllers[i].tag,
-				err)
+	if errs := startParallel(n.sshControllers, func(c *SSHController) error {
+		if err := c.Start(); err != nil {
+			return fmt.Errorf("ssh node [%s]: %w", c.tag, err)
 		}
+		return nil
+	}); len(errs) > 0 {
+		return errs[0]
 	}
 
 	// Start ShadowTLS controllers
-	for i := range n.shadowtlsControllers {
-		err := n.shadowtlsControllers[i].Start()
-		if err != nil {
-			return fmt.Errorf("failed to start shadowtls node [%s]: %s",
-				n.shadowtlsControllers[i].tag,
-				err)
+	if errs := startParallel(n.shadowtlsControllers, func(c *ShadowTLSController) error {
+		if err := c.Start(); err != nil {
+			return fmt.Errorf("shadowtls node [%s]: %w", c.tag, err)
 		}
+		return nil
+	}); len(errs) > 0 {
+		return errs[0]
 	}
 
 	// Start WireGuard controllers
-	for i := range n.wireguardControllers {
-		err := n.wireguardControllers[i].Start()
-		if err != nil {
-			return fmt.Errorf("failed to start wireguard node [%s]: %s",
-				n.wireguardControllers[i].tag,
-				err)
+	if errs := startParallel(n.wireguardControllers, func(c *WireGuardController) error {
+		if err := c.Start(); err != nil {
+			return fmt.Errorf("wireguard node [%s]: %w", c.tag, err)
 		}
+		return nil
+	}); len(errs) > 0 {
+		return errs[0]
 	}
 
 	// Start AmneziaWG controllers
-	for i := range n.amneziawgControllers {
-		err := n.amneziawgControllers[i].Start()
-		if err != nil {
-			return fmt.Errorf("failed to start amneziawg node [%s]: %s",
-				n.amneziawgControllers[i].tag,
-				err)
+	if errs := startParallel(n.amneziawgControllers, func(c *AmneziaWGController) error {
+		if err := c.Start(); err != nil {
+			return fmt.Errorf("amneziawg node [%s]: %w", c.tag, err)
 		}
+		return nil
+	}); len(errs) > 0 {
+		return errs[0]
 	}
 
-	// Start IPsec controllers
-	for i := range n.ipsecControllers {
-		err := n.ipsecControllers[i].Start()
-		if err != nil {
+	// Start IPsec controllers (log-and-continue on failure, matching prior behavior)
+	startParallel(n.ipsecControllers, func(c *IPsecController) error {
+		if err := c.Start(); err != nil {
 			log.WithFields(log.Fields{
-				"tag": n.ipsecControllers[i].tag,
+				"tag": c.tag,
 				"err": err,
 			}).Error("Failed to start IPsec node (strongSwan may not be installed)")
 		}
-	}
+		return nil
+	})
 
-	// Start OpenVPN controllers
-	for i := range n.openvpnControllers {
-		err := n.openvpnControllers[i].Start()
-		if err != nil {
+	// Start OpenVPN controllers (log-and-continue on failure, matching prior behavior)
+	startParallel(n.openvpnControllers, func(c *OpenVPNController) error {
+		if err := c.Start(); err != nil {
 			log.WithFields(log.Fields{
-				"tag": n.openvpnControllers[i].tag,
+				"tag": c.tag,
 				"err": err,
 			}).Error("Failed to start OpenVPN node (openvpn binary may not be installed)")
 		}
-	}
+		return nil
+	})
 
-	// Start Tunnel controller
+	// Start Tunnel controller -- kept sequential and last, since it may
+	// depend on the other controllers already being up (allocated ports,
+	// exit node config, etc.)
 	if n.tunnelController != nil {
 		err := n.tunnelController.Start()
 		if err != nil {
@@ -237,68 +267,50 @@ func (n *Node) Start() error {
 	return nil
 }
 
+// closeParallel runs close(item) for every item concurrently, logging
+// individual errors with the given label instead of blocking one after
+// another. Mirrors startParallel's concurrency model for shutdown.
+func closeParallel[T any](items []T, label string, close func(T) error) {
+	var wg sync.WaitGroup
+	for _, item := range items {
+		wg.Add(1)
+		go func(it T) {
+			defer wg.Done()
+			if err := close(it); err != nil {
+				log.WithError(err).Errorf("Error closing %s controller", label)
+			}
+		}(item)
+	}
+	wg.Wait()
+}
+
 func (n *Node) Close() {
 	// Close Xray controllers
-	for _, c := range n.xrayControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing Xray controller")
-		}
-	}
+	closeParallel(n.xrayControllers, "Xray", func(c *Controller) error { return c.Close() })
 	n.xrayControllers = nil
 
 	// Close SSH controllers
-	for _, c := range n.sshControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing SSH controller")
-		}
-	}
+	closeParallel(n.sshControllers, "SSH", func(c *SSHController) error { return c.Close() })
 	n.sshControllers = nil
 
 	// Close ShadowTLS controllers
-	for _, c := range n.shadowtlsControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing ShadowTLS controller")
-		}
-	}
+	closeParallel(n.shadowtlsControllers, "ShadowTLS", func(c *ShadowTLSController) error { return c.Close() })
 	n.shadowtlsControllers = nil
 
 	// Close WireGuard controllers
-	for _, c := range n.wireguardControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing WireGuard controller")
-		}
-	}
+	closeParallel(n.wireguardControllers, "WireGuard", func(c *WireGuardController) error { return c.Close() })
 	n.wireguardControllers = nil
 
 	// Close AmneziaWG controllers
-	for _, c := range n.amneziawgControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing AmneziaWG controller")
-		}
-	}
+	closeParallel(n.amneziawgControllers, "AmneziaWG", func(c *AmneziaWGController) error { return c.Close() })
 	n.amneziawgControllers = nil
 
 	// Close IPsec controllers
-	for _, c := range n.ipsecControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing IPsec controller")
-		}
-	}
+	closeParallel(n.ipsecControllers, "IPsec", func(c *IPsecController) error { return c.Close() })
 	n.ipsecControllers = nil
 
 	// Close OpenVPN controllers
-	for _, c := range n.openvpnControllers {
-		err := c.Close()
-		if err != nil {
-			log.WithError(err).Error("Error closing OpenVPN controller")
-		}
-	}
+	closeParallel(n.openvpnControllers, "OpenVPN", func(c *OpenVPNController) error { return c.Close() })
 	n.openvpnControllers = nil
 
 	// Close Tunnel controller
