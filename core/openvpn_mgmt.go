@@ -195,6 +195,11 @@ func (c *ovpnMgmtClient) readLoop() {
 				in, _ := strconv.ParseInt(parts[1], 10, 64)
 				out, _ := strconv.ParseInt(parts[2], 10, 64)
 				c.events <- ovpnEvent{kind: "BYTECOUNT_CLI", cid: parts[0], in: in, out: out}
+			} else {
+				// Don't drop silently -- if a future OpenVPN version ever
+				// changes this format, we want it visible instead of
+				// traffic accounting quietly going dark on that server.
+				log.WithField("line", line).Warn("openvpn management: malformed BYTECOUNT_CLI, dropping")
 			}
 
 		default:
