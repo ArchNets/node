@@ -174,6 +174,19 @@ func (o *OpenVPNCore) Stop() error {
 	}
 	_ = os.Remove(o.socketPath)
 
+	// SIGKILL doesn't give OpenVPN a chance to run its own interface
+	// teardown, so the TUN/DCO interface can be left behind. The next
+	// Start() then fails to reattach to it (TUNSETIFF: Invalid argument)
+	// because its state doesn't match a fresh attach request. Force
+	// cleanup explicitly rather than relying on process death alone.
+	if err := execCommand(fmt.Sprintf("ip link delete %s", o.InterfaceName)); err != nil {
+		log.WithFields(log.Fields{
+			"tag":       o.Tag,
+			"interface": o.InterfaceName,
+			"err":       err,
+		}).Debug("ip link delete for openvpn interface failed (likely already gone, not fatal)")
+	}
+
 	log.WithField("tag", o.Tag).Info("OpenVPN server stopped")
 	return nil
 }
@@ -492,8 +505,6 @@ push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
 
 keepalive 10 60
-persist-key
-persist-tun
 cipher AES-256-GCM
 auth SHA256
 
@@ -505,8 +516,6 @@ verb 3
 
 	return os.WriteFile(path, []byte(conf), 0600)
 }
-
-
 
 func waitForManagementSocket(path string, timeout time.Duration) (*ovpnMgmtClient, error) {
 	deadline := time.Now().Add(timeout)
