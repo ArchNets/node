@@ -175,7 +175,7 @@ func (c *ShadowTLSController) userListMonitor() error {
 
 	// Update alive list
 	if newAlive != nil {
-		c.limiter.AliveList = newAlive
+		c.limiter.SetAliveList(newAlive)
 	}
 
 	// Check for changes (nil means 304 Not Modified)
@@ -183,7 +183,7 @@ func (c *ShadowTLSController) userListMonitor() error {
 		return nil
 	}
 
-	deleted, added := compareShadowTLSUserList(c.userList, newUsers)
+	deleted, added := diffUserList(c.userList, newUsers)
 
 	if len(deleted) > 0 {
 		c.shadowtlsCore.DelUsers(deleted)
@@ -269,27 +269,4 @@ func (c *ShadowTLSController) reportTask() error {
 	}
 
 	return nil
-}
-
-func compareShadowTLSUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
-	}
-
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
-		}
-	}
-
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
-	}
-
-	return deleted, added
 }

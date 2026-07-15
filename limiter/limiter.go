@@ -28,6 +28,7 @@ type Limiter struct {
 	UserLimitInfo *sync.Map      // Key: TagUUID, value: UserLimitInfo
 	SpeedLimiter  *sync.Map      // key: TagUUID, value: *ratelimit.Bucket
 	AliveList     map[int]int    // Key: Uid, value: alive_ip
+	mapsMu        sync.RWMutex   // Protects UUIDtoUID and AliveList
 }
 
 type UserLimitInfo struct {
@@ -86,6 +87,8 @@ func DeleteLimiter(tag string) {
 }
 
 func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel.UserInfo) {
+	l.mapsMu.Lock()
+	defer l.mapsMu.Unlock()
 	for i := range deleted {
 		l.UserLimitInfo.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
@@ -108,6 +111,19 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
 		l.UUIDtoUID[added[i].Uuid] = added[i].Id
 	}
+}
+
+
+func (l *Limiter) SetAliveList(aliveList map[int]int) {
+	l.mapsMu.Lock()
+	l.AliveList = aliveList
+	l.mapsMu.Unlock()
+}
+
+func (l *Limiter) aliveCount(uid int) int {
+	l.mapsMu.RLock()
+	defer l.mapsMu.RUnlock()
+	return l.AliveList[uid]
 }
 
 // isConnectivityCheck determines if the request is a connectivity/captive portal check
@@ -193,7 +209,7 @@ func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destinati
 		// Store online user for device limit
 		ipMap := new(sync.Map)
 		ipMap.Store(ip, uid)
-		aliveIp := l.AliveList[uid]
+		aliveIp := l.aliveCount(uid)
 
 		log.WithFields(log.Fields{
 			"uid":         uid,

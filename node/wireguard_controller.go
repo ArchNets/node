@@ -1,8 +1,6 @@
 package node
 
 import (
-	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -12,7 +10,6 @@ import (
 	vCore "github.com/archnets/node/core"
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
-	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 // WireGuardController manages WireGuard protocol nodes
@@ -94,42 +91,11 @@ func (c *WireGuardController) Start() error {
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
 
-	// NOTE: previously `10800 + c.info.Id` — collided across multiple
-	// WireGuard instances on the same node (same Id), since only one
-	// dokodemo-door inbound can actually bind a given port. See
-	// node/tproxy_alloc.go for the full explanation.
-	tproxyPort := nextTProxyPort()
-	inboundJSON := fmt.Sprintf(`{
-		"tag": "%s",
-		"port": %d,
-		"protocol": "dokodemo-door",
-		"settings": {
-			"network": "tcp,udp",
-			"followRedirect": true
-		},
-		"sniffing": {
-			"enabled": true,
-			"destOverride": ["http", "tls", "quic"]
-		},
-		"streamSettings": {
-			"sockopt": {
-				"tproxy": "tproxy"
-			}
-		}
-	}`, c.tag, tproxyPort)
-
-	var inConf coreConf.InboundDetourConfig
-	if err := json.Unmarshal([]byte(inboundJSON), &inConf); err != nil {
-		return fmt.Errorf("failed to parse tproxy inbound for %s: %v", c.tag, err)
+	if c.info.Protocol.EnableTProxy {
+		tproxyPort, err := addTProxyInbound(c.xrayCore, c.tag, c.info.Protocol.TProxyPort)
+		if err != nil { return err }
+		c.wgCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
 	}
-	inboundConfig, err := inConf.Build()
-	if err != nil {
-		return fmt.Errorf("failed to build tproxy inbound for %s: %v", c.tag, err)
-	}
-	if err := c.xrayCore.AddInbound(inboundConfig); err != nil {
-		return fmt.Errorf("failed to add tproxy inbound for %s: %v", c.tag, err)
-	}
-	c.wgCore.SetTProxyPort(tproxyPort)
 
 	// Start WireGuard server
 	if err := c.wgCore.Start(); err != nil {
@@ -219,7 +185,7 @@ func (c *WireGuardController) userListMonitor() error {
 
 	// Update alive list
 	if newAlive != nil {
-		c.limiter.AliveList = newAlive
+		c.limiter.SetAliveList(newAlive)
 	}
 
 	// Check for changes (nil means 304 Not Modified)
@@ -227,7 +193,7 @@ func (c *WireGuardController) userListMonitor() error {
 		return nil
 	}
 
-	deleted, added := compareWGUserList(c.userList, newUsers)
+	deleted, added := diffUserList(c.userList, newUsers)
 
 	if len(deleted) > 0 {
 		c.wgCore.DelUsers(deleted)
@@ -329,27 +295,4 @@ func (c *WireGuardController) reportTask() error {
 	}
 
 	return nil
-}
-
-func compareWGUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit) + user.ServiceId
-		oldMap[key] = i
-	}
-
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit) + user.ServiceId
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
-		}
-	}
-
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
-	}
-
-	return deleted, added
 }

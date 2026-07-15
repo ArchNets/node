@@ -156,7 +156,7 @@ func (c *SSHController) userListMonitor() error {
 
 	// Update alive list
 	if newAlive != nil {
-		c.limiter.AliveList = newAlive
+		c.limiter.SetAliveList(newAlive)
 	}
 
 	// Check for changes (nil means 304 Not Modified)
@@ -164,7 +164,7 @@ func (c *SSHController) userListMonitor() error {
 		return nil
 	}
 
-	deleted, added := compareSSHUserList(c.userList, newUsers)
+	deleted, added := diffUserList(c.userList, newUsers)
 
 	if len(deleted) > 0 {
 		c.sshCore.DelUsers(deleted)
@@ -266,27 +266,4 @@ func (c *SSHController) reportTask() error {
 	}
 
 	return nil
-}
-
-func compareSSHUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
-	}
-
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
-		}
-	}
-
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
-	}
-
-	return deleted, added
 }

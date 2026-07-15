@@ -9,9 +9,12 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,12 +32,14 @@ type OpenVPNCore struct {
 	Tag           string
 	Port          int
 	Proto         string // "udp" or "tcp"
+	Subnet        string // client pool in CIDR notation
 	WorkDir       string // per-node directory for config/certs/socket
 	CertFile      string // real cert path (from panel CertMode="file"/"acme"), optional
 	KeyFile       string // real key path, optional
 	TlsCryptKey   string // tls-crypt static key content, optional
 	InterfaceName string
 	TProxyPort    int
+	TProxySubnet   string
 
 	cmd        *exec.Cmd
 	mgmt       *ovpnMgmtClient
@@ -65,18 +70,34 @@ type ovpnSession struct {
 }
 
 // NewOpenVPNCore creates (but does not start) an OpenVPN-backed core.
-func NewOpenVPNCore(tag string, port int, proto, workDir, certFile, keyFile, tlsCryptKey string) (*OpenVPNCore, error) {
+func NewOpenVPNCore(tag string, port int, proto, subnet, workDir, certFile, keyFile, tlsCryptKey string) (*OpenVPNCore, error) {
 	if proto != "udp" && proto != "tcp" {
 		proto = "udp"
 	}
-	if err := os.MkdirAll(workDir, 0700); err != nil {
+	if subnet == "" { subnet = "10.9.0.0/24" }
+	_, pool, err := net.ParseCIDR(subnet)
+	if err != nil { return nil, fmt.Errorf("invalid OpenVPN subnet %q: %w", subnet, err) }
+	subnet = pool.String()
+	// 0711 (not 0700): the openvpn process drops privileges to
+	// nobody/nogroup (see writeServerConf) and re-reads key material after
+	// the drop. Opening a file requires the traverse (x) bit on every
+	// directory in the path, so 0700 root-only dirs cause a fatal ta.key
+	// read error on the first client connection. 0711 grants traversal to
+	// known filenames while keeping directory listings root-only.
+	if err := os.MkdirAll(workDir, 0711); err != nil {
 		return nil, fmt.Errorf("create work dir: %w", err)
 	}
+	// MkdirAll does not fix permissions on directories that already exist
+	// (earlier versions created them 0700), so enforce traversal explicitly
+	// on the per-instance dir and its parent (/etc/archnets/openvpn).
+	_ = os.Chmod(workDir, 0711)
+	_ = os.Chmod(filepath.Dir(workDir), 0711)
 
 	return &OpenVPNCore{
 		Tag:           tag,
 		Port:          port,
 		Proto:         proto,
+		Subnet:        subnet,
 		WorkDir:       workDir,
 		CertFile:      certFile,
 		KeyFile:       keyFile,
@@ -106,6 +127,10 @@ func (o *OpenVPNCore) Start() error {
 	if err := os.WriteFile(taKeyPath, []byte(o.TlsCryptKey), 0600); err != nil {
 		return fmt.Errorf("write tls-crypt key: %w", err)
 	}
+	// OpenVPN re-reads ta.key after dropping privileges to nobody/nogroup;
+	// a root-owned 0600 file is unreadable at that point and kills the
+	// connection. Grant the unprivileged user access with minimal exposure.
+	makeReadableByUnprivilegedUser(taKeyPath)
 
 	confPath := filepath.Join(o.WorkDir, "server.conf")
 	if err := o.writeServerConf(confPath, caFile, serverCertFile, serverKeyFile, taKeyPath); err != nil {
@@ -473,6 +498,11 @@ func generateServerCert(caCert *x509.Certificate, caKey interface{}, certPath, k
 }
 
 func (o *OpenVPNCore) writeServerConf(path, caFile, certFile, keyFile, taKeyPath string) error {
+	poolIP, pool, err := net.ParseCIDR(o.Subnet)
+	if err != nil { return fmt.Errorf("invalid OpenVPN subnet %q: %w", o.Subnet, err) }
+	mask := net.IP(pool.Mask).String()
+	if mask == "<nil>" { return fmt.Errorf("OpenVPN subnet %q is not IPv4", o.Subnet) }
+	serverNetwork := poolIP.Mask(pool.Mask).String()
 	conf := fmt.Sprintf(`port %d
 proto %s
 dev %s
@@ -500,7 +530,7 @@ management %s unix
 management-client-auth
 
 topology subnet
-server 10.9.0.0 255.255.255.0
+server %s %s
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
 
@@ -510,9 +540,13 @@ auth SHA256
 
 user nobody
 group nogroup
+# Keep key material and the tun device across SIGUSR1/ping-restart
+# soft restarts; after the privilege drop, re-opening them would fail.
+persist-key
+persist-tun
 
 verb 3
-`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath)
+`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask)
 
 	return os.WriteFile(path, []byte(conf), 0600)
 }
@@ -531,8 +565,29 @@ func waitForManagementSocket(path string, timeout time.Duration) (*ovpnMgmtClien
 	return nil, fmt.Errorf("timed out waiting for management socket at %s", path)
 }
 
-func (o *OpenVPNCore) SetTProxyPort(port int) {
+func (o *OpenVPNCore) SetTProxyConfig(port int, subnet string) {
 	o.TProxyPort = port
+	o.TProxySubnet = subnet
+}
+
+// makeReadableByUnprivilegedUser makes a secret file readable by the
+// unprivileged account the openvpn process drops to ("user nobody" in
+// server.conf), with the least exposure possible: chown to nobody keeping
+// mode 0600 when possible, world-readable 0644 only as a last resort.
+func makeReadableByUnprivilegedUser(path string) {
+	if u, err := user.Lookup("nobody"); err == nil {
+		uid, errU := strconv.Atoi(u.Uid)
+		gid, errG := strconv.Atoi(u.Gid)
+		if errU == nil && errG == nil {
+			if err := os.Chown(path, uid, gid); err == nil {
+				_ = os.Chmod(path, 0600)
+				return
+			}
+		}
+	}
+	log.WithField("path", path).Warn(
+		"could not chown to nobody; falling back to world-readable 0644")
+	_ = os.Chmod(path, 0644)
 }
 
 func (o *OpenVPNCore) setupNAT() error {
@@ -541,7 +596,7 @@ func (o *OpenVPNCore) setupNAT() error {
 		log.WithError(err).Warn("Failed to enable IP forwarding")
 	}
 
-	subnet := "10.9.0.0/24"
+	subnet := o.Subnet
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
@@ -550,19 +605,22 @@ func (o *OpenVPNCore) setupNAT() error {
 	}
 
 	// Always add FORWARD ACCEPT rules for the OpenVPN interface
-	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -i %s -j ACCEPT", o.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -i %s -j ACCEPT", o.InterfaceName)); err != nil {
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -j ACCEPT", o.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -j ACCEPT", o.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD input rule for OpenVPN")
 		}
 	}
-	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -o %s -j ACCEPT", o.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -o %s -j ACCEPT", o.InterfaceName)); err != nil {
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -j ACCEPT", o.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -j ACCEPT", o.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD output rule for OpenVPN")
 		}
 	}
 
+	tproxySubnet := o.TProxySubnet
+	if tproxySubnet == "" { tproxySubnet = subnet }
+
 	if o.TProxyPort > 0 {
-		tproxyAvailable := execCommand("iptables -t mangle -m TPROXY -h") == nil ||
+		tproxyAvailable := execCommand("iptables -w 5 -t mangle -m TPROXY -h") == nil ||
 			execCommand("modprobe xt_TPROXY") == nil
 
 		if !tproxyAvailable {
@@ -581,22 +639,22 @@ func (o *OpenVPNCore) setupNAT() error {
 		// 2. Interface-specific mangle chain
 		chainName := fmt.Sprintf("XRAY_%s", o.InterfaceName)
 
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -N %s", chainName)); err != nil {
-			execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)); err != nil {
+			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
 		}
 
 		// Return traffic destined to local pool
-		execCommand(fmt.Sprintf("iptables -t mangle -A %s -d %s -j RETURN", chainName, subnet))
+		execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet))
 
 		// TPROXY capture rules
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, o.TProxyPort)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, o.TProxyPort)); err != nil {
 			log.WithFields(log.Fields{
 				"chain": chainName,
 				"port":  o.TProxyPort,
 				"err":   err,
 			}).Error("Failed to add TPROXY TCP rule — OpenVPN traffic will not be routed through Xray")
 		}
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, o.TProxyPort)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, o.TProxyPort)); err != nil {
 			log.WithFields(log.Fields{
 				"chain": chainName,
 				"port":  o.TProxyPort,
@@ -605,9 +663,9 @@ func (o *OpenVPNCore) setupNAT() error {
 		}
 
 		// Apply chain to PREROUTING
-		checkCmd := fmt.Sprintf("iptables -t mangle -C PREROUTING -i %s -j %s", o.InterfaceName, chainName)
+		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -j %s", o.InterfaceName, chainName)
 		if err := execCommand(checkCmd); err != nil {
-			execCommand(fmt.Sprintf("iptables -t mangle -A PREROUTING -i %s -j %s", o.InterfaceName, chainName))
+			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", o.InterfaceName, chainName))
 		}
 
 		// Also add MASQUERADE
@@ -620,9 +678,9 @@ func (o *OpenVPNCore) setupNAT() error {
 }
 
 func (o *OpenVPNCore) setupMasquerade(subnet, defaultIface string) error {
-	checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+	checkCmd := fmt.Sprintf("iptables -w 5 -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
 	if err := execCommand(checkCmd); err != nil {
-		addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+		addCmd := fmt.Sprintf("iptables -w 5 -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
 		if err := execCommand(addCmd); err != nil {
 			return fmt.Errorf("failed to add MASQUERADE rule: %w", err)
 		}
@@ -631,22 +689,22 @@ func (o *OpenVPNCore) setupMasquerade(subnet, defaultIface string) error {
 }
 
 func (o *OpenVPNCore) teardownNAT() {
-	subnet := "10.9.0.0/24"
+	subnet := o.Subnet
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
 		defaultIface = "eth0"
 	}
 
-	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -i %s -j ACCEPT", o.InterfaceName))
-	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -o %s -j ACCEPT", o.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", o.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", o.InterfaceName))
 
-	_ = execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
 
 	if o.TProxyPort > 0 {
 		chainName := fmt.Sprintf("XRAY_%s", o.InterfaceName)
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -D PREROUTING -i %s -j %s", o.InterfaceName, chainName))
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -X %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", o.InterfaceName, chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -X %s", chainName))
 	}
 }

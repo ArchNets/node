@@ -69,6 +69,8 @@ type TunnelController struct {
 	tunnelDir             string
 	waterwallProcess      *exec.Cmd
 	waterwallMu           sync.Mutex        // Protects waterwallProcess lifecycle (start/stop/reload)
+	applyMu               sync.Mutex        // Serializes complete configuration transactions
+	stateMu               sync.Mutex        // Protects tunnels and traffic-monitoring maps
 	forwarderProcesses    map[int]*exec.Cmd // tunnel_id -> forwarder process
 	forwarderMu           sync.Mutex
 	forwarderWg           sync.WaitGroup
@@ -412,8 +414,14 @@ func (c *TunnelController) pingTarget(ip string) (int, bool) {
 }
 
 func (c *TunnelController) statusReport() error {
-	statuses := make([]panel.TunnelStatus, 0, len(c.tunnels))
-	for _, t := range c.tunnels {
+	c.stateMu.Lock()
+	tunnels := append([]panel.TunnelInfo(nil), c.tunnels...)
+	c.stateMu.Unlock()
+
+	statuses := make([]panel.TunnelStatus, 0, len(tunnels))
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	for _, t := range tunnels {
 		latency, online := c.pingTarget(t.RemoteIP)
 
 		// Read TUN device traffic
@@ -551,6 +559,8 @@ func (c *TunnelController) statusReport() error {
 }
 
 func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
 	// Stop existing processes
 	c.stopWaterwall()
 	c.stopAllForwarders()
@@ -603,7 +613,10 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
-	c.tunnels = data.Tunnels
+	c.stateMu.Lock()
+	c.tunnels = append([]panel.TunnelInfo(nil), data.Tunnels...)
+	c.tunnelDeviceNames = make(map[int]string)
+	c.lastTraffic = make(map[int]trafficSnapshot)
 
 	// Extract device names from tunnel configs for traffic monitoring
 	for _, t := range data.Tunnels {
@@ -614,6 +627,8 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 			}
 		}
 	}
+
+	c.stateMu.Unlock()
 
 	// Start WaterWall if we have waterwall tunnels
 	if len(waterwallTunnels) > 0 {
@@ -886,6 +901,7 @@ network:
 		configFilename := fmt.Sprintf("paqet_%d.yaml", f.ListenPort)
 		configPath := filepath.Join(c.tunnelDir, configFilename)
 		if err := os.WriteFile(configPath, []byte(fullConfig), 0644); err != nil {
+			c.teardownPaqetFirewall(transportPort)
 			return fmt.Errorf("failed to write paqet config: %v", err)
 		}
 
@@ -905,6 +921,9 @@ network:
 	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
+		if f.ForwarderType == "paqet" {
+			c.teardownPaqetFirewall(c.extractPaqetPort(f.Config))
+		}
 		return err
 	}
 
@@ -918,9 +937,11 @@ network:
 	c.forwarderWg.Add(1)
 	go func() {
 		defer c.forwarderWg.Done()
-		cmd.Wait()
+		_ = cmd.Wait()
 		c.forwarderMu.Lock()
-		delete(c.forwarderProcesses, key)
+		if c.forwarderProcesses[key] == cmd {
+			delete(c.forwarderProcesses, key)
+		}
 		c.forwarderMu.Unlock()
 	}()
 
@@ -981,6 +1002,7 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 	}
 
 	if err := instance.Start(); err != nil {
+		_ = instance.Close()
 		return fmt.Errorf("failed to start xray instance: %v", err)
 	}
 
@@ -1204,6 +1226,7 @@ func (c *TunnelController) startXrayReverseInstance(t panel.TunnelInfo) error {
 	}
 
 	if err := instance.Start(); err != nil {
+		_ = instance.Close()
 		return fmt.Errorf("failed to start xray-reverse instance: %v", err)
 	}
 
@@ -1493,11 +1516,11 @@ func (c *TunnelController) setupPaqetFirewall(port int) {
 	c.logger.WithField("port", port).Info("Setting up Paqet firewall rules (NOTRACK/RST-DROP)")
 
 	rules := [][]string{
-		{"-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
-		{"-t", "filter", "-A", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
-		{"-t", "filter", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
+		{"-w", "5", "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-w", "5", "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-w", "5", "-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
+		{"-w", "5", "-t", "filter", "-A", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
+		{"-w", "5", "-t", "filter", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
 	}
 
 	for _, rule := range rules {
@@ -1527,11 +1550,11 @@ func (c *TunnelController) teardownPaqetFirewall(port int) {
 	c.logger.WithField("port", port).Info("Tearing down Paqet firewall rules")
 
 	rules := [][]string{
-		{"-t", "raw", "-D", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-t", "raw", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
-		{"-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
-		{"-t", "filter", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
+		{"-w", "5", "-t", "raw", "-D", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-w", "5", "-t", "raw", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
+		{"-w", "5", "-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
+		{"-w", "5", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
+		{"-w", "5", "-t", "filter", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
 	}
 
 	for _, rule := range rules {
@@ -1816,6 +1839,7 @@ func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
 	}
 
 	if err := instance.Start(); err != nil {
+		_ = instance.Close()
 		return fmt.Errorf("failed to start xray-stealth instance: %v", err)
 	}
 
@@ -1884,9 +1908,11 @@ sni-chunk = %d
 	c.sniSpoofingWg.Add(1)
 	go func() {
 		defer c.sniSpoofingWg.Done()
-		cmd.Wait()
+		_ = cmd.Wait()
 		c.sniSpoofingMu.Lock()
-		delete(c.sniSpoofingProcesses, t.Id)
+		if c.sniSpoofingProcesses[t.Id] == cmd {
+			delete(c.sniSpoofingProcesses, t.Id)
+		}
 		c.sniSpoofingMu.Unlock()
 	}()
 

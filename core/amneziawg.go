@@ -54,11 +54,13 @@ type AmneziaWGCore struct {
 	lastPeerStats  map[string]*peerStats
 	statsCollector *amneziaStatsCollectorTask
 	TProxyPort     int
+	TProxySubnet   string
 }
 
 // SetTProxyPort sets the local Xray port to route traffic to
-func (w *AmneziaWGCore) SetTProxyPort(port int) {
+func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string) {
 	w.TProxyPort = port
+	w.TProxySubnet = subnet
 }
 
 // Reuse structs from wireguard.go where possible or redefine if private
@@ -581,20 +583,23 @@ func (w *AmneziaWGCore) setupNAT() error {
 	}
 
 	// Always add FORWARD ACCEPT rules for the AWG interface (needed in both paths)
-	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD input rule for AmneziaWG")
 		}
 	}
-	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD output rule for AmneziaWG")
 		}
 	}
 
+	tproxySubnet := w.TProxySubnet
+	if tproxySubnet == "" { tproxySubnet = subnet }
+
 	if w.TProxyPort > 0 {
 		// Verify TPROXY module availability
-		tproxyAvailable := execCommand("iptables -t mangle -m TPROXY -h") == nil ||
+		tproxyAvailable := execCommand("iptables -w 5 -t mangle -m TPROXY -h") == nil ||
 			execCommand("modprobe xt_TPROXY") == nil
 
 		if !tproxyAvailable {
@@ -611,19 +616,19 @@ func (w *AmneziaWGCore) setupNAT() error {
 		_ = execCommand("ip route replace local 0.0.0.0/0 dev lo table 100")
 
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -N %s", chainName)); err != nil {
-			execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)); err != nil {
+			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
 		}
 
-		execCommand(fmt.Sprintf("iptables -t mangle -A %s -d %s -j RETURN", chainName, subnet))
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
+		execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
 			log.WithFields(log.Fields{
 				"chain": chainName,
 				"port":  w.TProxyPort,
 				"err":   err,
 			}).Error("Failed to add TPROXY TCP rule — AmneziaWG traffic will not be routed through Xray")
 		}
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
 			log.WithFields(log.Fields{
 				"chain": chainName,
 				"port":  w.TProxyPort,
@@ -631,9 +636,9 @@ func (w *AmneziaWGCore) setupNAT() error {
 			}).Error("Failed to add TPROXY UDP rule — AmneziaWG traffic will not be routed through Xray")
 		}
 
-		checkCmd := fmt.Sprintf("iptables -t mangle -C PREROUTING -i %s -j %s", w.InterfaceName, chainName)
+		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -j %s", w.InterfaceName, chainName)
 		if err := execCommand(checkCmd); err != nil {
-			execCommand(fmt.Sprintf("iptables -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
+			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
 		}
 
 		// Also add MASQUERADE so Xray outbound traffic can reach external endpoints
@@ -647,9 +652,9 @@ func (w *AmneziaWGCore) setupNAT() error {
 
 // setupMasquerade adds NAT MASQUERADE rules for the AWG subnet
 func (w *AmneziaWGCore) setupMasquerade(subnet, defaultIface string) error {
-	checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+	checkCmd := fmt.Sprintf("iptables -w 5 -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
 	if err := execCommand(checkCmd); err != nil {
-		addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+		addCmd := fmt.Sprintf("iptables -w 5 -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
 		if err := execCommand(addCmd); err != nil {
 			return fmt.Errorf("failed to add MASQUERADE rule: %w", err)
 		}
@@ -670,18 +675,18 @@ func (w *AmneziaWGCore) teardownNAT() {
 	}
 
 	// Always clean up FORWARD rules (added in both paths)
-	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
-	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
 
 	// Always clean up MASQUERADE (added in both paths)
 	if subnet != "" {
-		_ = execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
 	}
 
 	if w.TProxyPort > 0 {
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -X %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -X %s", chainName))
 	}
 }

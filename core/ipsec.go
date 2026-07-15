@@ -43,6 +43,7 @@ type IPsecConfig struct {
 type IPsecCore struct {
 	IPsecConfig
 	TProxyPort int // Xray TPROXY port for routing traffic
+	TProxySubnet   string
 
 	mu    sync.RWMutex
 	users map[int]*IPsecUser // key: subscription ID
@@ -799,13 +800,17 @@ func (c *IPsecCore) stopXl2tpd() {
 }
 
 // SetTProxyPort sets the local Xray port to route traffic to.
-func (c *IPsecCore) SetTProxyPort(port int) {
+func (c *IPsecCore) SetTProxyConfig(port int, subnet string) {
 	c.TProxyPort = port
+	c.TProxySubnet = subnet
 }
 
 // setupNAT configures TPROXY or MASQUERADE for the VPN subnet
 func (c *IPsecCore) setupNAT() error {
 	subnet := c.getSubnet()
+
+	tproxySubnet := c.TProxySubnet
+	if tproxySubnet == "" { tproxySubnet = c.getSubnet() }
 
 	if c.TProxyPort > 0 {
 		// TPROXY mode: route VPN traffic through Xray.
@@ -818,29 +823,29 @@ func (c *IPsecCore) setupNAT() error {
 		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
 
 		// Create chain in mangle table (ignore error if exists)
-		if err := exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -N %s", chainName)).Run(); err != nil {
-			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -F %s", chainName)).Run()
+		if err := exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)).Run(); err != nil {
+			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName)).Run()
 		}
 
 		// Skip traffic destined to VPN subnet itself
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A %s -d %s -j RETURN", chainName, subnet)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet)).Run()
 
 		// TPROXY capture rules for TCP and UDP
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
 
 		// Apply to PREROUTING for packets from VPN subnet
-		checkCmd := fmt.Sprintf("iptables -t mangle -C PREROUTING -s %s -j %s", subnet, chainName)
+		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -s %s -j %s", subnet, chainName)
 		if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
-			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -A PREROUTING -s %s -j %s", subnet, chainName)).Run()
+			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -s %s -j %s", subnet, chainName)).Run()
 		}
 
 		log.WithFields(log.Fields{"tag": c.Tag, "port": c.TProxyPort}).Info("IPsec TPROXY routing enabled")
 	} else {
 		// Standard masquerade (direct internet)
-		checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
+		checkCmd := fmt.Sprintf("iptables -w 5 -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
 		if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
-			addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet)
+			addCmd := fmt.Sprintf("iptables -w 5 -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet)
 			if err := exec.Command("sh", "-c", addCmd).Run(); err != nil {
 				return err
 			}
@@ -855,11 +860,11 @@ func (c *IPsecCore) teardownNAT() {
 
 	if c.TProxyPort > 0 {
 		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -D PREROUTING -s %s -j %s", subnet, chainName)).Run()
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -F %s", chainName)).Run()
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t mangle -X %s", chainName)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -s %s -j %s", subnet, chainName)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -X %s", chainName)).Run()
 	} else {
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet)).Run()
+		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet)).Run()
 	}
 }
 

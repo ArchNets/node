@@ -80,7 +80,7 @@ func (c *Controller) userListMonitor() (err error) {
 	}
 	// update alive list
 	if newA != nil {
-		c.limiter.AliveList = newA
+		c.limiter.SetAliveList(newA)
 	}
 	// update user list
 	// newU == nil indicates 304 Not Modified; empty slice means the list is empty

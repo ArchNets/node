@@ -84,6 +84,11 @@ func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {
 	}
 
 	activeScansMu.Lock()
+	if _, exists := activeScans[t.Id]; exists {
+		activeScansMu.Unlock()
+		cancel()
+		return
+	}
 	activeScans[t.Id] = newSCtx
 	activeScansMu.Unlock()
 
@@ -236,9 +241,15 @@ func (c *TunnelController) runProtoswapScan(ctx context.Context, t panel.TunnelI
 			return false
 		}
 
-		// Wait for TUN
-		time.Sleep(2 * time.Second)
-		return true
+		// Wait for TUN, but remain responsive to cancel/pause.
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return true
+		case <-ctx.Done():
+			return false
+		}
 	}
 
 	// Phase 1+2 for TCP
@@ -798,19 +809,21 @@ type echoState struct {
 
 // handleExitScanCommand starts echo servers on the exit node when a scan is requested
 func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
-	echoServersMu.Lock()
-	if _, exists := echoServers[t.Id]; exists {
-		echoServersMu.Unlock()
-		return // Already running
-	}
-	echoServersMu.Unlock()
-
 	cmd := t.ScanCommand
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &echoState{
 		stopChan: make(chan struct{}),
 		cancel:   cancel,
 	}
+
+	echoServersMu.Lock()
+	if _, exists := echoServers[t.Id]; exists {
+		echoServersMu.Unlock()
+		cancel()
+		return // Already running
+	}
+	echoServers[t.Id] = state // Reserve atomically before binding listeners.
+	echoServersMu.Unlock()
 
 	c.logger.WithFields(log.Fields{
 		"tunnel_id":     t.Id,
@@ -839,10 +852,6 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 		}
 	}
 
-	echoServersMu.Lock()
-	echoServers[t.Id] = state
-	echoServersMu.Unlock()
-
 	// Start active scanning loop if StartTime is set
 	if cmd.StartTime > 0 {
 		go c.runExitScanLoop(ctx, t)
@@ -870,6 +879,9 @@ func (c *TunnelController) stopEchoServers(tunnelId int) {
 	}
 	delete(echoServers, tunnelId)
 	echoServersMu.Unlock()
+	appliedConfigsMu.Lock()
+	delete(appliedConfigs, tunnelId)
+	appliedConfigsMu.Unlock()
 
 	close(state.stopChan)
 	if state.cancel != nil {
@@ -1064,7 +1076,8 @@ func (c *TunnelController) runExitScanLoop(ctx context.Context, t panel.TunnelIn
 				}
 
 				if err := c.hotReloadWaterwallConfig(t.Id, newConfigJSON); err != nil {
-					c.logger.Error("Failed to switch config on exit node: ", err)
+					c.logger.WithError(err).Error("Failed to switch config on exit node")
+					continue
 				}
 				markConfigApplied(t.Id, currentPhase, proto)
 			}

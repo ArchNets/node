@@ -274,7 +274,13 @@ type Protocol struct {
 	IPsecSubnet      string `json:"ipsec_subnet"`       // IP pool subnet (e.g. "10.10.0.0/16")
 	IPsecMTU         int    `json:"ipsec_mtu"`          // MTU for L2TP PPP links (default: 1400)
 
+	// Per-inbound TPROXY fields (provided by backend)
+	EnableTProxy  bool   `json:"enable_tproxy"`
+	TProxySubnet  string `json:"tproxy_subnet"`
+	TProxyPort    int    `json:"tproxy_port"`
+
 	// OpenVPN-specific fields
+	OpenVPNSubnet   string `json:"openvpn_subnet"`
 	OpenVPNProto    string `json:"openvpn_proto"`     // Transport: "udp" or "tcp" (default: udp)
 	OpenVPNTlsCrypt string `json:"openvpn_tls_crypt"` // tls-crypt static key content (from admin panel)
 }

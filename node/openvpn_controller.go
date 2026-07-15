@@ -18,6 +18,7 @@ import (
 // OpenVPNController manages OpenVPN protocol nodes.
 type OpenVPNController struct {
 	tag         string
+	xrayTag     string // Xray inbound tag matching panel routing rules (e.g. "openvpn:28")
 	info        *panel.NodeInfo
 	apiClient   *panel.ClientV1
 	openvpnCore *vCore.OpenVPNCore
@@ -28,11 +29,13 @@ type OpenVPNController struct {
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	isPrimaryReporter       bool
+	tproxyEnabled           bool
 }
 
 func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *OpenVPNController {
 	return &OpenVPNController{
 		tag:               generateOpenVPNTag(info),
+		xrayTag:           generateOpenVPNXrayTag(info),
 		info:              info,
 		apiClient:         apiClient,
 		xrayCore:          xrayCore,
@@ -42,6 +45,21 @@ func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, i
 
 func generateOpenVPNTag(info *panel.NodeInfo) string {
 	return "openvpn-" + strconv.Itoa(info.Id) + "-" + strconv.Itoa(info.Protocol.Port)
+}
+
+// generateOpenVPNXrayTag builds the panel-facing Xray inbound tag. Panel
+// routing rules reference inbounds as "type:nodeId" (e.g. "openvpn:28") —
+// the same convention the IPsec controller uses — NOT the internal tag.
+// Registering the dokodemo-door inbound under the internal tag
+// ("openvpn-<id>-<port>") was the original TPROXY bug: no panel routing rule
+// matched it, so every client packet fell through to Xray's default outbound
+// and the tunnel appeared dead.
+func generateOpenVPNXrayTag(info *panel.NodeInfo) string {
+	protoType := "openvpn"
+	if info.Protocol != nil && info.Protocol.Type != "" {
+		protoType = info.Protocol.Type
+	}
+	return protoType + ":" + strconv.Itoa(info.Id)
 }
 
 // Start starts the OpenVPN controller.
@@ -75,13 +93,8 @@ func (c *OpenVPNController) Start() error {
 		proto = "udp"
 	}
 
-	// TODO: Re-enable TPROXY once Xray routing for OpenVPN traffic is debugged.
-	// For now, skip TPROXY and let setupNAT use MASQUERADE (direct NAT) instead.
-	// The TProxyPort stays at 0, so setupNAT takes the MASQUERADE-only path.
-	//
-	// tproxyPort := nextTProxyPort()
-	// ... (Xray dokodemo-door inbound on tproxyPort) ...
-	// c.openvpnCore.SetTProxyPort(tproxyPort)
+	subnet := "10.9.0.0/24"
+	if c.info.Protocol.OpenVPNSubnet != "" { subnet = c.info.Protocol.OpenVPNSubnet }
 
 	workDir := filepath.Join("/etc/archnets/openvpn", c.tag)
 
@@ -89,6 +102,7 @@ func (c *OpenVPNController) Start() error {
 		c.tag,
 		c.info.Protocol.Port,
 		proto,
+		subnet,
 		workDir,
 		certFile,
 		keyFile,
@@ -98,7 +112,23 @@ func (c *OpenVPNController) Start() error {
 		return err
 	}
 	c.openvpnCore = openvpnCore
-	// TProxyPort left at 0 — setupNAT will use MASQUERADE only
+
+	// Route OpenVPN client traffic through Xray's routing engine via TPROXY.
+	// If inbound registration fails, deliberately fall back to plain
+	// MASQUERADE NAT (TProxyPort stays 0) instead of failing the node:
+	// installing TPROXY capture rules without a live inbound behind them
+	// would blackhole every client packet.
+	if c.info.Protocol.EnableTProxy {
+		if tproxyPort, err := addTProxyInbound(c.xrayCore, c.xrayTag, c.info.Protocol.TProxyPort); err != nil {
+			log.WithError(err).WithField("tag", c.xrayTag).Error(
+				"TPROXY setup failed — OpenVPN will use MASQUERADE only")
+		} else {
+			c.openvpnCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
+			c.tproxyEnabled = true
+			log.WithFields(log.Fields{"tag": c.xrayTag, "tproxyPort": tproxyPort}).Info("OpenVPN TPROXY inbound registered")
+		}
+	}
+
 	c.openvpnCore.SetLimiter(c.limiter)
 	c.openvpnCore.AddUsers(users)
 
@@ -126,9 +156,11 @@ func (c *OpenVPNController) Close() error {
 		c.userReportPeriodic.Close()
 	}
 
-	// Remove Xray Inbound
-	if err := c.xrayCore.RemoveInbound(c.tag); err != nil {
-		log.WithError(err).WithField("tag", c.tag).Warn("Failed to remove Xray inbound")
+	// Remove Xray TPROXY inbound (registered under xrayTag, not internal tag)
+	if c.tproxyEnabled {
+		if err := c.xrayCore.RemoveInbound(c.xrayTag); err != nil {
+			log.WithError(err).WithField("tag", c.xrayTag).Warn("Failed to remove Xray inbound")
+		}
 	}
 
 	if c.openvpnCore != nil {
@@ -167,14 +199,14 @@ func (c *OpenVPNController) userListMonitor() error {
 		return nil
 	}
 	if newAlive != nil {
-		c.limiter.AliveList = newAlive
+		c.limiter.SetAliveList(newAlive)
 	}
 
 	if newUsers == nil {
 		return nil // 304 Not Modified
 	}
 
-	deleted, added := compareOpenVPNUserList(c.userList, newUsers)
+	deleted, added := diffUserList(c.userList, newUsers)
 
 	if len(deleted) > 0 {
 		c.openvpnCore.DelUsers(deleted)
@@ -249,24 +281,4 @@ func (c *OpenVPNController) reportTask() error {
 	}
 
 	return nil
-}
-
-func compareOpenVPNUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
-	}
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
-		}
-	}
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
-	}
-	return deleted, added
 }

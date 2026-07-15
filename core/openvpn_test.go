@@ -14,7 +14,7 @@ func TestOpenVPNCoreAddDelUsers(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	core, err := NewOpenVPNCore("test-ovpn", 1194, "udp", tmpDir, "", "", "test-key")
+	core, err := NewOpenVPNCore("test-ovpn", 1194, "udp", "10.9.0.0/24", tmpDir, "", "", "test-key")
 	if err != nil {
 		t.Fatalf("failed to create core: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestOpenVPNCoreTrafficDelta(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	core, err := NewOpenVPNCore("test-ovpn-traffic", 1194, "udp", tmpDir, "", "", "test-key")
+	core, err := NewOpenVPNCore("test-ovpn-traffic", 1194, "udp", "10.9.0.0/24", tmpDir, "", "", "test-key")
 	if err != nil {
 		t.Fatalf("failed to create core: %v", err)
 	}

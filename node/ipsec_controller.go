@@ -1,7 +1,6 @@
 package node
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -12,7 +11,6 @@ import (
 	vCore "github.com/archnets/node/core"
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
-	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 // IPsecController manages IKEv2/L2TP protocol nodes.
@@ -105,45 +103,11 @@ func (c *IPsecController) Start() error {
 	// Create and start IPsec core
 	c.ipsecCore = vCore.NewIPsecCore(cfg)
 
-	// Inject Xray TPROXY inbound for routing traffic through Xray outbounds
-	// NOTE: previously `12000/13000/14000 + c.info.Id` per mode — same
-	// per-node-only collision bug as WireGuard/AmneziaWG; see
-	// node/tproxy_alloc.go. Mode no longer needs to select a port band since
-	// the allocator guarantees uniqueness regardless of mode.
-	tproxyPort := nextTProxyPort()
-
-	// Use xrayTag (e.g. "ikev2:28") to match panel routing rules, NOT internal tag
-	inboundJSON := fmt.Sprintf(`{
-		"tag": "%s",
-		"port": %d,
-		"protocol": "dokodemo-door",
-		"settings": {
-			"network": "tcp,udp",
-			"followRedirect": true
-		},
-		"sniffing": {
-			"enabled": true,
-			"destOverride": ["http", "tls", "quic"]
-		},
-		"streamSettings": {
-			"sockopt": {
-				"tproxy": "tproxy"
-			}
-		}
-	}`, c.xrayTag, tproxyPort)
-
-	var inConf coreConf.InboundDetourConfig
-	if err := json.Unmarshal([]byte(inboundJSON), &inConf); err != nil {
-		return fmt.Errorf("failed to parse tproxy inbound for %s: %v", c.xrayTag, err)
+	if c.info.Protocol.EnableTProxy {
+		tproxyPort, err := addTProxyInbound(c.xrayCore, c.xrayTag, c.info.Protocol.TProxyPort)
+		if err != nil { return err }
+		c.ipsecCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
 	}
-	inboundConfig, err2 := inConf.Build()
-	if err2 != nil {
-		return fmt.Errorf("failed to build tproxy inbound for %s: %v", c.xrayTag, err2)
-	}
-	if err := c.xrayCore.AddInbound(inboundConfig); err != nil {
-		return fmt.Errorf("failed to add tproxy inbound for %s: %v", c.xrayTag, err)
-	}
-	c.ipsecCore.SetTProxyPort(tproxyPort)
 
 	if err := c.ipsecCore.Start(); err != nil {
 		return fmt.Errorf("failed to start IPsec core: %w", err)
@@ -212,13 +176,13 @@ func (c *IPsecController) userListMonitor() error {
 		return nil
 	}
 	if newAlive != nil {
-		c.limiter.AliveList = newAlive
+		c.limiter.SetAliveList(newAlive)
 	}
 	if newUsers == nil {
 		return nil // 304 Not Modified
 	}
 
-	deleted, added := compareIPsecUserList(c.userList, newUsers)
+	deleted, added := diffUserList(c.userList, newUsers)
 	if len(deleted) > 0 {
 		c.ipsecCore.DelUsers(deleted)
 		c.limiter.UpdateUser(c.tag, nil, deleted)
@@ -277,24 +241,4 @@ func (c *IPsecController) reportTask() error {
 	}
 
 	return nil
-}
-
-func compareIPsecUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit) + user.ServiceId
-		oldMap[key] = i
-	}
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit) + user.ServiceId
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
-		}
-	}
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
-	}
-	return deleted, added
 }

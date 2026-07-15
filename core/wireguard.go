@@ -42,6 +42,7 @@ type WireGuardCore struct {
 	lastPeerStats  map[string]*peerStats
 	statsCollector *statsCollectorTask
 	TProxyPort     int
+	TProxySubnet   string
 }
 
 // WireGuardPeer represents a connected peer (user)
@@ -363,8 +364,9 @@ func (w *WireGuardCore) SetLimiter(l *limiter.Limiter) {
 }
 
 // SetTProxyPort sets the local Xray port to route traffic to
-func (w *WireGuardCore) SetTProxyPort(port int) {
+func (w *WireGuardCore) SetTProxyConfig(port int, subnet string) {
 	w.TProxyPort = port
+	w.TProxySubnet = subnet
 }
 
 // createInterface creates the WireGuard network interface
@@ -623,22 +625,25 @@ func (w *WireGuardCore) setupNAT() error {
 	}
 
 	// Always add FORWARD ACCEPT rules for the WG interface (needed in both paths)
-	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD input rule for WireGuard")
 		}
 	}
-	if err := execCommand(fmt.Sprintf("iptables -C FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -A FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD output rule for WireGuard")
 		}
 	}
+
+	tproxySubnet := w.TProxySubnet
+	if tproxySubnet == "" { tproxySubnet = subnet }
 
 	if w.TProxyPort > 0 {
 		// Verify TPROXY module is available before setting up mangle rules.
 		// On minimal VPS kernels without xt_TPROXY, these rules silently fail
 		// and WG peers can connect but traffic goes nowhere.
-		tproxyAvailable := execCommand("iptables -t mangle -m TPROXY -h") == nil ||
+		tproxyAvailable := execCommand("iptables -w 5 -t mangle -m TPROXY -h") == nil ||
 			execCommand("modprobe xt_TPROXY") == nil
 
 		if !tproxyAvailable {
@@ -660,22 +665,22 @@ func (w *WireGuardCore) setupNAT() error {
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 
 		// Create chain if it doesn't exist; flush if it does (clean restart)
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -N %s", chainName)); err != nil {
-			execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)); err != nil {
+			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
 		}
 
 		// Return traffic destined to the local WG network itself (e.g. DNS)
-		execCommand(fmt.Sprintf("iptables -t mangle -A %s -d %s -j RETURN", chainName, subnet))
+		execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet))
 
 		// TPROXY capture rules
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
 			log.WithFields(log.Fields{
 				"chain": chainName,
 				"port":  w.TProxyPort,
 				"err":   err,
 			}).Error("Failed to add TPROXY TCP rule — WireGuard traffic will not be routed through Xray")
 		}
-		if err := execCommand(fmt.Sprintf("iptables -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
 			log.WithFields(log.Fields{
 				"chain": chainName,
 				"port":  w.TProxyPort,
@@ -684,9 +689,9 @@ func (w *WireGuardCore) setupNAT() error {
 		}
 
 		// Apply the chain to PREROUTING for this specific interface
-		checkCmd := fmt.Sprintf("iptables -t mangle -C PREROUTING -i %s -j %s", w.InterfaceName, chainName)
+		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -j %s", w.InterfaceName, chainName)
 		if err := execCommand(checkCmd); err != nil {
-			execCommand(fmt.Sprintf("iptables -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
+			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
 		}
 
 		// Also add MASQUERADE for the WG subnet so Xray outbound traffic
@@ -702,9 +707,9 @@ func (w *WireGuardCore) setupNAT() error {
 
 // setupMasquerade adds NAT MASQUERADE rules for the WG subnet
 func (w *WireGuardCore) setupMasquerade(subnet, defaultIface string) error {
-	checkCmd := fmt.Sprintf("iptables -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+	checkCmd := fmt.Sprintf("iptables -w 5 -t nat -C POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
 	if err := execCommand(checkCmd); err != nil {
-		addCmd := fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
+		addCmd := fmt.Sprintf("iptables -w 5 -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface)
 		if err := execCommand(addCmd); err != nil {
 			return fmt.Errorf("failed to add MASQUERADE rule: %w", err)
 		}
@@ -726,21 +731,21 @@ func (w *WireGuardCore) teardownNAT() {
 	}
 
 	// Always clean up FORWARD rules (added in both paths)
-	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
-	_ = execCommand(fmt.Sprintf("iptables -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
 
 	// Always clean up MASQUERADE (added in both paths)
 	if subnet != "" {
-		_ = execCommand(fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
 	}
 
 	if w.TProxyPort > 0 {
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 		// Remove PREROUTING jump
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))
 		// Flush and delete custom chain
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -F %s", chainName))
-		_ = execCommand(fmt.Sprintf("iptables -t mangle -X %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -X %s", chainName))
 
 		// Note: We leave `ip rule` and `ip route` intact since other interfaces might be using them
 	}

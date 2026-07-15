@@ -1,8 +1,6 @@
 package node
 
 import (
-	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -12,7 +10,6 @@ import (
 	vCore "github.com/archnets/node/core"
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
-	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 // AmneziaWGController manages AmneziaWG protocol nodes
@@ -114,40 +111,11 @@ func (c *AmneziaWGController) Start() error {
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
 	// Inject Xray TPROXY Inbound
-	// NOTE: previously `10800 + c.info.Id` — same collision bug as
-	// WireGuardController; see node/tproxy_alloc.go.
-	tproxyPort := nextTProxyPort()
-	inboundJSON := fmt.Sprintf(`{
-		"tag": "%s",
-		"port": %d,
-		"protocol": "dokodemo-door",
-		"settings": {
-			"network": "tcp,udp",
-			"followRedirect": true
-		},
-		"sniffing": {
-			"enabled": true,
-			"destOverride": ["http", "tls", "quic"]
-		},
-		"streamSettings": {
-			"sockopt": {
-				"tproxy": "tproxy"
-			}
-		}
-	}`, c.tag, tproxyPort)
-
-	var inConf coreConf.InboundDetourConfig
-	if err := json.Unmarshal([]byte(inboundJSON), &inConf); err != nil {
-		return fmt.Errorf("failed to parse tproxy inbound for %s: %v", c.tag, err)
+	if c.info.Protocol.EnableTProxy {
+		tproxyPort, err := addTProxyInbound(c.xrayCore, c.tag, c.info.Protocol.TProxyPort)
+		if err != nil { return err }
+		c.wgCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
 	}
-	inboundConfig, err := inConf.Build()
-	if err != nil {
-		return fmt.Errorf("failed to build tproxy inbound for %s: %v", c.tag, err)
-	}
-	if err := c.xrayCore.AddInbound(inboundConfig); err != nil {
-		return fmt.Errorf("failed to add tproxy inbound for %s: %v", c.tag, err)
-	}
-	c.wgCore.SetTProxyPort(tproxyPort)
 
 	// Start server
 	if err := c.wgCore.Start(); err != nil {
@@ -235,7 +203,7 @@ func (c *AmneziaWGController) userListMonitor() error {
 
 	// Update alive list
 	if newAlive != nil {
-		c.limiter.AliveList = newAlive
+		c.limiter.SetAliveList(newAlive)
 	}
 
 	// Check for changes (nil means 304 Not Modified)
@@ -243,7 +211,7 @@ func (c *AmneziaWGController) userListMonitor() error {
 		return nil
 	}
 
-	deleted, added := compareWGUserList(c.userList, newUsers)
+	deleted, added := diffUserList(c.userList, newUsers)
 
 	if len(deleted) > 0 {
 		c.wgCore.DelUsers(deleted)

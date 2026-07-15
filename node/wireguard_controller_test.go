@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCompareWGUserList(t *testing.T) {
+func TestDiffUserList(t *testing.T) {
 	tests := []struct {
 		name        string
 		oldUsers    []panel.UserInfo
@@ -54,7 +54,7 @@ func TestCompareWGUserList(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotDeleted, gotAdded := compareWGUserList(tt.oldUsers, tt.newUsers)
+			gotDeleted, gotAdded := diffUserList(tt.oldUsers, tt.newUsers)
 			assert.ElementsMatch(t, tt.wantDeleted, gotDeleted, "deleted users mismatch")
 			assert.ElementsMatch(t, tt.wantAdded, gotAdded, "added users mismatch")
 		})
