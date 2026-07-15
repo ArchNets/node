@@ -668,6 +668,15 @@ func (o *OpenVPNCore) setupNAT() error {
 			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", o.InterfaceName, chainName))
 		}
 
+		// Add INPUT rule for TProxy marked packets (required when default INPUT policy is DROP/UFW)
+		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, o.Subnet)
+		if err := execCommand(inputCheck); err != nil {
+			inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, o.Subnet)
+			if err := execCommand(inputAdd); err != nil {
+				return fmt.Errorf("add OpenVPN TProxy INPUT rule: %w", err)
+			}
+		}
+
 		// Also add MASQUERADE
 		_ = o.setupMasquerade(subnet, defaultIface)
 	} else {
@@ -702,6 +711,7 @@ func (o *OpenVPNCore) teardownNAT() {
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
 
 	if o.TProxyPort > 0 {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, o.Subnet))
 		chainName := fmt.Sprintf("XRAY_%s", o.InterfaceName)
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", o.InterfaceName, chainName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
