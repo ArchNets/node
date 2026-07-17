@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,16 +25,17 @@ import (
 
 // SSHCore manages the SSH tunnel server
 type SSHCore struct {
-	Tag        string
-	Port       int
-	udpgwAddr  string // e.g. "127.0.0.1:7300"; empty disables udpgw interception
-	config     *ssh.ServerConfig
-	listener   net.Listener
-	users      *SSHUserMap
-	limiterRef *limiter.Limiter
-	sessions   sync.Map // map[string]*SSHSession - key: "uid:ip"
-	running    atomic.Bool
-	wg         sync.WaitGroup
+	Tag          string
+	Port         int
+	udpgwAddr    string // e.g. "127.0.0.1:7300"; empty disables udpgw interception
+	config       *ssh.ServerConfig
+	listener     net.Listener
+	users        *SSHUserMap
+	limiterRef   *limiter.Limiter
+	sessions     sync.Map // map[string]*SSHSession - key: "uid:ip"
+	pendingConns sync.Map // map[net.Conn]struct{}
+	running      atomic.Bool
+	wg           sync.WaitGroup
 
 	// Traffic accounting
 	trafficMu sync.RWMutex
@@ -181,6 +183,14 @@ func (s *SSHCore) Stop() error {
 		s.listener.Close()
 	}
 
+	// Close all pending connections
+	s.pendingConns.Range(func(key, value interface{}) bool {
+		if conn, ok := key.(net.Conn); ok {
+			conn.Close()
+		}
+		return true
+	})
+
 	// Close all active sessions
 	s.sessions.Range(func(key, value interface{}) bool {
 		if session, ok := value.(*SSHSession); ok {
@@ -189,7 +199,18 @@ func (s *SSHCore) Stop() error {
 		return true
 	})
 
-	s.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		log.WithField("tag", s.Tag).Warn("SSH server stop timed out waiting for goroutines to finish")
+	}
+
 	log.WithField("tag", s.Tag).Info("SSH server stopped")
 	return nil
 }
@@ -199,13 +220,18 @@ func (s *SSHCore) acceptLoop() {
 	for s.running.Load() {
 		conn, err := s.listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			if s.running.Load() {
 				log.WithError(err).Error("SSH accept error")
+				time.Sleep(100 * time.Millisecond)
 			}
 			continue
 		}
 
 		s.wg.Add(1)
+		s.pendingConns.Store(conn, struct{}{})
 		go s.handleConnection(conn)
 	}
 }
@@ -215,13 +241,24 @@ func (s *SSHCore) handleConnection(netConn net.Conn) {
 	defer s.wg.Done()
 	defer netConn.Close()
 
+	// Set handshake deadline
+	if err := netConn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		log.WithError(err).Debug("Failed to set connection deadline")
+	}
+
 	// Perform SSH handshake
 	sshConn, chans, reqs, err := ssh.NewServerConn(netConn, s.config)
 	if err != nil {
+		s.pendingConns.Delete(netConn)
 		log.WithError(err).Debug("SSH handshake failed")
 		return
 	}
 	defer sshConn.Close()
+
+	// Clear deadline for successful handshake
+	if err := netConn.SetDeadline(time.Time{}); err != nil {
+		log.WithError(err).Debug("Failed to clear connection deadline")
+	}
 
 	// Extract user info from permissions
 	uid := 0
@@ -244,6 +281,8 @@ func (s *SSHCore) handleConnection(netConn net.Conn) {
 	}
 	s.sessions.Store(sessionKey, session)
 	defer s.sessions.Delete(sessionKey)
+
+	s.pendingConns.Delete(netConn)
 
 	log.WithFields(log.Fields{
 		"uid": uid,

@@ -43,10 +43,26 @@ func generateSSHTag(info *panel.NodeInfo) string {
 // Start starts the SSH controller
 func (c *SSHController) Start() error {
 	// Get initial user list
-	users, err := c.apiClient.GetUserList()
-	if err != nil {
-		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
-		users = []panel.UserInfo{}
+	var users []panel.UserInfo
+	var err error
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+
+	for i := 0; i <= len(backoffs); i++ {
+		users, err = c.apiClient.GetUserList()
+		if err == nil {
+			break
+		}
+		if i < len(backoffs) {
+			log.WithError(err).WithFields(log.Fields{
+				"tag":     c.tag,
+				"attempt": i + 1,
+				"nextIn":  backoffs[i],
+			}).Warn("Failed to fetch initial user list, retrying...")
+			time.Sleep(backoffs[i])
+		} else {
+			log.WithError(err).WithField("tag", c.tag).Warn("Failed to fetch initial user list, starting with empty list")
+			users = []panel.UserInfo{}
+		}
 	}
 	c.userList = users
 

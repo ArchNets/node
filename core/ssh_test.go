@@ -448,3 +448,64 @@ func TestExtractIP(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHCoreStopWithStuckHandshake(t *testing.T) {
+	sshCore, err := NewSSHCore("test-ssh-stuck", 0, "", "")
+	if err != nil {
+		t.Fatalf("Failed to create SSHCore: %v", err)
+	}
+
+	err = sshCore.Start()
+	if err != nil {
+		t.Fatalf("Failed to start SSH server: %v", err)
+	}
+
+	addr := sshCore.listener.Addr().(*net.TCPAddr)
+
+	// Connect a raw TCP client but send no data (stuck handshake)
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", addr.Port))
+	if err != nil {
+		t.Fatalf("Failed to connect raw TCP client: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait for acceptLoop to process the connection
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the connection is tracked in pendingConns
+	count := 0
+	sshCore.pendingConns.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	if count != 1 {
+		t.Errorf("Expected 1 pending connection, got %d", count)
+	}
+
+	// Stop the server and measure time
+	start := time.Now()
+	err = sshCore.Stop()
+	if err != nil {
+		t.Fatalf("Failed to stop SSH server: %v", err)
+	}
+	duration := time.Since(start)
+
+	if duration > 2*time.Second {
+		t.Errorf("Stop took too long: %v, expected it to finish quickly", duration)
+	}
+
+	// Verify the client connection was closed by checking if we get EOF (not timeout)
+	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	readBuf := make([]byte, 1024)
+	for {
+		_, err = conn.Read(readBuf)
+		if err != nil {
+			break
+		}
+	}
+	if err == nil {
+		t.Error("Client connection was not closed by Stop()")
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Error("Client connection was not closed by Stop() (read timed out)")
+	}
+}
