@@ -11,7 +11,9 @@ import (
 	"github.com/archnets/node/core/app/dispatcher"
 	_ "github.com/archnets/node/core/distro/all"
 	log "github.com/sirupsen/logrus"
+	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/proxyman"
+	"github.com/xtls/xray-core/app/router"
 	"github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
@@ -42,6 +44,9 @@ type XrayCore struct {
 	dispatcher                  *dispatcher.DefaultDispatcher
 	statsManager                xraystats.Manager
 	outboundNames               []string
+	wgOutbounds                 map[string]*core.OutboundHandlerConfig
+	wgFailures                  map[string]int
+	wgWatchdogPeriodic          *task.Task
 }
 
 type UserMap struct {
@@ -63,7 +68,15 @@ func New(config *conf.Conf, client *panel.ClientV2) *XrayCore {
 func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	v.access.Lock()
 	defer v.access.Unlock()
-	v.Server = getCore(v.Config, serverconfig)
+
+	// Custom config
+	dnsConfig, outBoundConfig, routeConfig, wgOutbounds, err := GetCustomConfig(serverconfig)
+	if err != nil {
+		log.WithField("err", err).Panic("failed to build custom config")
+	}
+	v.wgOutbounds = wgOutbounds
+
+	v.Server = getCore(v.Config, dnsConfig, outBoundConfig, routeConfig, serverconfig)
 	if err := v.Server.Start(); err != nil {
 		return err
 	}
@@ -90,6 +103,9 @@ func (v *XrayCore) Close() error {
 	if v.serverConfigMonitorPeriodic != nil {
 		v.serverConfigMonitorPeriodic.Close()
 	}
+	if v.wgWatchdogPeriodic != nil {
+		v.wgWatchdogPeriodic.Close()
+	}
 	v.Config = nil
 	v.ihm = nil
 	v.ohm = nil
@@ -101,17 +117,12 @@ func (v *XrayCore) Close() error {
 	return nil
 }
 
-func getCore(c *conf.Conf, serverconfig *panel.ServerConfigResponse) *core.Instance {
+func getCore(c *conf.Conf, dnsConfig *dns.Config, outBoundConfig []*core.OutboundHandlerConfig, routeConfig *router.Config, serverconfig *panel.ServerConfigResponse) *core.Instance {
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,
 		AccessLog: c.LogConfig.Access,
 		ErrorLog:  c.LogConfig.Output,
-	}
-	// Custom config
-	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(serverconfig)
-	if err != nil {
-		log.WithField("err", err).Panic("failed to build custom config")
 	}
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
@@ -230,6 +241,17 @@ func (c *XrayCore) startTasks(serverconfig *panel.ServerConfigResponse) {
 		Execute:  c.ServerConfigMonitor,
 	}
 	_ = c.serverConfigMonitorPeriodic.Start(false)
+
+	// Start WireGuard watchdog task if there are wireguard outbounds
+	if len(c.wgOutbounds) > 0 {
+		c.wgFailures = make(map[string]int)
+		c.wgWatchdogPeriodic = &task.Task{
+			Interval: 60 * time.Second,
+			Execute:  c.WireguardWatchdog,
+		}
+		_ = c.wgWatchdogPeriodic.Start(false)
+		log.Infof("Started WireGuard watchdog task for %d outbounds", len(c.wgOutbounds))
+	}
 }
 
 func (c *XrayCore) ServerConfigMonitor() (err error) {

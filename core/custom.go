@@ -1,10 +1,12 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/archnets/node/api/panel"
 	log "github.com/sirupsen/logrus"
@@ -44,7 +46,8 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 	return false
 }
 
-func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
+func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, map[string]*core.OutboundHandlerConfig, error) {
+	wgOutbounds := make(map[string]*core.OutboundHandlerConfig)
 	var ip_strategy string
 	if serverconfig.Data.IPStrategy != "" {
 		switch serverconfig.Data.IPStrategy {
@@ -225,15 +228,68 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				delete(jsonsettings, "address")
 				delete(jsonsettings, "port")
 				jsonsettings["secretKey"] = outbounditem.WireguardPrivateKey
+				
+				var addresses []string
+				hasIPv6 := false
 				if len(outbounditem.WireguardAddress) > 0 {
-					jsonsettings["address"] = []string{outbounditem.WireguardAddress}
+					parts := strings.Split(outbounditem.WireguardAddress, ",")
+					for _, p := range parts {
+						trimmed := strings.TrimSpace(p)
+						if trimmed != "" {
+							addresses = append(addresses, trimmed)
+							ipStr := trimmed
+							if idx := strings.Index(ipStr, "/"); idx != -1 {
+								ipStr = ipStr[:idx]
+							}
+							ip := net.ParseIP(ipStr)
+							if ip != nil && ip.To4() == nil {
+								hasIPv6 = true
+							}
+						}
+					}
 				}
+				if len(addresses) > 0 {
+					jsonsettings["address"] = addresses
+				}
+				if hasIPv6 {
+					jsonsettings["domainStrategy"] = "ForceIPv4v6"
+				} else {
+					jsonsettings["domainStrategy"] = "ForceIPv4"
+				}
+
 				if outbounditem.WireguardMTU > 0 {
 					jsonsettings["mtu"] = outbounditem.WireguardMTU
 				}
+
+				endpoint := outbounditem.WireguardPeerEndpoint
+				if endpoint != "" {
+					host, port, err := net.SplitHostPort(endpoint)
+					if err == nil {
+						if ip := net.ParseIP(host); ip == nil {
+							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+							if err == nil && len(ips) > 0 {
+								var targetIP net.IP
+								for _, ip := range ips {
+									if ip.To4() != nil {
+										targetIP = ip
+										break
+									}
+								}
+								if targetIP == nil {
+									targetIP = ips[0]
+								}
+								endpoint = net.JoinHostPort(targetIP.String(), port)
+							}
+							cancel()
+						}
+					}
+				}
+
 				peer := map[string]interface{}{
 					"publicKey": outbounditem.WireguardPeerPublicKey,
-					"endpoint":  outbounditem.WireguardPeerEndpoint,
+					"endpoint":  endpoint,
+					"keepAlive": 25,
 				}
 				jsonsettings["peers"] = []interface{}{peer}
 
@@ -383,6 +439,9 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			if hasOutboundWithTag(coreOutboundConfig, custom_outbound.Tag) {
 				continue
 			}
+			if outbounditem.Protocol == "wireguard" {
+				wgOutbounds[outbounditem.Name] = custom_outbound
+			}
 			coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
 		}
 	}
@@ -485,11 +544,11 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	//build config
 	DnsConfig, err := coreDnsConfig.Build()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	RouterConfig, err := coreRouterConfig.Build()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return DnsConfig, coreOutboundConfig, RouterConfig, nil
+	return DnsConfig, coreOutboundConfig, RouterConfig, wgOutbounds, nil
 }
