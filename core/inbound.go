@@ -146,13 +146,14 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 			shortIds = []string{v.RealityShortID}
 		}
 		in.StreamSetting.REALITYSettings = &coreConf.REALITYConfig{
-			Dest:        d,
-			Xver:        uint64(0),
-			Show:        false,
-			ServerNames: []string{v.SNI},
-			PrivateKey:  v.RealityPrivateKey,
-			ShortIds:    shortIds,
-			SpiderX:     v.RealitySpiderX,
+			Dest:         d,
+			Xver:         uint64(0),
+			Show:         false,
+			ServerNames:  []string{v.SNI},
+			PrivateKey:   v.RealityPrivateKey,
+			MinClientVer: "0.0.1",
+			ShortIds:     shortIds,
+			SpiderX:      v.RealitySpiderX,
 		}
 	default:
 		break
