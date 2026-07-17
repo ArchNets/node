@@ -46,8 +46,110 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 	return false
 }
 
-func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, map[string]*core.OutboundHandlerConfig, error) {
-	wgOutbounds := make(map[string]*core.OutboundHandlerConfig)
+type WireguardOutbound struct {
+	Config   *core.OutboundHandlerConfig
+	Outbound panel.Outbound
+}
+
+func BuildWireguardOutboundJSON(outbounditem panel.Outbound, endpoint string) (map[string]interface{}, error) {
+	jsonsettings := map[string]interface{}{
+		"secretKey": outbounditem.WireguardPrivateKey,
+	}
+
+	var addresses []string
+	hasIPv6 := false
+	if len(outbounditem.WireguardAddress) > 0 {
+		parts := strings.Split(outbounditem.WireguardAddress, ",")
+		for _, p := range parts {
+			trimmed := strings.TrimSpace(p)
+			if trimmed != "" {
+				addresses = append(addresses, trimmed)
+				ipStr := trimmed
+				if idx := strings.Index(ipStr, "/"); idx != -1 {
+					ipStr = ipStr[:idx]
+				}
+				ip := net.ParseIP(ipStr)
+				if ip != nil && ip.To4() == nil {
+					hasIPv6 = true
+				}
+			}
+		}
+	}
+	if len(addresses) > 0 {
+		jsonsettings["address"] = addresses
+	}
+	if hasIPv6 {
+		jsonsettings["domainStrategy"] = "ForceIPv4v6"
+	} else {
+		jsonsettings["domainStrategy"] = "ForceIPv4"
+	}
+
+	if outbounditem.WireguardMTU > 0 {
+		jsonsettings["mtu"] = outbounditem.WireguardMTU
+	}
+
+	peer := map[string]interface{}{
+		"publicKey": outbounditem.WireguardPeerPublicKey,
+		"endpoint":  endpoint,
+		"keepAlive": 25,
+	}
+	jsonsettings["peers"] = []interface{}{peer}
+
+	if len(outbounditem.WireguardReserved) > 0 {
+		parts := strings.Split(outbounditem.WireguardReserved, ",")
+		if len(parts) == 3 {
+			var res []int
+			for _, p := range parts {
+				v, err := strconv.Atoi(strings.TrimSpace(p))
+				if err == nil {
+					res = append(res, v)
+				}
+			}
+			if len(res) == 3 {
+				jsonsettings["reserved"] = res
+			}
+		}
+	}
+
+	// Force gVisor userspace TUN to avoid kernel TUN failures on VPSes
+	// without /dev/net/tun, and to prevent sysctl side effects
+	// (rp_filter=0 globally) that kernel TUN would cause.
+	jsonsettings["noKernelTun"] = true
+
+	return jsonsettings, nil
+}
+
+func BuildWireguardOutbound(outbounditem panel.Outbound, endpoint string) (*core.OutboundHandlerConfig, error) {
+	jsonsettings, err := BuildWireguardOutboundJSON(outbounditem, endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	settings, err := json.Marshal(jsonsettings)
+	if err != nil {
+		return nil, err
+	}
+	rawSettings := json.RawMessage(settings)
+
+	outbound := &coreConf.OutboundDetourConfig{
+		Tag:      outbounditem.Name,
+		Protocol: outbounditem.Protocol,
+		Settings: &rawSettings,
+	}
+	
+	// Log the WireGuard outbound config for debugging
+	log.WithFields(log.Fields{
+		"tag":      outbounditem.Name,
+		"address":  outbounditem.WireguardAddress,
+		"endpoint": endpoint,
+		"mtu":      outbounditem.WireguardMTU,
+	}).Info("Built WireGuard outbound config")
+
+	return outbound.Build()
+}
+
+func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, map[string]*WireguardOutbound, error) {
+	wgOutbounds := make(map[string]*WireguardOutbound)
 	var ip_strategy string
 	if serverconfig.Data.IPStrategy != "" {
 		switch serverconfig.Data.IPStrategy {
@@ -225,42 +327,6 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					jsonsettings["flow"] = outbounditem.Flow
 				}
 			case "wireguard":
-				delete(jsonsettings, "address")
-				delete(jsonsettings, "port")
-				jsonsettings["secretKey"] = outbounditem.WireguardPrivateKey
-				
-				var addresses []string
-				hasIPv6 := false
-				if len(outbounditem.WireguardAddress) > 0 {
-					parts := strings.Split(outbounditem.WireguardAddress, ",")
-					for _, p := range parts {
-						trimmed := strings.TrimSpace(p)
-						if trimmed != "" {
-							addresses = append(addresses, trimmed)
-							ipStr := trimmed
-							if idx := strings.Index(ipStr, "/"); idx != -1 {
-								ipStr = ipStr[:idx]
-							}
-							ip := net.ParseIP(ipStr)
-							if ip != nil && ip.To4() == nil {
-								hasIPv6 = true
-							}
-						}
-					}
-				}
-				if len(addresses) > 0 {
-					jsonsettings["address"] = addresses
-				}
-				if hasIPv6 {
-					jsonsettings["domainStrategy"] = "ForceIPv4v6"
-				} else {
-					jsonsettings["domainStrategy"] = "ForceIPv4"
-				}
-
-				if outbounditem.WireguardMTU > 0 {
-					jsonsettings["mtu"] = outbounditem.WireguardMTU
-				}
-
 				endpoint := outbounditem.WireguardPeerEndpoint
 				if endpoint != "" {
 					host, port, err := net.SplitHostPort(endpoint)
@@ -286,33 +352,24 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					}
 				}
 
-				peer := map[string]interface{}{
-					"publicKey": outbounditem.WireguardPeerPublicKey,
-					"endpoint":  endpoint,
-					"keepAlive": 25,
-				}
-				jsonsettings["peers"] = []interface{}{peer}
-
-				if len(outbounditem.WireguardReserved) > 0 {
-					parts := strings.Split(outbounditem.WireguardReserved, ",")
-					if len(parts) == 3 {
-						var res []int
-						for _, p := range parts {
-							v, err := strconv.Atoi(strings.TrimSpace(p))
-							if err == nil {
-								res = append(res, v)
-							}
-						}
-						if len(res) == 3 {
-							jsonsettings["reserved"] = res
-						}
-					}
+				custom_outbound, err := BuildWireguardOutbound(outbounditem, endpoint)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"name": outbounditem.Name,
+						"err":  err,
+					}).Warn("Failed to build WireGuard outbound, skipping")
+					continue
 				}
 
-				// Force gVisor userspace TUN to avoid kernel TUN failures on VPSes
-				// without /dev/net/tun, and to prevent sysctl side effects
-				// (rp_filter=0 globally) that kernel TUN would cause.
-				jsonsettings["noKernelTun"] = true
+				if hasOutboundWithTag(coreOutboundConfig, custom_outbound.Tag) {
+					continue
+				}
+				wgOutbounds[outbounditem.Name] = &WireguardOutbound{
+					Config:   custom_outbound,
+					Outbound: outbounditem,
+				}
+				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
+				continue
 			default:
 				continue
 			}
@@ -322,23 +379,7 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 
 			var outbound *coreConf.OutboundDetourConfig
 
-			if outbounditem.Protocol == "wireguard" {
-				// WireGuard outbounds are self-contained tunnels;
-				// they don't use transport or TLS stream settings.
-				outbound = &coreConf.OutboundDetourConfig{
-					Tag:      outbounditem.Name,
-					Protocol: outbounditem.Protocol,
-					Settings: &rawSettings,
-				}
-				// Log the WireGuard outbound config for debugging
-				log.WithFields(log.Fields{
-					"tag":      outbounditem.Name,
-					"address":  outbounditem.WireguardAddress,
-					"mtu":      outbounditem.WireguardMTU,
-					"endpoint": outbounditem.WireguardPeerEndpoint,
-				}).Info("Built WireGuard outbound config")
-			} else {
-				// Setup transport network
+			// Setup transport network
 				transport := outbounditem.Transport
 				if transport == "" {
 					transport = "tcp"
@@ -424,7 +465,6 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					Settings:      &rawSettings,
 					StreamSetting: streamSettings,
 				}
-			}
 
 			custom_outbound, err := outbound.Build()
 			if err != nil {
@@ -438,9 +478,6 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 
 			if hasOutboundWithTag(coreOutboundConfig, custom_outbound.Tag) {
 				continue
-			}
-			if outbounditem.Protocol == "wireguard" {
-				wgOutbounds[outbounditem.Name] = custom_outbound
 			}
 			coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
 		}

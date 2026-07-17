@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -44,9 +45,13 @@ type XrayCore struct {
 	dispatcher                  *dispatcher.DefaultDispatcher
 	statsManager                xraystats.Manager
 	outboundNames               []string
-	wgOutbounds                 map[string]*core.OutboundHandlerConfig
+	wgOutbounds                 map[string]*WireguardOutbound
 	wgFailures                  map[string]int
+	wgEndpointIndex             map[string]int
 	wgWatchdogPeriodic          *task.Task
+	watchdogCtx                 context.Context
+	watchdogCancel              context.CancelFunc
+	wgHandlerMissing            map[string]bool
 }
 
 type UserMap struct {
@@ -55,12 +60,16 @@ type UserMap struct {
 }
 
 func New(config *conf.Conf, client *panel.ClientV2) *XrayCore {
+	ctx, cancel := context.WithCancel(context.Background())
 	core := &XrayCore{
 		Config: config,
 		Client: client,
 		users: &UserMap{
 			uidMap: make(map[string]int),
 		},
+		watchdogCtx:      ctx,
+		watchdogCancel:   cancel,
+		wgHandlerMissing: make(map[string]bool),
 	}
 	return core
 }
@@ -100,6 +109,9 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 func (v *XrayCore) Close() error {
 	v.access.Lock()
 	defer v.access.Unlock()
+	if v.watchdogCancel != nil {
+		v.watchdogCancel()
+	}
 	if v.serverConfigMonitorPeriodic != nil {
 		v.serverConfigMonitorPeriodic.Close()
 	}

@@ -85,6 +85,61 @@ func (c *xrayConn) SetDeadline(t time.Time) error  { return nil }
 func (c *xrayConn) SetReadDeadline(t time.Time) error { return nil }
 func (c *xrayConn) SetWriteDeadline(t time.Time) error { return nil }
 
+var fallbackEndpoints = []string{
+	"162.159.192.1:2408",
+	"162.159.192.1:500",
+	"162.159.192.1:1701",
+	"162.159.192.1:4500",
+	"188.114.97.1:2408",
+	"188.114.97.1:500",
+	"188.114.97.1:1701",
+	"188.114.97.1:4500",
+}
+
+func (c *XrayCore) getNextEndpoint(tag string, originalEndpoint string) string {
+	if c.wgEndpointIndex == nil {
+		c.wgEndpointIndex = make(map[string]int)
+	}
+	idx := c.wgEndpointIndex[tag]
+	// Increment index for the next call
+	c.wgEndpointIndex[tag] = (idx + 1) % (len(fallbackEndpoints) + 1)
+
+	if idx == 0 {
+		// Try dynamic re-resolution of original endpoint
+		endpoint := originalEndpoint
+		if endpoint != "" {
+			host, port, err := net.SplitHostPort(endpoint)
+			if err == nil {
+				if ip := net.ParseIP(host); ip == nil {
+					ctx, cancel := context.WithTimeout(c.watchdogCtx, 2*time.Second)
+					ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+					cancel()
+					if err == nil && len(ips) > 0 {
+						var targetIP net.IP
+						for _, ip := range ips {
+							if ip.To4() != nil {
+								targetIP = ip
+								break
+							}
+						}
+						if targetIP == nil {
+							targetIP = ips[0]
+						}
+						return net.JoinHostPort(targetIP.String(), port)
+					}
+				} else {
+					return endpoint
+				}
+			}
+		}
+		// If original endpoint resolution fails, fall back to first pool endpoint
+		idx = 1
+		c.wgEndpointIndex[tag] = 2
+	}
+
+	return fallbackEndpoints[idx-1]
+}
+
 // DialOutbound dials a connection forced through a specific outbound tag.
 func (v *XrayCore) DialOutbound(ctx context.Context, tag string, dest xnet.Destination) (net.Conn, error) {
 	// Force outbound tag
@@ -117,7 +172,7 @@ func (v *XrayCore) DialOutbound(ctx context.Context, tag string, dest xnet.Desti
 }
 
 func (v *XrayCore) RemoveOutbound(tag string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(v.watchdogCtx, 10*time.Second)
 	defer cancel()
 	return v.ohm.RemoveHandler(ctx, tag)
 }
@@ -131,7 +186,7 @@ func (v *XrayCore) AddOutbound(config *core.OutboundHandlerConfig) error {
 	if !ok {
 		return fmt.Errorf("not an OutboundHandler")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(v.watchdogCtx, 10*time.Second)
 	defer cancel()
 	if err := v.ohm.AddHandler(ctx, handler); err != nil {
 		return err
@@ -176,36 +231,91 @@ func (c *XrayCore) testWireguardConnection(ctx context.Context, tag string) erro
 }
 
 func (c *XrayCore) WireguardWatchdog() error {
+	if c.wgHandlerMissing == nil {
+		c.wgHandlerMissing = make(map[string]bool)
+	}
 	for tag, config := range c.wgOutbounds {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := c.testWireguardConnection(ctx, tag)
-		cancel()
+		var err error
+		if c.wgHandlerMissing[tag] {
+			err = fmt.Errorf("handler is missing from previous cycle")
+		} else {
+			ctx, cancel := context.WithTimeout(c.watchdogCtx, 10*time.Second)
+			err = c.testWireguardConnection(ctx, tag)
+			cancel()
+		}
 
 		if err != nil {
-			c.wgFailures[tag]++
-			log.WithFields(log.Fields{
-				"tag":      tag,
-				"err":      err,
-				"failures": c.wgFailures[tag],
-			}).Warn("WireGuard connection test failed")
+			if c.wgHandlerMissing[tag] {
+				log.WithField("tag", tag).Warn("WireGuard handler is missing, attempting recovery...")
+			} else {
+				c.wgFailures[tag]++
+				log.WithFields(log.Fields{
+					"tag":      tag,
+					"err":      err,
+					"failures": c.wgFailures[tag],
+				}).Warn("WireGuard connection test failed")
+			}
 
-			if c.wgFailures[tag] >= 3 {
-				log.WithField("tag", tag).Warn("WireGuard outbound failed 3 consecutive times, recreating...")
+			if c.wgHandlerMissing[tag] || c.wgFailures[tag] >= 3 {
 				c.wgFailures[tag] = 0
 
-				// Recreate the outbound handler
-				if err := c.RemoveOutbound(tag); err != nil {
+				// Resolve next endpoint and rebuild the config
+				origEndpoint := config.Outbound.WireguardPeerEndpoint
+				newEndpoint := c.getNextEndpoint(tag, origEndpoint)
+				log.WithFields(log.Fields{
+					"tag":             tag,
+					"new_endpoint":    newEndpoint,
+					"endpoint_index":  c.wgEndpointIndex[tag],
+				}).Info("Rebuilding WireGuard config with rotated/re-resolved endpoint")
+
+				newConfig, err := BuildWireguardOutbound(config.Outbound, newEndpoint)
+				if err != nil {
 					log.WithFields(log.Fields{
 						"tag": tag,
 						"err": err,
-					}).Error("Failed to remove wireguard outbound handler")
+					}).Error("Failed to rebuild wireguard outbound config")
+					continue
 				}
-				if err := c.AddOutbound(config); err != nil {
+
+				// If it wasn't already missing, remove it first
+				if !c.wgHandlerMissing[tag] {
+					if err := c.RemoveOutbound(tag); err != nil {
+						log.WithFields(log.Fields{
+							"tag": tag,
+							"err": err,
+						}).Error("Failed to remove wireguard outbound handler")
+					}
+				}
+
+				var addErr error
+				for attempt := 1; attempt <= 3; attempt++ {
+					addErr = c.AddOutbound(newConfig)
+					if addErr == nil {
+						break
+					}
+					log.WithFields(log.Fields{
+						"tag":     tag,
+						"attempt": attempt,
+						"err":     addErr,
+					}).Error("Failed to add wireguard outbound handler, retrying in 2s...")
+
+					select {
+					case <-time.After(2 * time.Second):
+					case <-c.watchdogCtx.Done():
+						return nil // abort recovery, shutting down
+					}
+				}
+
+				if addErr != nil {
 					log.WithFields(log.Fields{
 						"tag": tag,
-						"err": err,
-					}).Error("Failed to add wireguard outbound handler")
+						"err": addErr,
+					}).Error("Failed to add wireguard outbound handler after retries")
+					c.wgHandlerMissing[tag] = true
 				} else {
+					// Update the stored config in wgOutbounds
+					config.Config = newConfig
+					c.wgHandlerMissing[tag] = false
 					log.WithField("tag", tag).Info("Successfully recreated wireguard outbound handler")
 				}
 			}
