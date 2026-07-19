@@ -45,6 +45,16 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 	if pullinterval <= 0 {
 		pullinterval = 60
 	}
+	// Count total enabled protocols per type first to construct siblingTags list
+	totalCounts := make(map[string]int)
+	if serverconfig.Data.Protocols != nil {
+		for _, cfg := range *serverconfig.Data.Protocols {
+			if cfg.Enable {
+				totalCounts[cfg.Type]++
+			}
+		}
+	}
+
 	// Track protocol type counts for generating unique tags
 	protocolCounts := make(map[string]int)
 	// Track created clients for reuse
@@ -143,7 +153,15 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 				"port": nodeconfig.Port,
 			}).Info("OpenVPN protocol detected, using OpenVPN controller")
 		} else {
-			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter))
+			var siblingTags []string
+			N := totalCounts[nodeconfig.Type]
+			if N > 0 {
+				siblingTags = append(siblingTags, fmt.Sprintf("%s:%d", nodeconfig.Type, config.ApiConfig.ServerId))
+				for i := 2; i <= N; i++ {
+					siblingTags = append(siblingTags, fmt.Sprintf("%s-%d:%d", nodeconfig.Type, i, config.ApiConfig.ServerId))
+				}
+			}
+			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter, siblingTags))
 		}
 	}
 

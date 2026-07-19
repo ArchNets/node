@@ -286,6 +286,35 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 	return &onlineUser, nil
 }
 
+// GetOnlineDevicesForTags aggregates online users across all limiters matching the provided tags, draining each limiter's UserOnlineIP map.
+func GetOnlineDevicesForTags(tags []string) ([]panel.OnlineUser, error) {
+	var onlineUsers []panel.OnlineUser
+	limitLock.RLock()
+	defer limitLock.RUnlock()
+
+	for _, tag := range tags {
+		l, ok := limiter[tag]
+		if !ok {
+			continue
+		}
+		l.UserOnlineIP.Range(func(key, value interface{}) bool {
+			taguuid := key.(string)
+			ipMap := value.(*sync.Map)
+			ipMap.Range(func(key, value interface{}) bool {
+				uid := value.(int)
+				ip := key.(string)
+				l.OldUserOnline.Store(ip, uid)
+				onlineUsers = append(onlineUsers, panel.OnlineUser{UID: uid, IP: ip})
+				return true
+			})
+			l.UserOnlineIP.Delete(taguuid) // Reset online device
+			return true
+		})
+	}
+
+	return onlineUsers, nil
+}
+
 type UserIpList struct {
 	Uid    int      `json:"Uid"`
 	IpList []string `json:"Ips"`

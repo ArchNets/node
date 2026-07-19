@@ -8,6 +8,7 @@ import (
 	"github.com/archnets/node/common/serverstatus"
 	"github.com/archnets/node/common/task"
 	vCore "github.com/archnets/node/core"
+	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -163,13 +164,13 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 		}
 	}
 
-	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
-		log.Print(err)
-	} else {
-		if c.isPrimaryReporter {
+	if c.isPrimaryReporter {
+		if onlineDevice, err := limiter.GetOnlineDevicesForTags(c.siblingTags); err != nil {
+			log.Print(err)
+		} else {
 			// always report online users, even if empty, to clear backend state
 			var result []panel.OnlineUser
-			if len(*onlineDevice) > 0 {
+			if len(onlineDevice) > 0 {
 				// only report user has traffic > 0 bytes to filter out ping tests
 				var nocountUID = make(map[int]struct{})
 				for _, traffic := range userTraffic {
@@ -178,7 +179,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 						nocountUID[traffic.UID] = struct{}{}
 					}
 				}
-				for _, online := range *onlineDevice {
+				for _, online := range onlineDevice {
 					if _, ok := nocountUID[online.UID]; !ok {
 						result = append(result, online)
 					}
@@ -191,7 +192,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 					"err": err,
 				}).Info("Report online users failed")
 			} else {
-				log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(*onlineDevice), len(result))
+				log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(onlineDevice), len(result))
 			}
 		}
 	}
