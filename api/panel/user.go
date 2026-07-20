@@ -8,8 +8,8 @@ import (
 )
 
 type OnlineUser struct {
-	UID int
-	IP  string
+	UID int    `json:"uid"`
+	IP  string `json:"ip"`
 }
 
 type UserInfo struct {
@@ -32,20 +32,22 @@ type AliveMap struct {
 	Alive map[int]int `json:"alive"`
 }
 
-func (c *ClientV1) GetUserList() ([]UserInfo, error) {
+func (c *ClientV1) GetUserList(protocolName string) ([]UserInfo, error) {
 	c.userMu.Lock()
 	defer c.userMu.Unlock()
 
 	const p = "/v1/server/user"
+	etag := c.userEtags[protocolName]
 	r, err := c.Client.R().
-		SetHeader("If-None-Match", c.userEtag).
+		SetQueryParam("protocol", protocolName).
+		SetHeader("If-None-Match", etag).
 		SetHeader("Cache-Control", "no-cache, no-store").
 		SetHeader("Pragma", "no-cache").
 		ForceContentType("application/json").
 		SetDoNotParseResponse(true).
 		Get(p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
+		return nil, fmt.Errorf("failed to access %s: %w", path.Join(c.APIHost+p), err)
 	}
 	if r == nil || r.RawResponse == nil {
 		return nil, fmt.Errorf("server response is empty")
@@ -53,7 +55,10 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 	defer r.RawResponse.Body.Close()
 
 	if r.StatusCode() == 304 {
-		return c.UserList.Users, nil
+		if cached, ok := c.userLists[protocolName]; ok && cached != nil {
+			return cached.Users, nil
+		}
+		return []UserInfo{}, nil
 	}
 
 	if r.StatusCode() >= 400 {
@@ -66,8 +71,8 @@ func (c *ClientV1) GetUserList() ([]UserInfo, error) {
 		return nil, fmt.Errorf("failed to decode user list: %w", err)
 	}
 
-	c.userEtag = r.Header().Get("ETag")
-	c.UserList = userlist
+	c.userEtags[protocolName] = r.Header().Get("ETag")
+	c.userLists[protocolName] = userlist
 	return userlist.Users, nil
 }
 
@@ -84,24 +89,28 @@ func (c *ClientV1) GetUserAlive() (map[int]int, error) {
 		SetHeader("Pragma", "no-cache").
 		ForceContentType("application/json").
 		Get(path)
-	if err != nil || r.StatusCode() >= 399 {
-		return nil, fmt.Errorf("failed to get alive list: %v", err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get alive list: %w", err)
 	}
 	if r == nil || r.RawResponse == nil {
-		return nil, fmt.Errorf("received nil response or raw response")
+		return nil, fmt.Errorf("failed to get alive list: received nil response or raw response")
+	}
+	if r.StatusCode() >= 399 {
+		body := r.Body()
+		return nil, fmt.Errorf("failed to get alive list: status %d, body: %s", r.StatusCode(), string(body))
 	}
 	defer r.RawResponse.Body.Close()
 
 	aliveMap := &AliveMap{}
-	if err := json.Unmarshal(r.Body(), aliveMap); err == nil && aliveMap.Alive != nil {
-		return aliveMap.Alive, nil
+	if err := json.Unmarshal(r.Body(), aliveMap); err != nil {
+		return nil, fmt.Errorf("failed to decode alive list: %w", err)
 	}
 
 	if aliveMap.Alive == nil {
 		return nil, fmt.Errorf("alive field is missing in response")
 	}
 
-	return make(map[int]int), nil
+	return aliveMap.Alive, nil
 }
 
 type ServerPushUserTrafficRequest struct {
@@ -114,7 +123,7 @@ type UserTraffic struct {
 	Download int64 `json:"download"`
 }
 
-func (c *ClientV1) ReportUserTraffic(userTraffic *[]UserTraffic) error {
+func (c *ClientV1) ReportUserTraffic(protocolName string, userTraffic *[]UserTraffic) error {
 	traffic := make([]UserTraffic, 0)
 	for _, t := range *userTraffic {
 		traffic = append(traffic, UserTraffic{
@@ -128,6 +137,7 @@ func (c *ClientV1) ReportUserTraffic(userTraffic *[]UserTraffic) error {
 		Traffic: traffic,
 	}
 	r, err := c.Client.R().
+		SetQueryParam("protocol", protocolName).
 		SetBody(req).
 		ForceContentType("application/json").
 		Post(p)
@@ -142,12 +152,13 @@ func (c *ClientV1) ReportUserTraffic(userTraffic *[]UserTraffic) error {
 	return nil
 }
 
-func (c *ClientV1) ReportNodeOnlineUsers(data *[]OnlineUser) error {
+func (c *ClientV1) ReportNodeOnlineUsers(protocolName string, data *[]OnlineUser) error {
 	const p = "/v1/server/online"
 	users := UserOnlineBody{
 		Users: *data,
 	}
 	r, err := c.Client.R().
+		SetQueryParam("protocol", protocolName).
 		SetBody(users).
 		ForceContentType("application/json").
 		Post(p)

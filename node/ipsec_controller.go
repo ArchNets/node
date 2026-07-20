@@ -26,20 +26,24 @@ type IPsecController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	protocolIndex           int
+	perProtocolUserList     bool
 	isPrimaryReporter       bool
 }
 
 // NewIPsecController creates a new IPsec controller.
-func NewIPsecController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *IPsecController {
+func NewIPsecController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *IPsecController {
 	// xrayTag matches the panel routing rule format: "type:nodeId" (e.g. "ikev2:28", "l2tp:28")
 	xrayTag := info.Protocol.Type + ":" + strconv.Itoa(info.Id)
 	return &IPsecController{
-		tag:               generateIPsecTag(info),
-		xrayTag:           xrayTag,
-		info:              info,
-		apiClient:         apiClient,
-		isPrimaryReporter: isPrimaryReporter,
-		xrayCore:          core,
+		tag:                 generateIPsecTag(info),
+		xrayTag:             xrayTag,
+		info:                info,
+		apiClient:           apiClient,
+		protocolIndex:       protocolIndex,
+		perProtocolUserList: perProtocolUserList,
+		isPrimaryReporter:   isPrimaryReporter,
+		xrayCore:            core,
 	}
 }
 
@@ -50,7 +54,13 @@ func generateIPsecTag(info *panel.NodeInfo) string {
 // Start starts the IPsec controller.
 func (c *IPsecController) Start() error {
 	// Get initial user list
-	users, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
 		users = []panel.UserInfo{}
@@ -165,7 +175,13 @@ func (c *IPsecController) startTasks() {
 }
 
 func (c *IPsecController) userListMonitor() error {
-	newUsers, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("IPsec: Get user list failed")
 		return nil
@@ -215,7 +231,7 @@ func (c *IPsecController) reportTask() error {
 		}
 	}
 	if len(userTraffic) > 0 {
-		if err := c.apiClient.ReportUserTraffic(&userTraffic); err != nil {
+		if err := c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic); err != nil {
 			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("IPsec: Report user traffic failed")
 		} else {
 			log.WithField("node", c.tag).Infof("IPsec: Reported traffic for %d users", len(userTraffic))
@@ -224,10 +240,11 @@ func (c *IPsecController) reportTask() error {
 
 	// Report online users
 	onlineUsers := c.ipsecCore.GetOnlineUsers()
+	protocolName := c.getIndexedProtocolName()
+	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &onlineUsers); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("IPsec: Report online users failed")
+	}
 	if c.isPrimaryReporter {
-		if err := c.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("IPsec: Report online users failed")
-		}
 		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 		if err != nil {
 			log.Print(err)
@@ -241,4 +258,8 @@ func (c *IPsecController) reportTask() error {
 	}
 
 	return nil
+}
+
+func (c *IPsecController) getIndexedProtocolName() string {
+	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
 }

@@ -8,7 +8,6 @@ import (
 	"github.com/archnets/node/common/serverstatus"
 	"github.com/archnets/node/common/task"
 	vCore "github.com/archnets/node/core"
-	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -62,7 +61,13 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 
 func (c *Controller) userListMonitor() (err error) {
 	// get user info
-	newU, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	newU, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -141,7 +146,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	}
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(&userTraffic)
+		err = c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -164,36 +169,38 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 		}
 	}
 
-	if c.isPrimaryReporter {
-		if onlineDevice, err := limiter.GetOnlineDevicesForTags(c.siblingTags); err != nil {
-			log.Print(err)
+	onlineDevicePtr, err := c.limiter.GetOnlineDevice()
+	if err != nil {
+		log.Print(err)
+	} else {
+		onlineDevice := *onlineDevicePtr
+		// always report online users, even if empty, to clear backend state
+		var result []panel.OnlineUser
+		if len(onlineDevice) > 0 {
+			// only report user has traffic > 0 bytes to filter out ping tests
+			var nocountUID = make(map[int]struct{})
+			for _, traffic := range userTraffic {
+				total := traffic.Upload + traffic.Download
+				if total <= 0 {
+					nocountUID[traffic.UID] = struct{}{}
+				}
+			}
+			for _, online := range onlineDevice {
+				if _, ok := nocountUID[online.UID]; !ok {
+					result = append(result, online)
+				}
+			}
+		}
+		// Compute the indexed protocol name:
+		protocolName := c.getIndexedProtocolName()
+		// Report even if result is empty to notify backend of disconnections
+		if err = c.apiClient.ReportNodeOnlineUsers(protocolName, &result); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Info("Report online users failed")
 		} else {
-			// always report online users, even if empty, to clear backend state
-			var result []panel.OnlineUser
-			if len(onlineDevice) > 0 {
-				// only report user has traffic > 0 bytes to filter out ping tests
-				var nocountUID = make(map[int]struct{})
-				for _, traffic := range userTraffic {
-					total := traffic.Upload + traffic.Download
-					if total <= 0 {
-						nocountUID[traffic.UID] = struct{}{}
-					}
-				}
-				for _, online := range onlineDevice {
-					if _, ok := nocountUID[online.UID]; !ok {
-						result = append(result, online)
-					}
-				}
-			}
-			// Report even if result is empty to notify backend of disconnections
-			if err = c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Info("Report online users failed")
-			} else {
-				log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(onlineDevice), len(result))
-			}
+			log.WithField("node", c.tag).Infof("Total %d online users, %d reported", len(onlineDevice), len(result))
 		}
 	}
 

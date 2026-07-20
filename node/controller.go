@@ -23,25 +23,24 @@ type Controller struct {
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
 	onlineIpReportPeriodic  *task.Task
+	perProtocolUserList     bool
 	isPrimaryReporter       bool // true if this controller is responsible for reporting status/online users
-	siblingTags             []string
 }
 
 // NewController return a Node controller with default parameters.
 func NewController(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo) *Controller {
-	tag := fmt.Sprintf("%s:%d", info.Type, info.Id)
-	return NewControllerWithIndex(core, api, info, 1, true, []string{tag})
+	return NewControllerWithIndex(core, api, info, 1, false, true)
 }
 
 // NewControllerWithIndex creates a controller with a specific protocol index for unique tag generation
-func NewControllerWithIndex(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool, siblingTags []string) *Controller {
+func NewControllerWithIndex(core *vCore.XrayCore, api *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *Controller {
 	controller := &Controller{
-		server:            core,
-		apiClient:         api,
-		info:              info,
-		protocolIndex:     protocolIndex,
-		isPrimaryReporter: isPrimaryReporter,
-		siblingTags:       siblingTags,
+		server:              core,
+		apiClient:           api,
+		info:                info,
+		protocolIndex:       protocolIndex,
+		perProtocolUserList: perProtocolUserList,
+		isPrimaryReporter:   isPrimaryReporter,
 	}
 	return controller
 }
@@ -50,7 +49,13 @@ func NewControllerWithIndex(core *vCore.XrayCore, api *panel.ClientV1, info *pan
 func (c *Controller) Start() error {
 	var err error
 	// Update user
-	c.userList, err = c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	c.userList, err = c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
 		c.userList = []panel.UserInfo{}
@@ -121,4 +126,15 @@ func (c *Controller) buildNodeTag(node *panel.NodeInfo) string {
 	}
 	// Single protocol of this type: use original format
 	return fmt.Sprintf("%s:%d", node.Type, node.Id)
+}
+
+func getIndexedProtocolName(protoType string, protocolIndex int) string {
+	if protocolIndex <= 1 {
+		return protoType
+	}
+	return fmt.Sprintf("%s-%d", protoType, protocolIndex)
+}
+
+func (c *Controller) getIndexedProtocolName() string {
+	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
 }

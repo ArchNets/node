@@ -25,16 +25,20 @@ type ShadowTLSController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	protocolIndex           int
+	perProtocolUserList     bool
 	isPrimaryReporter       bool
 }
 
 // NewShadowTLSController creates a new ShadowTLS controller
-func NewShadowTLSController(apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *ShadowTLSController {
+func NewShadowTLSController(apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *ShadowTLSController {
 	return &ShadowTLSController{
-		tag:               generateShadowTLSTag(info),
-		info:              info,
-		apiClient:         apiClient,
-		isPrimaryReporter: isPrimaryReporter,
+		tag:                 generateShadowTLSTag(info),
+		info:                info,
+		apiClient:           apiClient,
+		protocolIndex:       protocolIndex,
+		perProtocolUserList: perProtocolUserList,
+		isPrimaryReporter:   isPrimaryReporter,
 	}
 }
 
@@ -45,7 +49,13 @@ func generateShadowTLSTag(info *panel.NodeInfo) string {
 // Start starts the ShadowTLS controller
 func (c *ShadowTLSController) Start() error {
 	// Get initial user list
-	users, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		return err
 	}
@@ -154,7 +164,13 @@ func (c *ShadowTLSController) startTasks() {
 
 func (c *ShadowTLSController) userListMonitor() error {
 	// Get updated user list
-	newUsers, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -229,7 +245,7 @@ func (c *ShadowTLSController) reportTask() error {
 
 	// Report traffic
 	if len(userTraffic) > 0 {
-		err := c.apiClient.ReportUserTraffic(&userTraffic)
+		err := c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -243,15 +259,16 @@ func (c *ShadowTLSController) reportTask() error {
 	// Get online users from ShadowTLS core
 	onlineUsers := c.shadowtlsCore.GetOnlineUsers()
 
-	if c.isPrimaryReporter {
-		// Report online users
-		if err := c.apiClient.ReportNodeOnlineUsers(&onlineUsers); err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("ShadowTLS: Report online users failed")
-		}
+	// Report online users
+	protocolName := c.getIndexedProtocolName()
+	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &onlineUsers); err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Info("ShadowTLS: Report online users failed")
+	}
 
+	if c.isPrimaryReporter {
 		// Report node status
 		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 		if err != nil {
@@ -269,4 +286,8 @@ func (c *ShadowTLSController) reportTask() error {
 	}
 
 	return nil
+}
+
+func (c *ShadowTLSController) getIndexedProtocolName() string {
+	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
 }

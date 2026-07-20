@@ -23,18 +23,22 @@ type WireGuardController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	protocolIndex           int
+	perProtocolUserList     bool
 	isPrimaryReporter       bool
 	xrayCore                *vCore.XrayCore
 }
 
 // NewWireGuardController creates a new WireGuard controller
-func NewWireGuardController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *WireGuardController {
+func NewWireGuardController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *WireGuardController {
 	return &WireGuardController{
-		tag:               generateWireGuardTag(info),
-		info:              info,
-		apiClient:         apiClient,
-		isPrimaryReporter: isPrimaryReporter,
-		xrayCore:          core,
+		tag:                 generateWireGuardTag(info),
+		info:                info,
+		apiClient:           apiClient,
+		protocolIndex:       protocolIndex,
+		perProtocolUserList: perProtocolUserList,
+		isPrimaryReporter:   isPrimaryReporter,
+		xrayCore:            core,
 	}
 }
 
@@ -45,7 +49,13 @@ func generateWireGuardTag(info *panel.NodeInfo) string {
 // Start starts the WireGuard controller
 func (c *WireGuardController) Start() error {
 	// Get initial user list
-	users, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
 		users = []panel.UserInfo{}
@@ -164,7 +174,13 @@ func (c *WireGuardController) startTasks() {
 
 func (c *WireGuardController) userListMonitor() error {
 	// Get updated user list
-	newUsers, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -239,7 +255,7 @@ func (c *WireGuardController) reportTask() error {
 
 	// Report traffic
 	if len(userTraffic) > 0 {
-		err := c.apiClient.ReportUserTraffic(&userTraffic)
+		err := c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -267,17 +283,18 @@ func (c *WireGuardController) reportTask() error {
 		}
 	}
 
-	if c.isPrimaryReporter {
-		// Report online users
-		if err := c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("WireGuard: Report online users failed")
-		} else {
-			log.WithField("node", c.tag).Infof("WireGuard: Total %d online users, %d reported", len(onlineUsers), len(result))
-		}
+	// Report online users
+	protocolName := c.getIndexedProtocolName()
+	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &result); err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Info("WireGuard: Report online users failed")
+	} else {
+		log.WithField("node", c.tag).Infof("WireGuard: Total %d online users, %d reported", len(onlineUsers), len(result))
+	}
 
+	if c.isPrimaryReporter {
 		// Report node status
 		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 		if err != nil {
@@ -295,4 +312,8 @@ func (c *WireGuardController) reportTask() error {
 	}
 
 	return nil
+}
+
+func (c *WireGuardController) getIndexedProtocolName() string {
+	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
 }

@@ -37,8 +37,12 @@ func (c *ClientV1) ReportNodeStatus(nodeStatus *NodeStatus) (err error) {
 		Disk:      nodeStatus.Disk,
 		UpdatedAt: time.Now().UnixMilli(),
 	}
-	if _, err = c.Client.R().SetBody(status).ForceContentType("application/json").Post(p); err != nil {
+	r, err := c.Client.R().SetBody(status).ForceContentType("application/json").Post(p)
+	if err != nil {
 		return fmt.Errorf("failed to access %s: %v", path.Join(c.APIHost+p), err.Error())
+	}
+	if r.StatusCode() >= 400 {
+		return fmt.Errorf("failed to access %s: status %d, body: %s", path.Join(c.APIHost+p), r.StatusCode(), string(r.Body()))
 	}
 	return nil
 }

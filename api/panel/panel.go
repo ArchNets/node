@@ -20,9 +20,9 @@ type ClientV1 struct {
 	SecretKey string
 	NodeType  string
 	NodeId    int
-	userEtag  string
+	userEtags map[string]string
 	userMu    sync.RWMutex
-	UserList  *UserListBody
+	userLists map[string]*UserListBody
 	AliveMap  *AliveMap
 }
 
@@ -85,7 +85,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		APIHost:   c.APIHost,
 		NodeType:  c.NodeType,
 		NodeId:    c.NodeID,
-		UserList:  &UserListBody{Users: make([]UserInfo, 0)},
+		userEtags: make(map[string]string),
+		userLists: make(map[string]*UserListBody),
 		AliveMap:  &AliveMap{Alive: make(map[int]int)},
 	}, nil
 }

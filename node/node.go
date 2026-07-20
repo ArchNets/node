@@ -109,19 +109,19 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 
 		// Handle SSH protocol separately
 		if nodeconfig.Type == "ssh" {
-			node.sshControllers = append(node.sshControllers, NewSSHController(p, n, isPrimaryReporter))
+			node.sshControllers = append(node.sshControllers, NewSSHController(p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "ssh",
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
 		} else if nodeconfig.Type == "wireguard" {
-			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(core, p, n, isPrimaryReporter))
+			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "wireguard",
 				"port": nodeconfig.Port,
 			}).Info("WireGuard protocol detected, using WireGuard controller")
 		} else if nodeconfig.Type == "amneziawg" {
-			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(core, p, n, isPrimaryReporter))
+			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "amneziawg",
 				"port": nodeconfig.Port,
@@ -135,33 +135,25 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 
 			// Update n.Protocol to point to our local safe copy to avoid loop variable issues
 			n.Protocol = &cfg
-			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n, isPrimaryReporter))
+			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "shadowtls",
 				"port": nodeconfig.Port,
 			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
 		} else if nodeconfig.Type == "ikev2" || nodeconfig.Type == "l2tp" || nodeconfig.Type == "ipsec" {
-			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(core, p, n, isPrimaryReporter))
+			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": nodeconfig.Type,
 				"port": nodeconfig.Port,
 			}).Info("IPsec/IKEv2 protocol detected, using IPsec controller")
 		} else if nodeconfig.Type == "openvpn" {
-			node.openvpnControllers = append(node.openvpnControllers, NewOpenVPNController(core, p, n, isPrimaryReporter))
+			node.openvpnControllers = append(node.openvpnControllers, NewOpenVPNController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "openvpn",
 				"port": nodeconfig.Port,
 			}).Info("OpenVPN protocol detected, using OpenVPN controller")
 		} else {
-			var siblingTags []string
-			N := totalCounts[nodeconfig.Type]
-			if N > 0 {
-				siblingTags = append(siblingTags, fmt.Sprintf("%s:%d", nodeconfig.Type, config.ApiConfig.ServerId))
-				for i := 2; i <= N; i++ {
-					siblingTags = append(siblingTags, fmt.Sprintf("%s-%d:%d", nodeconfig.Type, i, config.ApiConfig.ServerId))
-				}
-			}
-			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter, siblingTags))
+			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 		}
 	}
 

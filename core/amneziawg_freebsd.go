@@ -82,6 +82,6 @@ func (w *AmneziaWGCore) SetLimiter(l *limiter.Limiter) {
 	w.limiterRef = l
 }
 
-// SetTProxyPort sets the TPROXY port (stub for FreeBSD)
-func (w *AmneziaWGCore) SetTProxyPort(port int) {
+// SetTProxyConfig sets the TPROXY config (stub for FreeBSD)
+func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string) {
 }

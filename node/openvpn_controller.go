@@ -28,18 +28,22 @@ type OpenVPNController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	protocolIndex           int
+	perProtocolUserList     bool
 	isPrimaryReporter       bool
 	tproxyEnabled           bool
 }
 
-func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *OpenVPNController {
+func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *OpenVPNController {
 	return &OpenVPNController{
-		tag:               generateOpenVPNTag(info),
-		xrayTag:           generateOpenVPNXrayTag(info),
-		info:              info,
-		apiClient:         apiClient,
-		xrayCore:          xrayCore,
-		isPrimaryReporter: isPrimaryReporter,
+		tag:                 generateOpenVPNTag(info),
+		xrayTag:             generateOpenVPNXrayTag(info),
+		info:                info,
+		apiClient:           apiClient,
+		xrayCore:            xrayCore,
+		protocolIndex:       protocolIndex,
+		perProtocolUserList: perProtocolUserList,
+		isPrimaryReporter:   isPrimaryReporter,
 	}
 }
 
@@ -64,7 +68,13 @@ func generateOpenVPNXrayTag(info *panel.NodeInfo) string {
 
 // Start starts the OpenVPN controller.
 func (c *OpenVPNController) Start() error {
-	users, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
 		users = []panel.UserInfo{}
@@ -187,7 +197,13 @@ func (c *OpenVPNController) startTasks() {
 }
 
 func (c *OpenVPNController) userListMonitor() error {
-	newUsers, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("OpenVPN: Get user list failed")
 		return nil
@@ -242,7 +258,7 @@ func (c *OpenVPNController) reportTask() error {
 	}
 
 	if len(userTraffic) > 0 {
-		if err := c.apiClient.ReportUserTraffic(&userTraffic); err != nil {
+		if err := c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic); err != nil {
 			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("OpenVPN: Report user traffic failed")
 		} else {
 			log.WithField("node", c.tag).Infof("OpenVPN: Reported traffic for %d users", len(userTraffic))
@@ -264,13 +280,15 @@ func (c *OpenVPNController) reportTask() error {
 		}
 	}
 
-	if c.isPrimaryReporter {
-		if err := c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("OpenVPN: Report online users failed")
-		} else {
-			log.WithField("node", c.tag).Infof("OpenVPN: Total %d online users, %d reported", len(onlineUsers), len(result))
-		}
+	// Report online users
+	protocolName := c.getIndexedProtocolName()
+	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &result); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("OpenVPN: Report online users failed")
+	} else {
+		log.WithField("node", c.tag).Infof("OpenVPN: Total %d online users, %d reported", len(onlineUsers), len(result))
+	}
 
+	if c.isPrimaryReporter {
 		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 		if err != nil {
 			log.Print(err)
@@ -281,4 +299,8 @@ func (c *OpenVPNController) reportTask() error {
 	}
 
 	return nil
+}
+
+func (c *OpenVPNController) getIndexedProtocolName() string {
+	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
 }

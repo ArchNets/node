@@ -37,81 +37,50 @@ func TestIsConnectivityCheck(t *testing.T) {
 	}
 }
 
-func TestGetOnlineDevicesForTags(t *testing.T) {
+
+
+func TestGetOnlineDevice(t *testing.T) {
 	Init()
 
 	users := []panel.UserInfo{
-		{Id: 101, Uuid: "uuid1"},
-		{Id: 102, Uuid: "uuid2"},
+		{Id: 201, Uuid: "uuid201"},
 	}
 	aliveList := map[int]int{
-		101: 1,
-		102: 1,
+		201: 1,
 	}
 
-	l1 := AddLimiter("vless", "vless:13", users, aliveList)
-	l2 := AddLimiter("vless", "vless-2:13", users, aliveList)
+	l := AddLimiter("vless", "vless:14", users, aliveList)
 
-	ipMap1 := new(sync.Map)
-	ipMap1.Store("1.1.1.1", 101)
-	l1.UserOnlineIP.Store("vless:13|uuid1", ipMap1)
+	ipMap := new(sync.Map)
+	ipMap.Store("3.3.3.3", 201)
+	l.UserOnlineIP.Store("vless:14|uuid201", ipMap)
 
-	ipMap2 := new(sync.Map)
-	ipMap2.Store("2.2.2.2", 102)
-	l2.UserOnlineIP.Store("vless-2:13|uuid2", ipMap2)
-
-	online, err := GetOnlineDevicesForTags([]string{"vless:13", "vless-2:13"})
+	onlinePtr, err := l.GetOnlineDevice()
 	if err != nil {
-		t.Fatalf("GetOnlineDevicesForTags failed: %v", err)
+		t.Fatalf("GetOnlineDevice failed: %v", err)
 	}
 
-	if len(online) != 2 {
-		t.Errorf("Expected 2 online users, got %d", len(online))
+	online := *onlinePtr
+	if len(online) != 1 {
+		t.Fatalf("Expected 1 online user, got %d", len(online))
 	}
 
-	// Verify entries exist
-	found101 := false
-	found102 := false
-	for _, ou := range online {
-		if ou.UID == 101 && ou.IP == "1.1.1.1" {
-			found101 = true
-		}
-		if ou.UID == 102 && ou.IP == "2.2.2.2" {
-			found102 = true
-		}
-	}
-
-	if !found101 {
-		t.Errorf("Expected user 101 with IP 1.1.1.1 to be online")
-	}
-	if !found102 {
-		t.Errorf("Expected user 102 with IP 2.2.2.2 to be online")
+	if online[0].UID != 201 || online[0].IP != "3.3.3.3" {
+		t.Errorf("Expected user 201 with IP 3.3.3.3, got %+v", online[0])
 	}
 
 	// Verify UserOnlineIP is drained
-	l1Empty := true
-	l1.UserOnlineIP.Range(func(key, value interface{}) bool {
-		l1Empty = false
+	empty := true
+	l.UserOnlineIP.Range(func(key, value interface{}) bool {
+		empty = false
 		return false
 	})
-	if !l1Empty {
-		t.Errorf("Expected l1.UserOnlineIP to be drained/empty")
-	}
-
-	l2Empty := true
-	l2.UserOnlineIP.Range(func(key, value interface{}) bool {
-		l2Empty = false
-		return false
-	})
-	if !l2Empty {
-		t.Errorf("Expected l2.UserOnlineIP to be drained/empty")
+	if !empty {
+		t.Errorf("Expected UserOnlineIP to be drained/empty")
 	}
 
 	// Verify OldUserOnline is populated
-	if val, ok := l1.OldUserOnline.Load("1.1.1.1"); !ok || val.(int) != 101 {
-		t.Errorf("Expected OldUserOnline to store 1.1.1.1 -> 101 in l1")
-	}
-	if val, ok := l2.OldUserOnline.Load("2.2.2.2"); !ok || val.(int) != 102 {
-		t.Errorf("Expected OldUserOnline to store 2.2.2.2 -> 102 in l2")
+	if val, ok := l.OldUserOnline.Load("3.3.3.3"); !ok || val.(int) != 201 {
+		t.Errorf("Expected OldUserOnline to store 3.3.3.3 -> 201")
 	}
 }

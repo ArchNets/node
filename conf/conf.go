@@ -19,10 +19,11 @@ type LogConfig struct {
 }
 
 type ServerApiConfig struct {
-	ApiHost   string `mapstructure:"ApiHost"`
-	ServerId  int    `mapstructure:"ServerID"`
-	SecretKey string `mapstructure:"SecretKey"`
-	Timeout   int    `mapstructure:"Timeout"`
+	ApiHost             string `mapstructure:"ApiHost"`
+	ServerId            int    `mapstructure:"ServerID"`
+	SecretKey           string `mapstructure:"SecretKey"`
+	Timeout             int    `mapstructure:"Timeout"`
+	PerProtocolUserList bool   `mapstructure:"PerProtocolUserList"`
 }
 
 type NodeApiConfig struct {

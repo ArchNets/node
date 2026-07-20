@@ -300,6 +300,9 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to access %s: %v", client.BaseURL+path, err.Error())
 	}
+	if r == nil {
+		return nil, fmt.Errorf("server returned empty response")
+	}
 
 	// Check HTTP status code
 	if r.StatusCode() == 304 {
@@ -318,21 +321,19 @@ func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
 	}
 	c.responseBodyHash = newBodyHash
 	c.ServerConfigEtag = r.Header().Get("ETag")
-	if r != nil {
-		defer func() {
-			if r.RawBody() != nil {
-				r.RawBody().Close()
-			}
-		}()
-	} else {
-		return nil, fmt.Errorf("server returned empty response")
-	}
+
+	defer func() {
+		if r.RawBody() != nil {
+			r.RawBody().Close()
+		}
+	}()
+
 	resp := &ServerConfigResponse{}
 	err = json.Unmarshal(r.Body(), resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode response body: %s", err)
 	}
-	if resp.Data.Protocols == nil {
+	if resp.Data == nil || resp.Data.Protocols == nil {
 		return nil, fmt.Errorf("protocol configuration is empty")
 	}
 	return resp, nil

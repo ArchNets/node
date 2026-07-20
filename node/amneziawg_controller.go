@@ -23,18 +23,22 @@ type AmneziaWGController struct {
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
+	protocolIndex           int
+	perProtocolUserList     bool
 	isPrimaryReporter       bool
 	xrayCore                *vCore.XrayCore
 }
 
 // NewAmneziaWGController creates a new AmneziaWG controller
-func NewAmneziaWGController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, isPrimaryReporter bool) *AmneziaWGController {
+func NewAmneziaWGController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *AmneziaWGController {
 	return &AmneziaWGController{
-		tag:               generateAmneziaWGTag(info),
-		info:              info,
-		apiClient:         apiClient,
-		isPrimaryReporter: isPrimaryReporter,
-		xrayCore:          core,
+		tag:                 generateAmneziaWGTag(info),
+		info:                info,
+		apiClient:           apiClient,
+		protocolIndex:       protocolIndex,
+		perProtocolUserList: perProtocolUserList,
+		isPrimaryReporter:   isPrimaryReporter,
+		xrayCore:            core,
 	}
 }
 
@@ -45,7 +49,13 @@ func generateAmneziaWGTag(info *panel.NodeInfo) string {
 // Start starts the AmneziaWG controller
 func (c *AmneziaWGController) Start() error {
 	// Get initial user list
-	users, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
 		users = []panel.UserInfo{}
@@ -182,7 +192,13 @@ func (c *AmneziaWGController) startTasks() {
 
 func (c *AmneziaWGController) userListMonitor() error {
 	// Get updated user list
-	newUsers, err := c.apiClient.GetUserList()
+	var protoName string
+	if c.perProtocolUserList {
+		protoName = c.getIndexedProtocolName()
+	} else {
+		protoName = c.info.Type
+	}
+	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -257,7 +273,7 @@ func (c *AmneziaWGController) reportTask() error {
 
 	// Report traffic
 	if len(userTraffic) > 0 {
-		err := c.apiClient.ReportUserTraffic(&userTraffic)
+		err := c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -287,17 +303,18 @@ func (c *AmneziaWGController) reportTask() error {
 	}
 	// Note: You might want to relax this filtering if handshakes are enough evidence of being online
 
-	if c.isPrimaryReporter {
-		// Report online users
-		if err := c.apiClient.ReportNodeOnlineUsers(&result); err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("AmneziaWG: Report online users failed")
-		} else {
-			log.WithField("node", c.tag).Infof("AmneziaWG: Total %d online users, %d reported", len(onlineUsers), len(result))
-		}
+	// Report online users
+	protocolName := c.getIndexedProtocolName()
+	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &result); err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Info("AmneziaWG: Report online users failed")
+	} else {
+		log.WithField("node", c.tag).Infof("AmneziaWG: Total %d online users, %d reported", len(onlineUsers), len(result))
+	}
 
+	if c.isPrimaryReporter {
 		// Report node status
 		CPU, Mem, Disk, Uptime, err := serverstatus.GetSystemInfo()
 		if err != nil {
@@ -315,4 +332,8 @@ func (c *AmneziaWGController) reportTask() error {
 	}
 
 	return nil
+}
+
+func (c *AmneziaWGController) getIndexedProtocolName() string {
+	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
 }
