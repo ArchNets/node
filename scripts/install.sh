@@ -1,372 +1,502 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# ==============================================================================
+#  archnets node installer
+#
+#  Usage:
+#    install.sh [version] [--api-host URL] [--server-id ID] [--secret-key KEY]
+#
+#  Examples:
+#    install.sh                          # install latest release, interactive config
+#    install.sh v1.1.51                  # install a specific version
+#    install.sh --api-host https://p.example.com --server-id 1 --secret-key abc
+# ==============================================================================
 
-red='\033[0;31m'
-green='\033[0;32m'
-yellow='\033[0;33m'
-plain='\033[0m'
+set -o pipefail
 
-cur_dir=$(pwd)
+# ------------------------------------------------------------------------------
+#  Constants
+# ------------------------------------------------------------------------------
+readonly REPO="archnets/node"
+readonly INSTALL_DIR="/usr/local/archnets"
+readonly CONFIG_DIR="/etc/archnets"
+readonly SERVICE_NAME="archnets"
+readonly MGMT_SCRIPT_URL="https://raw.githubusercontent.com/archnets/node/master/scripts/node.sh"
+readonly AWG_MODULE_REPO="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
+readonly AWG_TOOLS_REPO="https://github.com/amnezia-vpn/amneziawg-tools.git"
+readonly AWG_PPA="ppa:amnezia/ppa"
 
-# check root
-[[ $EUID -ne 0 ]] && echo -e "${red}Error:${plain} You must run this script as root!\n" && exit 1
+CUR_DIR="$(pwd)"
 
-# check os
-if [[ -f /etc/redhat-release ]]; then
-    release="centos"
-elif cat /etc/issue | grep -Eqi "alpine"; then
-    release="alpine"
-elif cat /etc/issue | grep -Eqi "debian"; then
-    release="debian"
-elif cat /etc/issue | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /etc/issue | grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux"; then
-    release="centos"
-elif cat /proc/version | grep -Eqi "debian"; then
-    release="debian"
-elif cat /proc/version | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /proc/version | grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux"; then
-    release="centos"
-elif cat /proc/version | grep -Eqi "arch"; then
-    release="arch"
+# ------------------------------------------------------------------------------
+#  UI helpers
+# ------------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
+    CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; PLAIN=$'\033[0m'
 else
-    echo -e "${red}System version not detected. Please contact the script author!${plain}\n" && exit 1
+    RED=""; GREEN=""; YELLOW=""; CYAN=""; BOLD=""; DIM=""; PLAIN=""
 fi
 
-########################
-# Argument parsing
-########################
+info() { echo "${CYAN}[i]${PLAIN} $*"; }
+ok()   { echo "${GREEN}[+]${PLAIN} $*"; }
+warn() { echo "${YELLOW}[!]${PLAIN} $*"; }
+err()  { echo "${RED}[x]${PLAIN} $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+STEP_NO=0
+step() {
+    STEP_NO=$((STEP_NO + 1))
+    echo ""
+    echo "${BOLD}${CYAN}── ${STEP_NO}. $* ──${PLAIN}"
+}
+
+banner() {
+    echo "${BOLD}${GREEN}"
+    cat <<'EOF'
+  ┌──────────────────────────────────────────────┐
+  │           archnets node installer            │
+  └──────────────────────────────────────────────┘
+EOF
+    echo "${PLAIN}"
+}
+
+# ------------------------------------------------------------------------------
+#  Argument parsing
+# ------------------------------------------------------------------------------
 VERSION_ARG=""
 API_HOST_ARG=""
 SERVER_ID_ARG=""
 SECRET_KEY_ARG=""
 
+usage() {
+    cat <<EOF
+Usage: $0 [version] [options]
+
+Options:
+  --api-host URL     Panel API address (e.g. https://example.com/)
+  --server-id ID     Server unique identifier
+  --secret-key KEY   Secret key used to verify request legitimacy
+  -h, --help         Show this help
+
+When all three options are provided, the config file is generated
+non-interactively.
+EOF
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --api-host)
-                API_HOST_ARG="$2"; shift 2 ;;
-            --server-id)
-                SERVER_ID_ARG="$2"; shift 2 ;;
-            --secret-key)
-                SECRET_KEY_ARG="$2"; shift 2 ;;
-            -h|--help)
-                echo "Usage: $0 [version] [--api-host URL] [--server-id ID] [--secret-key KEY]"
-                exit 0 ;;
-            --*)
-                echo "Unknown parameter: $1"; exit 1 ;;
+            --api-host)   API_HOST_ARG="${2:-}";   shift 2 ;;
+            --server-id)  SERVER_ID_ARG="${2:-}";  shift 2 ;;
+            --secret-key) SECRET_KEY_ARG="${2:-}"; shift 2 ;;
+            -h|--help)    usage; exit 0 ;;
+            --*)          die "Unknown parameter: $1 (see --help)" ;;
             *)
-                # Treat the first positional argument as the version number
-                if [[ -z "$VERSION_ARG" ]]; then
-                    VERSION_ARG="$1"; shift
-                else
-                    shift
-                fi ;;
+                # First positional argument is treated as the version
+                [[ -z "$VERSION_ARG" ]] && VERSION_ARG="$1"
+                shift ;;
         esac
     done
 }
 
-arch=$(uname -m)
+# ------------------------------------------------------------------------------
+#  Environment detection
+# ------------------------------------------------------------------------------
+RELEASE=""
+OS_VERSION=""
+OS_CODENAME=""
+ARCH=""
 
-if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
-    arch="64"
-elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
-    arch="arm64-v8a"
-elif [[ $arch == "s390x" ]]; then
-    arch="s390x"
-else
-    arch="64"
-    echo -e "${red}Failed to detect architecture, using default: ${arch}${plain}"
-fi
+require_root() {
+    [[ $EUID -eq 0 ]] || die "You must run this script as root!"
+}
 
-if [ "$(getconf WORD_BIT)" != '32' ] && [ "$(getconf LONG_BIT)" != '64' ] ; then
-    echo "This software does not support 32-bit (x86). Please use a 64-bit system (x86_64). If this detection is wrong, contact the author."
-    exit 2
-fi
-
-# os version
-if [[ -f /etc/os-release ]]; then
-    os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
-fi
-if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
-    os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
-fi
-
-if [[ x"${release}" == x"centos" ]]; then
-    if [[ ${os_version} -le 6 ]]; then
-        echo -e "${red}Please use CentOS 7 or newer!${plain}\n" && exit 1
-    fi
-    if [[ ${os_version} -eq 7 ]]; then
-        echo -e "${red}Note: CentOS 7 cannot use the hysteria1/2 protocol!${plain}\n"
-    fi
-elif [[ x"${release}" == x"ubuntu" ]]; then
-    if [[ ${os_version} -lt 16 ]]; then
-        echo -e "${red}Please use Ubuntu 16 or newer!${plain}\n" && exit 1
-    fi
-elif [[ x"${release}" == x"debian" ]]; then
-    if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red}Please use Debian 8 or newer!${plain}\n" && exit 1
-    fi
-fi
-
-# Install AmneziaWG with DKMS fallback to source build
-# DKMS fails on non-stock kernels (XanMod, Liquorix, etc.) because:
-#   1. The PPA source doesn't support newer kernel APIs
-#   2. Custom kernels are often built with Clang/LLVM, not GCC
-install_amneziawg() {
-    echo -e "${green}Installing AmneziaWG...${plain}"
-
-    # Try DKMS install first
-    if [[ x"${release}" == x"ubuntu" ]]; then
-        add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
-        apt-get update -y >/dev/null 2>&1
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        local id="${ID,,}" like="${ID_LIKE,,}"
+        case "$id" in
+            ubuntu)                              RELEASE="ubuntu" ;;
+            debian|raspbian)                     RELEASE="debian" ;;
+            centos|rhel|rocky|almalinux|ol|fedora) RELEASE="centos" ;;
+            alpine)                              RELEASE="alpine" ;;
+            arch|archarm|manjaro)                RELEASE="arch" ;;
+            *)
+                case " $like " in
+                    *ubuntu*)                RELEASE="ubuntu" ;;
+                    *debian*)                RELEASE="debian" ;;
+                    *rhel*|*fedora*|*centos*) RELEASE="centos" ;;
+                    *arch*)                  RELEASE="arch" ;;
+                esac ;;
+        esac
+        OS_VERSION="${VERSION_ID%%.*}"
+        OS_CODENAME="${VERSION_CODENAME:-}"
     fi
 
-    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-tools >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-dkms 2>&1 | tee /tmp/awg-dkms-install.log
-    local dkms_exit=${PIPESTATUS[0]}
-
-    # Check if the module actually loaded
-    modprobe amneziawg 2>/dev/null
-    if lsmod | grep -q amneziawg; then
-        echo -e "${green}AmneziaWG DKMS module loaded successfully${plain}"
-        return 0
+    # Legacy fallbacks for systems without /etc/os-release
+    if [[ -z "$RELEASE" ]]; then
+        if [[ -f /etc/redhat-release ]]; then
+            RELEASE="centos"
+        elif grep -Eqi "alpine" /etc/issue 2>/dev/null; then
+            RELEASE="alpine"
+        elif grep -Eqi "debian" /etc/issue /proc/version 2>/dev/null; then
+            RELEASE="debian"
+        elif grep -Eqi "ubuntu" /etc/issue /proc/version 2>/dev/null; then
+            RELEASE="ubuntu"
+        elif grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux" /etc/issue /proc/version 2>/dev/null; then
+            RELEASE="centos"
+        elif grep -Eqi "arch" /proc/version 2>/dev/null; then
+            RELEASE="arch"
+        fi
     fi
 
-    echo -e "${yellow}DKMS build failed for kernel $(uname -r), building from source...${plain}"
+    [[ -n "$RELEASE" ]] || die "System version not detected. Please contact the script author!"
 
-    # Clean up broken DKMS state
-    dpkg --remove --force-remove-reinstreq amneziawg amneziawg-dkms 2>/dev/null || true
-    apt-get -f install -y >/dev/null 2>&1 || true
-    # Reinstall tools only (no dkms)
-    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-tools >/dev/null 2>&1 || true
+    # Minimum version requirements
+    case "$RELEASE" in
+        centos)
+            [[ -n "$OS_VERSION" && "$OS_VERSION" -le 6 ]] && die "Please use CentOS 7 or newer!"
+            [[ "$OS_VERSION" == "7" ]] && warn "CentOS 7 cannot use the hysteria1/2 protocol!"
+            ;;
+        ubuntu)
+            [[ -n "$OS_VERSION" && "$OS_VERSION" -lt 16 ]] && die "Please use Ubuntu 16 or newer!"
+            ;;
+        debian)
+            [[ -n "$OS_VERSION" && "$OS_VERSION" -lt 8 ]] && die "Please use Debian 8 or newer!"
+            ;;
+    esac
 
-    # Install build dependencies
-    apt-get install -y git build-essential "linux-headers-$(uname -r)" >/dev/null 2>&1
+    ok "Detected OS: ${RELEASE} ${OS_VERSION}${OS_CODENAME:+ (${OS_CODENAME})}"
+}
 
-    # Detect if kernel was built with Clang/LLVM
-    local make_flags=""
-    if grep -qi clang /proc/version 2>/dev/null || \
-       ([ -f "/lib/modules/$(uname -r)/build/.config" ] && grep -q 'CONFIG_CC_IS_CLANG=y' "/lib/modules/$(uname -r)/build/.config"); then
-        echo -e "${yellow}Kernel built with Clang/LLVM detected, installing clang...${plain}"
-        apt-get install -y clang llvm lld >/dev/null 2>&1
-        make_flags="LLVM=1"
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|x64|amd64)  ARCH="64" ;;
+        aarch64|arm64)     ARCH="arm64-v8a" ;;
+        s390x)             ARCH="s390x" ;;
+        *)
+            ARCH="64"
+            warn "Failed to detect architecture, using default: ${ARCH}"
+            ;;
+    esac
+
+    if [[ "$(getconf LONG_BIT)" != "64" ]]; then
+        die "This software does not support 32-bit systems. Please use a 64-bit system (x86_64)."
     fi
 
-    # Clone and build from source
-    local build_dir="/tmp/amneziawg-linux-kernel-module"
-    rm -rf "$build_dir"
-    git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git "$build_dir"
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}Failed to clone AmneziaWG source. Check network/GitHub access.${plain}"
-        return 1
+    ok "Detected architecture: $(uname -m) -> ${ARCH}"
+}
+
+# ------------------------------------------------------------------------------
+#  Package management helpers
+# ------------------------------------------------------------------------------
+wait_for_dpkg_lock() {
+    local count=0 locked pid
+    while true; do
+        locked=false
+        if pgrep -x "apt-get|dpkg|apt" >/dev/null 2>&1; then
+            locked=true
+        fi
+        # unattended-upgrade (but not its shutdown daemon) also holds the lock
+        for pid in $(pgrep -f "unattended-upgrade" 2>/dev/null); do
+            if [[ -f "/proc/$pid/cmdline" ]] && ! grep -q "unattended-upgrade-shutdown" "/proc/$pid/cmdline"; then
+                locked=true
+                break
+            fi
+        done
+
+        [[ "$locked" == false ]] && break
+
+        [[ $count -eq 0 ]] && warn "Waiting for other package manager processes (apt/dpkg) to exit..."
+        sleep 3
+        count=$((count + 1))
+        [[ $count -gt 100 ]] && die "Package manager lock timeout. Another package manager process is running."
+    done
+}
+
+apt_install() {
+    wait_for_dpkg_lock
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
+need_install_apt() {
+    local missing=() installed p
+    installed=$(dpkg-query -W -f='${Package}\n' 2>/dev/null)
+    for p in "$@"; do
+        grep -qx "$p" <<<"$installed" || missing+=("$p")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        info "Installing missing packages: ${missing[*]}"
+        wait_for_dpkg_lock
+        apt-get update -y >/dev/null 2>&1 || warn "apt-get update reported errors (continuing)"
+        apt_install "${missing[@]}" >/dev/null 2>&1 || warn "Some packages failed to install: ${missing[*]}"
     fi
+}
 
-    cd "$build_dir/src"
-    make -j$(nproc) KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}AmneziaWG source build failed. Check /tmp/amneziawg-linux-kernel-module/src/ for details.${plain}"
-        cd /tmp
-        return 1
+need_install_yum() {
+    local missing=() installed p
+    installed=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null)
+    for p in "$@"; do
+        grep -qx "$p" <<<"$installed" || missing+=("$p")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        info "Installing missing packages: ${missing[*]}"
+        yum install -y "${missing[@]}" >/dev/null 2>&1 || warn "Some packages failed to install: ${missing[*]}"
     fi
+}
 
-    make install KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags 2>/dev/null || true
-    depmod -a
-    modprobe amneziawg
-
-    if lsmod | grep -q amneziawg; then
-        echo -e "${green}AmneziaWG built from source and loaded successfully${plain}"
-        # Persist across reboots
-        echo "amneziawg" > /etc/modules-load.d/amneziawg.conf
-    else
-        echo -e "${red}Failed to load AmneziaWG module after source build${plain}"
-        cd /tmp
-        return 1
+need_install_apk() {
+    local missing=() installed p
+    installed=$(apk info 2>/dev/null)
+    for p in "$@"; do
+        grep -qx "$p" <<<"$installed" || missing+=("$p")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        info "Installing missing packages: ${missing[*]}"
+        apk add --no-cache "${missing[@]}" >/dev/null 2>&1 || warn "Some packages failed to install: ${missing[*]}"
     fi
-
-    # Cleanup
-    cd /tmp
-    rm -rf "$build_dir"
-    return 0
 }
 
 install_base() {
-    wait_for_dpkg_lock() {
-        local count=0
-        while true; do
-            local locked=false
-            if pgrep -x "apt-get|dpkg|apt" >/dev/null 2>&1; then
-                locked=true
+    case "$RELEASE" in
+        centos)
+            if ! rpm -q epel-release >/dev/null 2>&1; then
+                info "Installing EPEL repository..."
+                yum install -y epel-release >/dev/null 2>&1
             fi
-            
-            # Check if unattended-upgrade is running (not the shutdown daemon)
-            for pid in $(pgrep -f "unattended-upgrade" 2>/dev/null); do
-                if [ -f "/proc/$pid/cmdline" ]; then
-                    if ! grep -q "unattended-upgrade-shutdown" "/proc/$pid/cmdline"; then
-                        locked=true
-                        break
-                    fi
-                fi
-            done
-
-            if [ "$locked" = false ]; then
-                break
-            fi
-
-            if [ $count -eq 0 ]; then
-                echo -e "${yellow}Waiting for other package manager processes (apt/dpkg) to exit...${plain}"
-            fi
-            sleep 3
-            count=$((count+1))
-            if [ $count -gt 100 ]; then
-                echo -e "${red}Error: Package manager lock timeout. Another package manager process is running.${plain}"
-                exit 1
-            fi
-        done
-    }
-
-    need_install_apt() {
-        local packages=("$@")
-        local missing=()
-        
-        # Check installed packages in bulk
-        local installed_list=$(dpkg-query -W -f='${Package}\n' 2>/dev/null | sort)
-        
-        for p in "${packages[@]}"; do
-            if ! echo "$installed_list" | grep -q "^${p}$"; then
-                missing+=("$p")
-            fi
-        done
-        
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            wait_for_dpkg_lock
-            echo "Installing missing packages: ${missing[*]}"
-            apt-get update -y >/dev/null 2>&1
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1
-        fi
-    }
-
-    need_install_yum() {
-        local packages=("$@")
-        local missing=()
-        
-        # Check installed packages in bulk
-        local installed_list=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort)
-        
-        for p in "${packages[@]}"; do
-            if ! echo "$installed_list" | grep -q "^${p}$"; then
-                missing+=("$p")
-            fi
-        done
-        
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "Installing missing packages: ${missing[*]}"
-            yum install -y "${missing[@]}" >/dev/null 2>&1
-        fi
-    }
-
-    need_install_apk() {
-        local packages=("$@")
-        local missing=()
-        
-        # Check installed packages in bulk
-        local installed_list=$(apk info 2>/dev/null | sort)
-        
-        for p in "${packages[@]}"; do
-            if ! echo "$installed_list" | grep -q "^${p}$"; then
-                missing+=("$p")
-            fi
-        done
-        
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "Installing missing packages: ${missing[*]}"
-            apk add --no-cache "${missing[@]}" >/dev/null 2>&1
-        fi
-    }
-
-    # Install all required packages in one go
-    if [[ x"${release}" == x"centos" ]]; then
-        # Check and install epel-release
-        if ! rpm -q epel-release >/dev/null 2>&1; then
-            echo "Installing EPEL repository..."
-            yum install -y epel-release >/dev/null 2>&1
-        fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv wireguard-tools kernel-devel kernel-headers strongswan xl2tpd git make openvpn
-        update-ca-trust force-enable >/dev/null 2>&1 || true
-    elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd git openvpn
-        update-ca-certificates >/dev/null 2>&1 || true
-    elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv wireguard-tools strongswan strongswan-swanctl xl2tpd "linux-headers-$(uname -r)" git make build-essential openvpn
-        update-ca-certificates >/dev/null 2>&1 || true
-        install_amneziawg
-    elif [[ x"${release}" == x"ubuntu" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv software-properties-common "linux-headers-$(uname -r)" wireguard-tools strongswan strongswan-swanctl xl2tpd git make build-essential openvpn
-        update-ca-certificates >/dev/null 2>&1 || true
-        install_amneziawg
-    elif [[ x"${release}" == x"arch" ]]; then
-        echo "Updating package database..."
-        pacman -Sy --noconfirm >/dev/null 2>&1
-        # --needed skips already installed packages; very efficient
-        echo "Installing required packages..."
-        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv wireguard-tools linux-headers strongswan xl2tpd git openvpn >/dev/null 2>&1
-    fi
+            need_install_yum wget curl unzip tar cronie socat ca-certificates pv \
+                wireguard-tools kernel-devel kernel-headers strongswan xl2tpd git make openvpn
+            update-ca-trust force-enable >/dev/null 2>&1 || true
+            ;;
+        alpine)
+            need_install_apk wget curl unzip tar socat ca-certificates pv \
+                wireguard-tools linux-headers strongswan xl2tpd git openvpn
+            update-ca-certificates >/dev/null 2>&1 || true
+            ;;
+        debian|ubuntu)
+            local extra=()
+            [[ "$RELEASE" == "ubuntu" ]] && extra+=(software-properties-common)
+            need_install_apt wget curl unzip tar cron socat ca-certificates pv \
+                "${extra[@]}" "linux-headers-$(uname -r)" wireguard-tools \
+                strongswan strongswan-swanctl xl2tpd git make build-essential openvpn
+            update-ca-certificates >/dev/null 2>&1 || true
+            install_amneziawg
+            ;;
+        arch)
+            info "Updating package database..."
+            pacman -Sy --noconfirm >/dev/null 2>&1
+            info "Installing required packages..."
+            pacman -S --noconfirm --needed wget curl unzip tar cronie socat \
+                ca-certificates pv wireguard-tools linux-headers strongswan \
+                xl2tpd git openvpn >/dev/null 2>&1
+            ;;
+    esac
+    ok "Base packages ready"
 }
 
-# Enable and start strongSwan charon daemon (required for IPsec/IKEv2/L2TP)
+# ------------------------------------------------------------------------------
+#  AmneziaWG
+#
+#  Strategy:
+#    1. If the module is already loaded and the userland tools exist -> done.
+#    2. On Ubuntu, try the DKMS packages from the Amnezia PPA, but only when
+#       the PPA actually publishes packages for this release (otherwise adding
+#       it permanently breaks `apt-get update`).
+#    3. Fall back to building both the kernel module and the userland tools
+#       from source. Needed for Debian, unsupported Ubuntu releases, and
+#       custom kernels (XanMod, Liquorix, ...) that DKMS can't build against.
+# ------------------------------------------------------------------------------
+awg_ready() {
+    lsmod | grep -q '^amneziawg' && command -v awg >/dev/null 2>&1
+}
+
+ppa_supports_release() {
+    [[ -n "$OS_CODENAME" ]] || return 1
+    curl -fsI --max-time 15 \
+        "https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/${OS_CODENAME}/Release" \
+        >/dev/null 2>&1
+}
+
+remove_amnezia_ppa() {
+    add-apt-repository -y --remove "$AWG_PPA" >/dev/null 2>&1 || true
+    rm -f /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.list \
+          /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.sources 2>/dev/null || true
+}
+
+install_awg_dkms() {
+    info "Trying AmneziaWG DKMS packages from PPA..."
+    add-apt-repository -y "$AWG_PPA" >/dev/null 2>&1 || true
+    if ! apt-get update -y >/dev/null 2>&1; then
+        warn "apt-get update failed after adding the Amnezia PPA"
+    fi
+
+    apt_install amneziawg-tools >/dev/null 2>&1 || true
+    apt_install amneziawg-dkms 2>&1 | tee /tmp/awg-dkms-install.log
+    local dkms_exit=${PIPESTATUS[0]}
+
+    modprobe amneziawg 2>/dev/null || true
+    if [[ $dkms_exit -eq 0 ]] && awg_ready; then
+        return 0
+    fi
+
+    warn "DKMS install failed for kernel $(uname -r) (see /tmp/awg-dkms-install.log)"
+    # Clean up broken DKMS state and the now-useless PPA so apt keeps working
+    dpkg --remove --force-remove-reinstreq amneziawg amneziawg-dkms 2>/dev/null || true
+    apt-get -f install -y >/dev/null 2>&1 || true
+    remove_amnezia_ppa
+    apt-get update -y >/dev/null 2>&1 || true
+    return 1
+}
+
+install_awg_source() {
+    info "Building AmneziaWG from source for kernel $(uname -r)..."
+
+    apt_install git build-essential "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
+
+    # Kernels built with Clang/LLVM (common for XanMod/Liquorix) need LLVM=1
+    local make_flags=""
+    if grep -qi clang /proc/version 2>/dev/null ||
+       { [[ -f "/lib/modules/$(uname -r)/build/.config" ]] &&
+         grep -q 'CONFIG_CC_IS_CLANG=y' "/lib/modules/$(uname -r)/build/.config"; }; then
+        info "Clang/LLVM-built kernel detected, installing clang toolchain..."
+        apt_install clang llvm lld >/dev/null 2>&1 || true
+        make_flags="LLVM=1"
+    fi
+
+    # --- kernel module ---
+    local build_dir="/tmp/amneziawg-linux-kernel-module"
+    rm -rf "$build_dir"
+    if ! git clone --depth 1 "$AWG_MODULE_REPO" "$build_dir" >/dev/null 2>&1; then
+        err "Failed to clone AmneziaWG source. Check network/GitHub access."
+        return 1
+    fi
+
+    if ! make -C "$build_dir/src" -j"$(nproc)" KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags; then
+        err "AmneziaWG source build failed. Check ${build_dir}/src/ for details."
+        return 1
+    fi
+    make -C "$build_dir/src" install KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags 2>/dev/null || true
+    depmod -a
+    modprobe amneziawg 2>/dev/null || true
+
+    if ! lsmod | grep -q '^amneziawg'; then
+        err "Failed to load AmneziaWG module after source build"
+        return 1
+    fi
+    # Persist across reboots
+    echo "amneziawg" > /etc/modules-load.d/amneziawg.conf
+
+    # --- userland tools (awg / awg-quick), if not already present ---
+    if ! command -v awg >/dev/null 2>&1; then
+        local tools_dir="/tmp/amneziawg-tools"
+        rm -rf "$tools_dir"
+        if git clone --depth 1 "$AWG_TOOLS_REPO" "$tools_dir" >/dev/null 2>&1 &&
+           make -C "$tools_dir/src" -j"$(nproc)" >/dev/null 2>&1 &&
+           make -C "$tools_dir/src" install >/dev/null 2>&1; then
+            ok "amneziawg-tools built and installed from source"
+        else
+            warn "Failed to build amneziawg-tools; 'awg' CLI may be missing"
+        fi
+    fi
+
+    rm -rf "$build_dir" /tmp/amneziawg-tools
+    return 0
+}
+
+install_amneziawg() {
+    info "Installing AmneziaWG..."
+
+    modprobe amneziawg 2>/dev/null || true
+    if awg_ready; then
+        ok "AmneziaWG already installed and loaded"
+        return 0
+    fi
+
+    if [[ "$RELEASE" == "ubuntu" ]] && ppa_supports_release; then
+        if install_awg_dkms; then
+            ok "AmneziaWG DKMS module installed and loaded"
+            return 0
+        fi
+    elif [[ "$RELEASE" == "ubuntu" ]]; then
+        warn "Amnezia PPA has no packages for Ubuntu '${OS_CODENAME:-unknown}', skipping DKMS"
+    fi
+
+    if install_awg_source; then
+        ok "AmneziaWG built from source and loaded"
+        return 0
+    fi
+
+    err "AmneziaWG installation failed; AWG-based protocols will be unavailable"
+    return 1
+}
+
+# ------------------------------------------------------------------------------
+#  strongSwan (required for IPsec/IKEv2/L2TP)
+# ------------------------------------------------------------------------------
 setup_strongswan() {
-    if [[ x"${release}" == x"alpine" ]]; then
+    if [[ "$RELEASE" == "alpine" ]]; then
         rc-update add strongswan default 2>/dev/null || true
         service strongswan start 2>/dev/null || true
+        ok "strongSwan enabled (OpenRC)"
         return
     fi
 
-    # Try known systemd service names in order of preference
+    local svc
     for svc in strongswan-swanctl strongswan-starter strongswan; do
-        if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+        if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
             systemctl enable "$svc" >/dev/null 2>&1 || true
             systemctl start "$svc" >/dev/null 2>&1 || true
-            echo -e "${green}strongSwan service '${svc}' enabled and started${plain}"
+            ok "strongSwan service '${svc}' enabled and started"
             return
         fi
     done
-    echo -e "${yellow}Warning: Could not find strongSwan systemd service to enable${plain}"
+    warn "Could not find a strongSwan systemd service to enable"
 }
 
+# ------------------------------------------------------------------------------
+#  archnets service
+# ------------------------------------------------------------------------------
 # 0: running, 1: not running, 2: not installed
 check_status() {
-    if [[ ! -f /usr/local/archnets/node ]]; then
-        return 2
-    fi
-    if [[ x"${release}" == x"alpine" ]]; then
-        temp=$(service archnets status | awk '{print $3}')
-        if [[ x"${temp}" == x"started" ]]; then
-            return 0
-        else
-            return 1
-        fi
+    [[ -f "${INSTALL_DIR}/node" ]] || return 2
+    if [[ "$RELEASE" == "alpine" ]]; then
+        [[ "$(service ${SERVICE_NAME} status 2>/dev/null | awk '{print $3}')" == "started" ]]
     else
-        temp=$(systemctl status archnets | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-        if [[ x"${temp}" == x"running" ]]; then
-            return 0
-        else
-            return 1
-        fi
+        systemctl is-active --quiet "$SERVICE_NAME"
     fi
 }
 
-generate_ppnode_config() {
-        local api_host="$1"
-        local server_id="$2"
-        local secret_key="$3"
+service_ctl() {
+    local action="$1"
+    if [[ "$RELEASE" == "alpine" ]]; then
+        service "$SERVICE_NAME" "$action" >/dev/null 2>&1
+    else
+        systemctl "$action" "$SERVICE_NAME" >/dev/null 2>&1
+    fi
+}
 
-        mkdir -p /etc/archnets >/dev/null 2>&1
-        cat > /etc/archnets/config.yml <<EOF
+restart_and_report() {
+    service_ctl restart
+    sleep 2
+    if check_status; then
+        ok "${SERVICE_NAME} is running"
+    else
+        err "${SERVICE_NAME} may have failed to start. Run 'node log' to view logs."
+    fi
+}
+
+generate_config() {
+    local api_host="$1" server_id="$2" secret_key="$3"
+
+    mkdir -p "$CONFIG_DIR"
+    cat > "${CONFIG_DIR}/config.yml" <<EOF
 Log:
   # Log level; options: debug, info, warn (warning), error
   Level: warn
   # Log output path; can be a file path. Leave empty to use "stdout" (standard output).
-  Output: 
+  Output:
   # Access log path, e.g. logs/access.log; set to "none" to disable access logs
   Access: none
 
@@ -380,87 +510,13 @@ Api:
   # Request timeout (seconds)
   Timeout: 30
 EOF
-        echo -e "${green}archnets configuration generated, restarting service...${plain}"
-        if [[ x"${release}" == x"alpine" ]]; then
-            service archnets restart
-        else
-            systemctl restart archnets
-        fi
-        sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
-            echo -e "${green}archnets restarted successfully${plain}"
-        else
-            echo -e "${red}archnets may have failed to start. Please run 'node log' to view logs.${plain}"
-        fi
+    ok "Configuration written to ${CONFIG_DIR}/config.yml, restarting service..."
+    restart_and_report
 }
 
-install_ppnode() {
-    local version_param="$1"
-    if [[ -e /usr/local/archnets/ ]]; then
-        rm -rf /usr/local/archnets/
-    fi
-
-    mkdir /usr/local/archnets/ -p
-    cd /usr/local/archnets/
-
-    if  [[ -z "$version_param" ]] ; then
-        last_version=$(curl -Ls "https://api.github.com/repos/archnets/node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}Failed to detect archnets version (GitHub API limit?). Try again later or specify a version manually.${plain}"
-            exit 1
-        fi
-        echo -e "${green}Detected latest version: ${last_version}. Starting installation...${plain}"
-        url="https://github.com/archnets/node/releases/download/${last_version}/archnets-node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "Download progress" > /usr/local/archnets/archnets-node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Failed to download archnets. Please ensure your server can access GitHub files.${plain}"
-            exit 1
-        fi
-    else
-        last_version=$version_param
-        url="https://github.com/archnets/node/releases/download/${last_version}/archnets-node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "Download progress" > /usr/local/archnets/archnets-node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Failed to download archnets $1. Please ensure this version exists.${plain}"
-            exit 1
-        fi
-    fi
-
-    unzip archnets-node-linux.zip
-    rm archnets-node-linux.zip -f
-    chmod +x node
-    mkdir /etc/archnets/ -p
-    cp geoip.dat /etc/archnets/
-    cp geosite.dat /etc/archnets/
-    cp geoip_iran.dat /etc/archnets/ 2>/dev/null || true
-    cp geosite_iran.dat /etc/archnets/ 2>/dev/null || true
-    if [[ x"${release}" == x"alpine" ]]; then
-        rm /etc/init.d/archnets -f
-        cat <<EOF > /etc/init.d/archnets
-#!/sbin/openrc-run
-
-name="archnets"
-description="archnets"
-
-command="/usr/local/archnets/node"
-command_args="server"
-command_user="root"
-
-pidfile="/run/node.pid"
-command_background="yes"
-
-depend() {
-        need net
-}
-EOF
-        chmod +x /etc/init.d/archnets
-        rc-update add archnets default
-        echo -e "${green}archnets ${last_version}${plain} installed and enabled at boot"
-    else
-        rm /etc/systemd/system/archnets.service -f
-        cat <<EOF > /etc/systemd/system/archnets.service
+install_systemd_unit() {
+    rm -f /etc/systemd/system/${SERVICE_NAME}.service
+    cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=archnets Service
 After=network.target nss-lookup.target strongswan-swanctl.service strongswan-starter.service strongswan.service
@@ -474,91 +530,186 @@ LimitAS=infinity
 LimitRSS=infinity
 LimitCORE=infinity
 LimitNOFILE=999999
-WorkingDirectory=/usr/local/archnets/
-ExecStart=/usr/local/archnets/node server
+WorkingDirectory=${INSTALL_DIR}/
+ExecStart=${INSTALL_DIR}/node server
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl stop archnets
-        systemctl enable archnets
-        echo -e "${green}archnets ${last_version}${plain} installed and enabled at boot"
+    systemctl daemon-reload
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+}
+
+install_openrc_service() {
+    rm -f /etc/init.d/${SERVICE_NAME}
+    cat > /etc/init.d/${SERVICE_NAME} <<EOF
+#!/sbin/openrc-run
+
+name="${SERVICE_NAME}"
+description="${SERVICE_NAME}"
+
+command="${INSTALL_DIR}/node"
+command_args="server"
+command_user="root"
+
+pidfile="/run/node.pid"
+command_background="yes"
+
+depend() {
+        need net
+}
+EOF
+    chmod +x /etc/init.d/${SERVICE_NAME}
+    rc-update add "$SERVICE_NAME" default
+}
+
+resolve_version() {
+    local version="$1"
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return 0
     fi
+    curl -fsSL --max-time 30 "https://api.github.com/repos/${REPO}/releases/latest" |
+        sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p'
+}
 
-    if [[ ! -f /etc/archnets/config.yml ]]; then
-        # If full CLI parameters were provided, generate config and skip interactive prompts
-        if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
-            generate_ppnode_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"
-            echo -e "${green}/etc/archnets/config.yml generated from parameters${plain}"
-            first_install=false
-        else
-            cp config.yml /etc/archnets/
-            first_install=true
-        fi
-    else
-        if [[ x"${release}" == x"alpine" ]]; then
-            service archnets start
-        else
-            systemctl start archnets
-        fi
-        sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
-            echo -e "${green}archnets restarted successfully${plain}"
-        else
-            echo -e "${red}archnets may have failed to start. Please run 'node log' to view logs.${plain}"
-        fi
-        first_install=false
-    fi
+download_release() {
+    local version="$1"
+    local url="https://github.com/${REPO}/releases/download/${version}/archnets-node-linux-${ARCH}.zip"
+    local dest="${INSTALL_DIR}/archnets-node-linux.zip"
 
-    curl -o /usr/bin/node -Ls https://raw.githubusercontent.com/archnets/node/master/scripts/node.sh
-    chmod +x /usr/bin/node
-
-    cd $cur_dir
-    rm -f install.sh
-    echo "------------------------------------------"
-    echo "archnets management script usage:"
-    echo "------------------------------------------"
-    echo "node              - Show management menu (more features)"
-    echo "node start        - Start archnets"
-    echo "node stop         - Stop archnets"
-    echo "node restart      - Restart archnets"
-    echo "node status       - Show archnets status"
-    echo "node enable       - Enable archnets at boot"
-    echo "node disable      - Disable archnets at boot"
-    echo "node log          - View archnets logs"
-    echo "node generate     - Generate archnets config file"
-    echo "node update       - Update archnets"
-    echo "node update x.x.x - Install a specific archnets version"
-    echo "node install      - Install archnets"
-    echo "node uninstall    - Uninstall archnets"
-    echo "node version      - Show archnets version"
-    echo "------------------------------------------"
-
-    if [[ $first_install == true ]]; then
-        read -rp "Detected first-time installation of archnets. Generate /etc/archnets/config.yml automatically? (y/n): " if_generate
-        if [[ "$if_generate" =~ ^[Yy]$ ]]; then
-            # Interactive prompts with example defaults
-            read -rp "Panel API address [format: https://example.com/]: " api_host
-            api_host=${api_host:-https://example.com/}
-            read -rp "Server ID: " server_id
-            server_id=${server_id:-1}
-            read -rp "Secret key: " secret_key
-
-            # Generate the config file (overwrites any template that may have been copied from the package)
-            generate_ppnode_config "$api_host" "$server_id" "$secret_key"
-        else
-            echo "${green}Skipped automatic config generation. To generate later, run: node generate${plain}"
-        fi
+    info "Downloading ${url}"
+    if ! curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$dest" "$url" || [[ ! -s "$dest" ]]; then
+        die "Failed to download archnets ${version}. Ensure the version exists and your server can access GitHub."
     fi
 }
 
-parse_args "$@"
-echo -e "${green}Starting installation${plain}"
-install_base
-setup_strongswan
-install_ppnode "$VERSION_ARG"
+print_usage_summary() {
+    echo ""
+    echo "${BOLD}──────────────────────────────────────────────${PLAIN}"
+    echo "${BOLD} archnets management script usage${PLAIN}"
+    echo "${BOLD}──────────────────────────────────────────────${PLAIN}"
+    printf ' %-18s %s\n' \
+        "node"              "Show management menu (more features)" \
+        "node start"        "Start archnets" \
+        "node stop"         "Stop archnets" \
+        "node restart"      "Restart archnets" \
+        "node status"       "Show archnets status" \
+        "node enable"       "Enable archnets at boot" \
+        "node disable"      "Disable archnets at boot" \
+        "node log"          "View archnets logs" \
+        "node generate"     "Generate archnets config file" \
+        "node update"       "Update archnets" \
+        "node update x.x.x" "Install a specific archnets version" \
+        "node install"      "Install archnets" \
+        "node uninstall"    "Uninstall archnets" \
+        "node version"      "Show archnets version"
+    echo "${BOLD}──────────────────────────────────────────────${PLAIN}"
+}
+
+first_install_wizard() {
+    local if_generate api_host server_id secret_key
+    read -rp "Detected first-time installation of archnets. Generate ${CONFIG_DIR}/config.yml automatically? (y/n): " if_generate
+    if [[ "$if_generate" =~ ^[Yy]$ ]]; then
+        read -rp "Panel API address [format: https://example.com/]: " api_host
+        api_host=${api_host:-https://example.com/}
+        read -rp "Server ID: " server_id
+        server_id=${server_id:-1}
+        read -rp "Secret key: " secret_key
+        generate_config "$api_host" "$server_id" "$secret_key"
+    else
+        info "Skipped automatic config generation. To generate later, run: node generate"
+    fi
+}
+
+install_node() {
+    local version
+    version="$(resolve_version "$VERSION_ARG")"
+    [[ -n "$version" ]] || die "Failed to detect archnets version (GitHub API limit?). Try again later or specify a version manually."
+    info "Installing archnets ${version}"
+
+    rm -rf "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
+    cd "$INSTALL_DIR" || die "Cannot enter ${INSTALL_DIR}"
+
+    download_release "$version"
+
+    unzip -o -q archnets-node-linux.zip || die "Failed to unpack release archive"
+    rm -f archnets-node-linux.zip
+    chmod +x node
+
+    mkdir -p "$CONFIG_DIR"
+    cp geoip.dat geosite.dat "$CONFIG_DIR"/ 2>/dev/null || true
+    cp geoip_iran.dat geosite_iran.dat "$CONFIG_DIR"/ 2>/dev/null || true
+
+    if [[ "$RELEASE" == "alpine" ]]; then
+        install_openrc_service
+    else
+        install_systemd_unit
+    fi
+    ok "archnets ${version} installed and enabled at boot"
+
+    local first_install=false
+    if [[ ! -f "${CONFIG_DIR}/config.yml" ]]; then
+        if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
+            # Full CLI parameters provided -> non-interactive config
+            generate_config "$API_HOST_ARG" "$SERVER_ID_ARG" "$SECRET_KEY_ARG"
+            ok "${CONFIG_DIR}/config.yml generated from parameters"
+        else
+            cp config.yml "$CONFIG_DIR"/ 2>/dev/null || true
+            first_install=true
+        fi
+    else
+        service_ctl start
+        sleep 2
+        if check_status; then
+            ok "${SERVICE_NAME} restarted successfully"
+        else
+            err "${SERVICE_NAME} may have failed to start. Run 'node log' to view logs."
+        fi
+    fi
+
+    # Management CLI
+    if curl -fsL -o /usr/bin/node "$MGMT_SCRIPT_URL"; then
+        chmod +x /usr/bin/node
+    else
+        warn "Failed to download management script from ${MGMT_SCRIPT_URL}"
+    fi
+
+    cd "$CUR_DIR" || true
+    rm -f install.sh
+
+    print_usage_summary
+
+    [[ "$first_install" == true ]] && first_install_wizard
+}
+
+# ------------------------------------------------------------------------------
+#  Main
+# ------------------------------------------------------------------------------
+main() {
+    banner
+    parse_args "$@"
+    require_root
+
+    step "Checking environment"
+    detect_os
+    detect_arch
+
+    step "Installing base packages"
+    install_base
+
+    step "Configuring strongSwan"
+    setup_strongswan
+
+    step "Installing archnets node"
+    install_node
+
+    echo ""
+    ok "${BOLD}Installation finished${PLAIN}"
+}
+
+main "$@"
