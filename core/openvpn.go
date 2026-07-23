@@ -630,11 +630,8 @@ func (o *OpenVPNCore) setupNAT() error {
 			return o.setupMasquerade(subnet, defaultIface)
 		}
 
-		// 1. Global IP rules
-		if err := execCommand("ip rule show fwmark 1 lookup 100"); err != nil {
-			_ = execCommand("ip rule add fwmark 1 lookup 100")
-		}
-		_ = execCommand("ip route replace local 0.0.0.0/0 dev lo table 100")
+		// 1. Global IP rules & route
+		ensureTProxyIpRule()
 
 		// 2. Interface-specific mangle chain
 		chainName := fmt.Sprintf("XRAY_%s", o.InterfaceName)

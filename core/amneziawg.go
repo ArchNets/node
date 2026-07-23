@@ -609,11 +609,8 @@ func (w *AmneziaWGCore) setupNAT() error {
 			return w.setupMasquerade(subnet, defaultIface)
 		}
 
-		// Global IP rules — check before adding to prevent duplicates
-		if err := execCommand("ip rule show fwmark 1 lookup 100"); err != nil {
-			_ = execCommand("ip rule add fwmark 1 lookup 100")
-		}
-		_ = execCommand("ip route replace local 0.0.0.0/0 dev lo table 100")
+		// Global IP rules & route
+		ensureTProxyIpRule()
 
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)); err != nil {

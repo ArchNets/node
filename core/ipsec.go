@@ -817,8 +817,7 @@ func (c *IPsecCore) setupNAT() error {
 		// TPROXY preserves original destination for both TCP and UDP.
 		// Note: REDIRECT can't recover original dest for UDP (SO_ORIGINAL_DST
 		// doesn't work for connectionless protocols), so TPROXY is required.
-		_ = exec.Command("sh", "-c", "ip rule add fwmark 1 lookup 100").Run()
-		_ = exec.Command("sh", "-c", "ip route add local 0.0.0.0/0 dev lo table 100").Run()
+		ensureTProxyIpRule()
 
 		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
 

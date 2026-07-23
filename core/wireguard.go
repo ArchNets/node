@@ -654,12 +654,8 @@ func (w *WireGuardCore) setupNAT() error {
 		}
 
 		// Set up TPROXY rules for Xray routing
-		// 1. Global IP rules — check before adding to prevent duplicates across restarts
-		if err := execCommand("ip rule show fwmark 1 lookup 100"); err != nil {
-			_ = execCommand("ip rule add fwmark 1 lookup 100")
-		}
-		// The "local" route for table 100 may already exist
-		_ = execCommand("ip route replace local 0.0.0.0/0 dev lo table 100")
+		// 1. Global IP rules & route
+		ensureTProxyIpRule()
 
 		// 2. Interface-specific mangle chain
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
@@ -784,12 +780,17 @@ func execCommand(cmd string) error {
 	execMu.Lock()
 	defer execMu.Unlock()
 
-	parts := strings.Fields(cmd)
-	if len(parts) == 0 {
-		return fmt.Errorf("empty command")
+	var command *exec.Cmd
+	if strings.ContainsAny(cmd, "|><&") {
+		command = exec.Command("sh", "-c", cmd)
+	} else {
+		parts := strings.Fields(cmd)
+		if len(parts) == 0 {
+			return fmt.Errorf("empty command")
+		}
+		command = exec.Command(parts[0], parts[1:]...)
 	}
 
-	command := exec.Command(parts[0], parts[1:]...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("command failed: %s, output: %s", err, string(output))
