@@ -58,6 +58,10 @@ func (c *ShadowTLSController) innerTag() string {
 // What changed: Implemented auto-provisioning for inner Shadowsocks inbounds when ShadowsocksExternal is false, including reachability checks and user routing.
 // Why: Allows ShadowTLS nodes to automatically manage inner Shadowsocks transport inbounds on Xray core while preserving external setup capability.
 func (c *ShadowTLSController) Start() error {
+	if c.apiClient == nil {
+		return fmt.Errorf("ShadowTLS: apiClient is nil")
+	}
+
 	// Get initial user list
 	var protoName string
 	if c.perProtocolUserList {

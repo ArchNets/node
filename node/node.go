@@ -212,15 +212,16 @@ func (n *Node) Start() error {
 		return errs[0]
 	}
 
-	// Start ShadowTLS controllers
-	if errs := startParallel(n.shadowtlsControllers, func(c *ShadowTLSController) error {
+	// Start ShadowTLS controllers (log-and-continue on failure)
+	startParallel(n.shadowtlsControllers, func(c *ShadowTLSController) error {
 		if err := c.Start(); err != nil {
-			return fmt.Errorf("shadowtls node [%s]: %w", c.tag, err)
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Failed to start ShadowTLS node")
 		}
 		return nil
-	}); len(errs) > 0 {
-		return errs[0]
-	}
+	})
 
 	// Start WireGuard controllers
 	if errs := startParallel(n.wireguardControllers, func(c *WireGuardController) error {

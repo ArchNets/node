@@ -166,3 +166,23 @@ func TestNewWithListenIP(t *testing.T) {
 		t.Errorf("Expected Port 6000, got %d", n.xrayControllers[1].info.Protocol.Port)
 	}
 }
+
+func TestNodeStart_ShadowTLSFailureDoesNotAbortOthers(t *testing.T) {
+	n := &Node{
+		shadowtlsControllers: []*ShadowTLSController{
+			{
+				tag: "failing-shadowtls",
+				info: &panel.NodeInfo{
+					Protocol: &panel.Protocol{
+						ShadowTLSVersion: 99, // Invalid version, will make Start() error
+					},
+				},
+			},
+		},
+	}
+
+	err := n.Start()
+	if err != nil {
+		t.Fatalf("expected node.Start() to succeed (ignoring ShadowTLS failure), got: %v", err)
+	}
+}

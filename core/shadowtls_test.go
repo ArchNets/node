@@ -1,9 +1,12 @@
 package core
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/archnets/node/api/panel"
 )
 
 func TestShadowTLSVersionValidation(t *testing.T) {
@@ -53,4 +56,41 @@ func TestCopyWithAccountingClosing(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("copyWithAccounting did not return after conn was closed")
 	}
+}
+
+func TestShadowTLSCore_StartWithZeroUsers_NoError(t *testing.T) {
+	port := 28543
+	shadowsocksPort := 28544
+
+	core, err := NewShadowTLSCore("test-zero-users", port, 3, "www.google.com:443", true, shadowsocksPort)
+	if err != nil {
+		t.Fatalf("failed to create core: %v", err)
+	}
+
+	// 1. Start with 0 users should return nil (no error)
+	err = core.Start()
+	if err != nil {
+		t.Fatalf("expected Start() with 0 users to return nil, got: %v", err)
+	}
+	defer core.Stop()
+
+	// 2. Port should NOT accept connections yet because service/listener is pending
+	addr := net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", port))
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		t.Fatalf("expected port %s to NOT accept connections when pending zero users", addr)
+	}
+
+	// 3. Adding 1 user should create service and start listener
+	core.AddUsers([]panel.UserInfo{
+		{Id: 1, Uuid: "test-user-uuid-1"},
+	})
+
+	// 4. Port should now accept TCP connections
+	conn, err = net.DialTimeout("tcp", addr, 1*time.Second)
+	if err != nil {
+		t.Fatalf("expected port %s to accept connections after user sync, got: %v", addr, err)
+	}
+	conn.Close()
 }

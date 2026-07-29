@@ -592,12 +592,11 @@ func mapSockopt(s *panel.Sockopt) *coreConf.SocketConfig {
 // Why: SOCKS and HTTP do not support dynamic user management. Credentials come from Protocol.User/Password if defined, otherwise from nodeInfo.Users (using Uuid as username and password).
 func buildAccounts(nodeInfo *panel.NodeInfo) []map[string]string {
 	var accounts []map[string]string
-	if nodeInfo.Protocol != nil && (nodeInfo.Protocol.User != "" || nodeInfo.Protocol.Password != "") {
+	if nodeInfo.Protocol != nil && nodeInfo.Protocol.User != "" && nodeInfo.Protocol.Password != "" {
 		accounts = append(accounts, map[string]string{
 			"user": nodeInfo.Protocol.User,
 			"pass": nodeInfo.Protocol.Password,
 		})
-		return accounts
 	}
 	for _, u := range nodeInfo.Users {
 		if u.Uuid != "" {

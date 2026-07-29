@@ -28,12 +28,13 @@ type ShadowTLSCore struct {
 	StrictMode      bool
 	ShadowsocksPort int // Local Shadowsocks port to forward to
 
-	service    *shadowtls.Service
-	listener   net.Listener
-	users      *ShadowTLSUserMap
-	limiterRef *limiter.Limiter
-	running    atomic.Bool
-	wg         sync.WaitGroup
+	service        *shadowtls.Service
+	listener       net.Listener
+	users          *ShadowTLSUserMap
+	limiterRef     *limiter.Limiter
+	running        atomic.Bool
+	servicePending atomic.Bool
+	wg             sync.WaitGroup
 
 	// Traffic accounting
 	trafficMu sync.RWMutex
@@ -125,6 +126,8 @@ func NewShadowTLSCore(tag string, port int, version int, handshakeServer string,
 
 // Start starts the ShadowTLS server
 func (s *ShadowTLSCore) Start() error {
+	s.running.Store(true)
+
 	// Build users list for sing-shadowtls
 	users := s.buildUserList()
 
@@ -132,6 +135,17 @@ func (s *ShadowTLSCore) Start() error {
 	handshakeAddr := M.ParseSocksaddr(s.HandshakeServer)
 	if !handshakeAddr.IsValid() {
 		return fmt.Errorf("failed to parse handshake server: %s", s.HandshakeServer)
+	}
+
+	if len(users) == 0 {
+		log.WithFields(log.Fields{
+			"tag":       s.Tag,
+			"port":      s.Port,
+			"version":   s.Version,
+			"handshake": s.HandshakeServer,
+		}).Warn("ShadowTLS started with no users; service deferred until first user sync")
+		s.servicePending.Store(true)
+		return nil
 	}
 
 	// Create handshake config
@@ -160,7 +174,6 @@ func (s *ShadowTLSCore) Start() error {
 		return fmt.Errorf("failed to listen on port %d: %w", s.Port, err)
 	}
 	s.listener = listener
-	s.running.Store(true)
 
 	log.WithFields(log.Fields{
 		"tag":       s.Tag,
@@ -176,9 +189,12 @@ func (s *ShadowTLSCore) Start() error {
 // Stop stops the ShadowTLS server
 func (s *ShadowTLSCore) Stop() error {
 	s.running.Store(false)
+	s.servicePending.Store(false)
 	if s.listener != nil {
 		s.listener.Close()
+		s.listener = nil
 	}
+	s.service = nil
 
 	s.wg.Wait()
 	log.WithField("tag", s.Tag).Info("ShadowTLS server stopped")
@@ -188,7 +204,11 @@ func (s *ShadowTLSCore) Stop() error {
 // acceptLoop accepts incoming connections
 func (s *ShadowTLSCore) acceptLoop() {
 	for s.running.Load() {
-		conn, err := s.listener.Accept()
+		listener := s.listener
+		if listener == nil {
+			break
+		}
+		conn, err := listener.Accept()
 		if err != nil {
 			if s.running.Load() {
 				log.WithError(err).Error("ShadowTLS accept error")
@@ -199,10 +219,15 @@ func (s *ShadowTLSCore) acceptLoop() {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			svc := s.service
+			if svc == nil {
+				conn.Close()
+				return
+			}
 			ctx := context.Background()
 			source := M.SocksaddrFromNet(conn.RemoteAddr())
 
-			err := s.service.NewConnection(ctx, conn, source, M.Socksaddr{}, func(it error) {
+			err := svc.NewConnection(ctx, conn, source, M.Socksaddr{}, func(it error) {
 				conn.Close()
 			})
 			if err != nil {
@@ -374,32 +399,48 @@ func (s *ShadowTLSCore) AddUsers(userInfos []panel.UserInfo) {
 	}
 	s.users.mu.Unlock()
 
-	// Rebuild service with new users (sing-shadowtls doesn't support dynamic user updates)
-	if s.running.Load() && s.service != nil {
+	// Rebuild or initialize service with new users (sing-shadowtls doesn't support dynamic user updates)
+	if s.running.Load() {
 		users := s.buildUserList()
-		// Parse handshake server
-		handshakeAddr := M.ParseSocksaddr(s.HandshakeServer)
-		if !handshakeAddr.IsValid() {
-			log.Error("Failed to parse handshake server for user update")
-			return
-		}
+		if len(users) > 0 {
+			handshakeAddr := M.ParseSocksaddr(s.HandshakeServer)
+			if !handshakeAddr.IsValid() {
+				log.Error("Failed to parse handshake server for user update")
+				return
+			}
 
-		newService, err := shadowtls.NewService(shadowtls.ServiceConfig{
-			Version: s.Version,
-			Users:   users,
-			Handshake: shadowtls.HandshakeConfig{
-				Server: handshakeAddr,
-				Dialer: N.SystemDialer,
-			},
-			StrictMode: s.StrictMode,
-			Handler:    s,
-			Logger:     &shadowTLSLogger{tag: s.Tag},
-		})
-		if err != nil {
-			log.WithError(err).Error("Failed to recreate shadowtls service")
-			return
+			newService, err := shadowtls.NewService(shadowtls.ServiceConfig{
+				Version: s.Version,
+				Users:   users,
+				Handshake: shadowtls.HandshakeConfig{
+					Server: handshakeAddr,
+					Dialer: N.SystemDialer,
+				},
+				StrictMode: s.StrictMode,
+				Handler:    s,
+				Logger:     &shadowTLSLogger{tag: s.Tag},
+			})
+			if err != nil {
+				log.WithError(err).Error("Failed to recreate shadowtls service")
+				return
+			}
+			s.service = newService
+
+			if s.servicePending.Load() || s.listener == nil {
+				listener, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+				if err != nil {
+					log.WithError(err).Errorf("ShadowTLS: failed to bind listener on port %d after user sync", s.Port)
+					return
+				}
+				s.listener = listener
+				s.servicePending.Store(false)
+				log.WithFields(log.Fields{
+					"tag":  s.Tag,
+					"port": s.Port,
+				}).Info("ShadowTLS service and listener started after initial user sync")
+				go s.acceptLoop()
+			}
 		}
-		s.service = newService
 	}
 
 	log.WithFields(log.Fields{
@@ -417,24 +458,33 @@ func (s *ShadowTLSCore) DelUsers(userInfos []panel.UserInfo) {
 	}
 	s.users.mu.Unlock()
 
-	// Rebuild service (sing-shadowtls doesn't support dynamic user updates)
-	if s.running.Load() && s.service != nil {
+	// Rebuild service or enter pending state if zero users
+	if s.running.Load() {
 		users := s.buildUserList()
-		handshakeAddr := M.ParseSocksaddr(s.HandshakeServer)
-
-		newService, err := shadowtls.NewService(shadowtls.ServiceConfig{
-			Version: s.Version,
-			Users:   users,
-			Handshake: shadowtls.HandshakeConfig{
-				Server: handshakeAddr,
-				Dialer: N.SystemDialer,
-			},
-			StrictMode: s.StrictMode,
-			Handler:    s,
-			Logger:     &shadowTLSLogger{tag: s.Tag},
-		})
-		if err == nil {
-			s.service = newService
+		if len(users) == 0 {
+			s.servicePending.Store(true)
+			s.service = nil
+			if s.listener != nil {
+				s.listener.Close()
+				s.listener = nil
+			}
+			log.WithField("tag", s.Tag).Warn("ShadowTLS user count reached 0; stopping listener and returning to pending state")
+		} else if s.service != nil {
+			handshakeAddr := M.ParseSocksaddr(s.HandshakeServer)
+			newService, err := shadowtls.NewService(shadowtls.ServiceConfig{
+				Version: s.Version,
+				Users:   users,
+				Handshake: shadowtls.HandshakeConfig{
+					Server: handshakeAddr,
+					Dialer: N.SystemDialer,
+				},
+				StrictMode: s.StrictMode,
+				Handler:    s,
+				Logger:     &shadowTLSLogger{tag: s.Tag},
+			})
+			if err == nil {
+				s.service = newService
+			}
 		}
 	}
 
