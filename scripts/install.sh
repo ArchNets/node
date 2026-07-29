@@ -11,9 +11,9 @@
 #    install.sh v1.1.51                  # install a specific version
 #    install.sh --api-host https://p.example.com --server-id 1 --secret-key abc
 # ==============================================================================
-​
+
 set -o pipefail
-​
+
 # ------------------------------------------------------------------------------
 #  Constants
 # ------------------------------------------------------------------------------
@@ -25,9 +25,9 @@ readonly MGMT_SCRIPT_URL="https://raw.githubusercontent.com/archnets/node/master
 readonly AWG_MODULE_REPO="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
 readonly AWG_TOOLS_REPO="https://github.com/amnezia-vpn/amneziawg-tools.git"
 readonly AWG_PPA="ppa:amnezia/ppa"
-​
+
 CUR_DIR="$(pwd)"
-​
+
 # ------------------------------------------------------------------------------
 #  UI helpers
 # ------------------------------------------------------------------------------
@@ -37,20 +37,20 @@ if [[ -t 1 ]]; then
 else
     RED=""; GREEN=""; YELLOW=""; CYAN=""; BOLD=""; DIM=""; PLAIN=""
 fi
-​
+
 info() { echo "${CYAN}[i]${PLAIN} $*"; }
 ok()   { echo "${GREEN}[+]${PLAIN} $*"; }
 warn() { echo "${YELLOW}[!]${PLAIN} $*"; }
 err()  { echo "${RED}[x]${PLAIN} $*" >&2; }
 die()  { err "$*"; exit 1; }
-​
+
 STEP_NO=0
 step() {
     STEP_NO=$((STEP_NO + 1))
     echo ""
     echo "${BOLD}${CYAN}── ${STEP_NO}. $* ──${PLAIN}"
 }
-​
+
 banner() {
     echo "${BOLD}${GREEN}"
     cat <<'EOF'
@@ -60,7 +60,7 @@ banner() {
 EOF
     echo "${PLAIN}"
 }
-​
+
 # ------------------------------------------------------------------------------
 #  Argument parsing
 # ------------------------------------------------------------------------------
@@ -68,22 +68,22 @@ VERSION_ARG=""
 API_HOST_ARG=""
 SERVER_ID_ARG=""
 SECRET_KEY_ARG=""
-​
+
 usage() {
     cat <<EOF
 Usage: $0 [version] [options]
-​
+
 Options:
   --api-host URL     Panel API address (e.g. https://example.com/)
   --server-id ID     Server unique identifier
   --secret-key KEY   Secret key used to verify request legitimacy
   -h, --help         Show this help
-​
+
 When all three options are provided, the config file is generated
 non-interactively.
 EOF
 }
-​
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -99,7 +99,7 @@ parse_args() {
         esac
     done
 }
-​
+
 # ------------------------------------------------------------------------------
 #  Environment detection
 # ------------------------------------------------------------------------------
@@ -107,11 +107,11 @@ RELEASE=""
 OS_VERSION=""
 OS_CODENAME=""
 ARCH=""
-​
+
 require_root() {
     [[ $EUID -eq 0 ]] || die "You must run this script as root!"
 }
-​
+
 detect_os() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
@@ -134,7 +134,7 @@ detect_os() {
         OS_VERSION="${VERSION_ID%%.*}"
         OS_CODENAME="${VERSION_CODENAME:-}"
     fi
-​
+
     # Legacy fallbacks for systems without /etc/os-release
     if [[ -z "$RELEASE" ]]; then
         if [[ -f /etc/redhat-release ]]; then
@@ -151,9 +151,9 @@ detect_os() {
             RELEASE="arch"
         fi
     fi
-​
+
     [[ -n "$RELEASE" ]] || die "System version not detected. Please contact the script author!"
-​
+
     # Minimum version requirements
     case "$RELEASE" in
         centos)
@@ -167,10 +167,10 @@ detect_os() {
             [[ -n "$OS_VERSION" && "$OS_VERSION" -lt 8 ]] && die "Please use Debian 8 or newer!"
             ;;
     esac
-​
+
     ok "Detected OS: ${RELEASE} ${OS_VERSION}${OS_CODENAME:+ (${OS_CODENAME})}"
 }
-​
+
 detect_arch() {
     case "$(uname -m)" in
         x86_64|x64|amd64)  ARCH="64" ;;
@@ -181,14 +181,14 @@ detect_arch() {
             warn "Failed to detect architecture, using default: ${ARCH}"
             ;;
     esac
-​
+
     if [[ "$(getconf LONG_BIT)" != "64" ]]; then
         die "This software does not support 32-bit systems. Please use a 64-bit system (x86_64)."
     fi
-​
+
     ok "Detected architecture: $(uname -m) -> ${ARCH}"
 }
-​
+
 # ------------------------------------------------------------------------------
 #  Package management helpers
 # ------------------------------------------------------------------------------
@@ -206,21 +206,21 @@ wait_for_dpkg_lock() {
                 break
             fi
         done
-​
+
         [[ "$locked" == false ]] && break
-​
+
         [[ $count -eq 0 ]] && warn "Waiting for other package manager processes (apt/dpkg) to exit..."
         sleep 3
         count=$((count + 1))
         [[ $count -gt 100 ]] && die "Package manager lock timeout. Another package manager process is running."
     done
 }
-​
+
 apt_install() {
     wait_for_dpkg_lock
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
-​
+
 # Clone a repo, falling back to a proxy mirror if github.com is unreachable
 git_clone_with_fallback() {
     # $1 = repo url, $2 = destination dir
@@ -229,7 +229,7 @@ git_clone_with_fallback() {
     rm -rf "$2"
     git clone --depth 1 "https://ghproxy.net/$1" "$2" >/dev/null 2>&1
 }
-​
+
 need_install_apt() {
     local missing=() installed p
     installed=$(dpkg-query -W -f='${Package}\n' 2>/dev/null)
@@ -250,7 +250,7 @@ need_install_apt() {
         fi
     fi
 }
-​
+
 need_install_yum() {
     local missing=() installed p
     installed=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null)
@@ -262,7 +262,7 @@ need_install_yum() {
         yum install -y "${missing[@]}" >/dev/null 2>&1 || warn "Some packages failed to install: ${missing[*]}"
     fi
 }
-​
+
 need_install_apk() {
     local missing=() installed p
     installed=$(apk info 2>/dev/null)
@@ -274,7 +274,7 @@ need_install_apk() {
         apk add --no-cache "${missing[@]}" >/dev/null 2>&1 || warn "Some packages failed to install: ${missing[*]}"
     fi
 }
-​
+
 install_base() {
     case "$RELEASE" in
         centos)
@@ -315,7 +315,7 @@ install_base() {
     esac
     ok "Base packages ready"
 }
-​
+
 # ------------------------------------------------------------------------------
 #  AmneziaWG
 #
@@ -331,36 +331,36 @@ install_base() {
 awg_ready() {
     lsmod | grep -q '^amneziawg' && command -v awg >/dev/null 2>&1
 }
-​
+
 ppa_supports_release() {
     [[ -n "$OS_CODENAME" ]] || return 1
     curl -fsI --max-time 15 \
         "https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/${OS_CODENAME}/Release" \
         >/dev/null 2>&1
 }
-​
+
 remove_amnezia_ppa() {
     add-apt-repository -y --remove "$AWG_PPA" >/dev/null 2>&1 || true
     rm -f /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.list \
           /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.sources 2>/dev/null || true
 }
-​
+
 install_awg_dkms() {
     info "Trying AmneziaWG DKMS packages from PPA..."
     add-apt-repository -y "$AWG_PPA" >/dev/null 2>&1 || true
     if ! apt-get update -y >/dev/null 2>&1; then
         warn "apt-get update failed after adding the Amnezia PPA"
     fi
-​
+
     apt_install amneziawg-tools >/dev/null 2>&1 || true
     apt_install amneziawg-dkms 2>&1 | tee /tmp/awg-dkms-install.log
     local dkms_exit=${PIPESTATUS[0]}
-​
+
     modprobe amneziawg 2>/dev/null || true
     if [[ $dkms_exit -eq 0 ]] && awg_ready; then
         return 0
     fi
-​
+
     warn "DKMS install failed for kernel $(uname -r) (see /tmp/awg-dkms-install.log)"
     # Clean up broken DKMS state and the now-useless PPA so apt keeps working
     dpkg --remove --force-remove-reinstreq amneziawg amneziawg-dkms 2>/dev/null || true
@@ -369,12 +369,12 @@ install_awg_dkms() {
     apt-get update -y >/dev/null 2>&1 || true
     return 1
 }
-​
+
 install_awg_source() {
     info "Building AmneziaWG from source for kernel $(uname -r)..."
-​
+
     apt_install git build-essential "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
-​
+
     # Kernels built with Clang/LLVM (common for XanMod/Liquorix) need LLVM=1
     local make_flags=""
     if grep -qi clang /proc/version 2>/dev/null ||
@@ -384,7 +384,7 @@ install_awg_source() {
         apt_install clang llvm lld >/dev/null 2>&1 || true
         make_flags="LLVM=1"
     fi
-​
+
     # --- kernel module ---
     local build_dir="/tmp/amneziawg-linux-kernel-module"
     rm -rf "$build_dir"
@@ -392,7 +392,7 @@ install_awg_source() {
         err "Failed to clone AmneziaWG source. Check network/GitHub access."
         return 1
     fi
-​
+
     if ! make -C "$build_dir/src" -j"$(nproc)" KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags; then
         err "AmneziaWG source build failed. Check ${build_dir}/src/ for details."
         return 1
@@ -400,14 +400,14 @@ install_awg_source() {
     make -C "$build_dir/src" install KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags 2>/dev/null || true
     depmod -a
     modprobe amneziawg 2>/dev/null || true
-​
+
     if ! lsmod | grep -q '^amneziawg'; then
         err "Failed to load AmneziaWG module after source build"
         return 1
     fi
     # Persist across reboots
     echo "amneziawg" > /etc/modules-load.d/amneziawg.conf
-​
+
     # --- userland tools (awg / awg-quick), if not already present ---
     if ! command -v awg >/dev/null 2>&1; then
         local tools_dir="/tmp/amneziawg-tools"
@@ -420,20 +420,20 @@ install_awg_source() {
             warn "Failed to build amneziawg-tools; 'awg' CLI may be missing"
         fi
     fi
-​
+
     rm -rf "$build_dir" /tmp/amneziawg-tools
     return 0
 }
-​
+
 install_amneziawg() {
     info "Installing AmneziaWG..."
-​
+
     modprobe amneziawg 2>/dev/null || true
     if awg_ready; then
         ok "AmneziaWG already installed and loaded"
         return 0
     fi
-​
+
     if [[ "$RELEASE" == "ubuntu" ]] && ppa_supports_release; then
         if install_awg_dkms; then
             ok "AmneziaWG DKMS module installed and loaded"
@@ -442,16 +442,16 @@ install_amneziawg() {
     elif [[ "$RELEASE" == "ubuntu" ]]; then
         warn "Amnezia PPA has no packages for Ubuntu '${OS_CODENAME:-unknown}', skipping DKMS"
     fi
-​
+
     if install_awg_source; then
         ok "AmneziaWG built from source and loaded"
         return 0
     fi
-​
+
     err "AmneziaWG installation failed; AWG-based protocols will be unavailable"
     return 1
 }
-​
+
 # ------------------------------------------------------------------------------
 #  strongSwan (required for IPsec/IKEv2/L2TP)
 # ------------------------------------------------------------------------------
@@ -462,7 +462,7 @@ setup_strongswan() {
         ok "strongSwan enabled (OpenRC)"
         return
     fi
-​
+
     local svc
     for svc in strongswan-swanctl strongswan-starter strongswan; do
         if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
@@ -474,7 +474,7 @@ setup_strongswan() {
     done
     warn "Could not find a strongSwan systemd service to enable"
 }
-​
+
 # ------------------------------------------------------------------------------
 #  archnets service
 # ------------------------------------------------------------------------------
@@ -487,7 +487,7 @@ check_status() {
         systemctl is-active --quiet "$SERVICE_NAME"
     fi
 }
-​
+
 service_ctl() {
     local action="$1"
     if [[ "$RELEASE" == "alpine" ]]; then
@@ -496,7 +496,7 @@ service_ctl() {
         systemctl "$action" "$SERVICE_NAME" >/dev/null 2>&1
     fi
 }
-​
+
 restart_and_report() {
     service_ctl restart
     sleep 2
@@ -506,10 +506,10 @@ restart_and_report() {
         err "${SERVICE_NAME} may have failed to start. Run 'node log' to view logs."
     fi
 }
-​
+
 generate_config() {
     local api_host="$1" server_id="$2" secret_key="$3"
-​
+
     mkdir -p "$CONFIG_DIR"
     cat > "${CONFIG_DIR}/config.yml" <<EOF
 Log:
@@ -519,7 +519,7 @@ Log:
   Output:
   # Access log path, e.g. logs/access.log; set to "none" to disable access logs
   Access: none
-​
+
 Api:
   # Backend API address, e.g. "https://api.example.com"
   ApiHost: ${api_host}
@@ -533,7 +533,7 @@ EOF
     ok "Configuration written to ${CONFIG_DIR}/config.yml, restarting service..."
     restart_and_report
 }
-​
+
 install_systemd_unit() {
     rm -f /etc/systemd/system/${SERVICE_NAME}.service
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
@@ -541,7 +541,7 @@ install_systemd_unit() {
 Description=archnets Service
 After=network.target nss-lookup.target strongswan-swanctl.service strongswan-starter.service strongswan.service
 Wants=network.target
-​
+
 [Service]
 User=root
 Group=root
@@ -554,7 +554,7 @@ WorkingDirectory=${INSTALL_DIR}/
 ExecStart=${INSTALL_DIR}/node server
 Restart=always
 RestartSec=10
-​
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -562,22 +562,22 @@ EOF
     systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
 }
-​
+
 install_openrc_service() {
     rm -f /etc/init.d/${SERVICE_NAME}
     cat > /etc/init.d/${SERVICE_NAME} <<EOF
 #!/sbin/openrc-run
-​
+
 name="${SERVICE_NAME}"
 description="${SERVICE_NAME}"
-​
+
 command="${INSTALL_DIR}/node"
 command_args="server"
 command_user="root"
-​
+
 pidfile="/run/node.pid"
 command_background="yes"
-​
+
 depend() {
         need net
 }
@@ -585,7 +585,7 @@ EOF
     chmod +x /etc/init.d/${SERVICE_NAME}
     rc-update add "$SERVICE_NAME" default
 }
-​
+
 resolve_version() {
     local version="$1"
     if [[ -n "$version" ]]; then
@@ -595,18 +595,18 @@ resolve_version() {
     curl -fsSL --max-time 30 "https://api.github.com/repos/${REPO}/releases/latest" |
         sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p'
 }
-​
+
 download_release() {
     local version="$1"
     local url="https://github.com/${REPO}/releases/download/${version}/archnets-node-linux-${ARCH}.zip"
     local dest="${INSTALL_DIR}/archnets-node-linux.zip"
-​
+
     info "Downloading ${url}"
     if ! curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$dest" "$url" || [[ ! -s "$dest" ]]; then
         die "Failed to download archnets ${version}. Ensure the version exists and your server can access GitHub."
     fi
 }
-​
+
 print_usage_summary() {
     echo ""
     echo "${BOLD}──────────────────────────────────────────────${PLAIN}"
@@ -629,7 +629,7 @@ print_usage_summary() {
         "node version"      "Show archnets version"
     echo "${BOLD}──────────────────────────────────────────────${PLAIN}"
 }
-​
+
 first_install_wizard() {
     local if_generate api_host server_id secret_key
     read -rp "Detected first-time installation of archnets. Generate ${CONFIG_DIR}/config.yml automatically? (y/n): " if_generate
@@ -644,34 +644,34 @@ first_install_wizard() {
         info "Skipped automatic config generation. To generate later, run: node generate"
     fi
 }
-​
+
 install_node() {
     local version
     version="$(resolve_version "$VERSION_ARG")"
     [[ -n "$version" ]] || die "Failed to detect archnets version (GitHub API limit?). Try again later or specify a version manually."
     info "Installing archnets ${version}"
-​
+
     rm -rf "$INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR" || die "Cannot enter ${INSTALL_DIR}"
-​
+
     download_release "$version"
-​
+
     unzip -o -q archnets-node-linux.zip || die "Failed to unpack release archive"
     rm -f archnets-node-linux.zip
     chmod +x node
-​
+
     mkdir -p "$CONFIG_DIR"
     cp geoip.dat geosite.dat "$CONFIG_DIR"/ 2>/dev/null || true
     cp geoip_iran.dat geosite_iran.dat "$CONFIG_DIR"/ 2>/dev/null || true
-​
+
     if [[ "$RELEASE" == "alpine" ]]; then
         install_openrc_service
     else
         install_systemd_unit
     fi
     ok "archnets ${version} installed and enabled at boot"
-​
+
     local first_install=false
     if [[ ! -f "${CONFIG_DIR}/config.yml" ]]; then
         if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
@@ -691,22 +691,22 @@ install_node() {
             err "${SERVICE_NAME} may have failed to start. Run 'node log' to view logs."
         fi
     fi
-​
+
     # Management CLI
     if curl -fsL -o /usr/bin/node "$MGMT_SCRIPT_URL"; then
         chmod +x /usr/bin/node
     else
         warn "Failed to download management script from ${MGMT_SCRIPT_URL}"
     fi
-​
+
     cd "$CUR_DIR" || true
     rm -f install.sh
-​
+
     print_usage_summary
-​
+
     [[ "$first_install" == true ]] && first_install_wizard
 }
-​
+
 # ------------------------------------------------------------------------------
 #  Main
 # ------------------------------------------------------------------------------
@@ -714,22 +714,22 @@ main() {
     banner
     parse_args "$@"
     require_root
-​
+
     step "Checking environment"
     detect_os
     detect_arch
-​
+
     step "Installing base packages"
     install_base
-​
+
     step "Configuring strongSwan"
     setup_strongswan
-​
+
     step "Installing archnets node"
     install_node
-​
+
     echo ""
     ok "${BOLD}Installation finished${PLAIN}"
 }
-​
+
 main "$@"
