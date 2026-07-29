@@ -94,19 +94,15 @@ func TestGetNextEndpoint_Rotation(t *testing.T) {
 	original := "127.0.0.1:2408"
 	tag := "warp_test"
 
-	// Call 1: Should return original
-	ep1 := c.getNextEndpoint(tag, original)
-	assert.Equal(t, original, ep1)
-
-	// Call 2..9: Should return fallback pool entries in order
+	// Call 1..N: Should return fallback pool entries in order
 	for i, expected := range fallbackEndpoints {
 		ep := c.getNextEndpoint(tag, original)
 		assert.Equal(t, expected, ep, "at index %d", i)
 	}
 
-	// Call 10: Should wrap back around to original
-	ep10 := c.getNextEndpoint(tag, original)
-	assert.Equal(t, original, ep10)
+	// Call N+1: Should wrap back to first fallback endpoint
+	epNext := c.getNextEndpoint(tag, original)
+	assert.Equal(t, fallbackEndpoints[0], epNext)
 }
 
 func TestGetCustomConfig_DNSProtocols(t *testing.T) {

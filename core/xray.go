@@ -45,13 +45,17 @@ type XrayCore struct {
 	dispatcher                  *dispatcher.DefaultDispatcher
 	statsManager                xraystats.Manager
 	outboundNames               []string
+	wgMutex                     sync.Mutex
 	wgOutbounds                 map[string]*WireguardOutbound
 	wgFailures                  map[string]int
 	wgEndpointIndex             map[string]int
+	wgHandlerMissing            map[string]bool
+	wgEscalationCount           map[string]int
+	wgRecovering                map[string]bool
 	wgWatchdogPeriodic          *task.Task
+	wgWatchdogGroup             sync.WaitGroup
 	watchdogCtx                 context.Context
 	watchdogCancel              context.CancelFunc
-	wgHandlerMissing            map[string]bool
 }
 
 type UserMap struct {
@@ -67,9 +71,14 @@ func New(config *conf.Conf, client *panel.ClientV2) *XrayCore {
 		users: &UserMap{
 			uidMap: make(map[string]int),
 		},
-		watchdogCtx:      ctx,
-		watchdogCancel:   cancel,
-		wgHandlerMissing: make(map[string]bool),
+		watchdogCtx:       ctx,
+		watchdogCancel:    cancel,
+		wgOutbounds:       make(map[string]*WireguardOutbound),
+		wgFailures:        make(map[string]int),
+		wgEndpointIndex:   make(map[string]int),
+		wgHandlerMissing:  make(map[string]bool),
+		wgEscalationCount: make(map[string]int),
+		wgRecovering:      make(map[string]bool),
 	}
 	return core
 }
@@ -83,7 +92,10 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	if err != nil {
 		log.WithField("err", err).Panic("failed to build custom config")
 	}
-	v.wgOutbounds = wgOutbounds
+
+	// What changed: Initialized/re-initialized WireGuard/WARP watchdog under dedicated wgMutex.
+	// Why: Ensures WARP and WireGuard outbounds are covered after every reload without racing or blocking.
+	v.initWatchdog(wgOutbounds)
 
 	v.Server = getCore(v.Config, dnsConfig, outBoundConfig, routeConfig, serverconfig)
 	if err := v.Server.Start(); err != nil {
@@ -106,6 +118,42 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	return nil
 }
 
+func (v *XrayCore) initWatchdog(wgOutbounds map[string]*WireguardOutbound) {
+	v.wgMutex.Lock()
+	defer v.wgMutex.Unlock()
+
+	v.wgOutbounds = wgOutbounds
+	if v.wgFailures == nil {
+		v.wgFailures = make(map[string]int)
+	}
+	if v.wgEndpointIndex == nil {
+		v.wgEndpointIndex = make(map[string]int)
+	}
+	if v.wgHandlerMissing == nil {
+		v.wgHandlerMissing = make(map[string]bool)
+	}
+	if v.wgEscalationCount == nil {
+		v.wgEscalationCount = make(map[string]int)
+	}
+	if v.wgRecovering == nil {
+		v.wgRecovering = make(map[string]bool)
+	}
+
+	if v.wgWatchdogPeriodic != nil {
+		v.wgWatchdogPeriodic.Close()
+		v.wgWatchdogPeriodic = nil
+	}
+
+	if len(v.wgOutbounds) > 0 {
+		v.wgWatchdogPeriodic = &task.Task{
+			Interval: 20 * time.Second,
+			Execute:  v.WireguardWatchdog,
+		}
+		_ = v.wgWatchdogPeriodic.Start(false)
+		log.Infof("Started WireGuard watchdog task for %d outbounds (20s interval)", len(v.wgOutbounds))
+	}
+}
+
 func (v *XrayCore) Close() error {
 	v.access.Lock()
 	defer v.access.Unlock()
@@ -115,16 +163,23 @@ func (v *XrayCore) Close() error {
 	if v.serverConfigMonitorPeriodic != nil {
 		v.serverConfigMonitorPeriodic.Close()
 	}
+
+	v.wgMutex.Lock()
 	if v.wgWatchdogPeriodic != nil {
 		v.wgWatchdogPeriodic.Close()
+		v.wgWatchdogPeriodic = nil
 	}
+	v.wgMutex.Unlock()
+	v.wgWatchdogGroup.Wait()
 	v.Config = nil
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
-	err := v.Server.Close()
-	if err != nil {
-		return err
+	if v.Server != nil {
+		err := v.Server.Close()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -253,17 +308,6 @@ func (c *XrayCore) startTasks(serverconfig *panel.ServerConfigResponse) {
 		Execute:  c.ServerConfigMonitor,
 	}
 	_ = c.serverConfigMonitorPeriodic.Start(false)
-
-	// Start WireGuard watchdog task if there are wireguard outbounds
-	if len(c.wgOutbounds) > 0 {
-		c.wgFailures = make(map[string]int)
-		c.wgWatchdogPeriodic = &task.Task{
-			Interval: 60 * time.Second,
-			Execute:  c.WireguardWatchdog,
-		}
-		_ = c.wgWatchdogPeriodic.Start(false)
-		log.Infof("Started WireGuard watchdog task for %d outbounds", len(c.wgOutbounds))
-	}
 }
 
 func (c *XrayCore) ServerConfigMonitor() (err error) {
