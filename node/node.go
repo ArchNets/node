@@ -135,7 +135,9 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 
 			// Update n.Protocol to point to our local safe copy to avoid loop variable issues
 			n.Protocol = &cfg
-			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			// What changed: Passed Xray core instance to NewShadowTLSController.
+			// Why: Allows ShadowTLS controller to auto-provision and manage the inner Shadowsocks inbound on Xray core.
+			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "shadowtls",
 				"port": nodeconfig.Port,

@@ -108,3 +108,41 @@ func TestGetNextEndpoint_Rotation(t *testing.T) {
 	ep10 := c.getNextEndpoint(tag, original)
 	assert.Equal(t, original, ep10)
 }
+
+func TestGetCustomConfig_DNSProtocols(t *testing.T) {
+	dnsItems := []panel.DNSItem{
+		{Proto: "udp", Address: "1.1.1.1"},
+		{Proto: "tcp", Address: "1.0.0.1"},
+		{Proto: "tls", Address: "1.1.1.1:853"},
+		{Proto: "https", Address: "1.1.1.1/dns-query"},
+		{Proto: "quic", Address: "dns.adguard.com"},
+		{Proto: "local", Address: "127.0.0.1"},
+		{Proto: "unknown_proto", Address: "8.8.8.8"},
+		{Proto: "udp", Address: "   "}, // Empty address should be skipped
+	}
+
+	serverConfig := &panel.ServerConfigResponse{
+		Data: &panel.Data{
+			DNS: &dnsItems,
+		},
+	}
+
+	dnsCfg, _, _, _, err := GetCustomConfig(serverConfig)
+	assert.NoError(t, err)
+	assert.NotNil(t, dnsCfg)
+
+	// Expected 1 default (localhost) + 7 valid items = 8 total
+	assert.Len(t, dnsCfg.NameServer, 8)
+
+	// Check default localhost nameserver is first
+	assert.Equal(t, "localhost", dnsCfg.NameServer[0].Address.Address.AsAddress().String())
+
+	// Check formatted addresses
+	assert.Equal(t, "1.1.1.1", dnsCfg.NameServer[1].Address.Address.AsAddress().String())
+	assert.Equal(t, "tcp://1.0.0.1", dnsCfg.NameServer[2].Address.Address.AsAddress().String())
+	assert.Equal(t, "tls://1.1.1.1:853", dnsCfg.NameServer[3].Address.Address.AsAddress().String())
+	assert.Equal(t, "https://1.1.1.1/dns-query", dnsCfg.NameServer[4].Address.Address.AsAddress().String())
+	assert.Equal(t, "quic://dns.adguard.com", dnsCfg.NameServer[5].Address.Address.AsAddress().String())
+	assert.Equal(t, "localhost", dnsCfg.NameServer[6].Address.Address.AsAddress().String())
+	assert.Equal(t, "8.8.8.8", dnsCfg.NameServer[7].Address.Address.AsAddress().String())
+}

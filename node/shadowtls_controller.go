@@ -16,7 +16,10 @@ import (
 )
 
 // ShadowTLSController manages ShadowTLS protocol nodes
+// What changed: Added server field to ShadowTLSController and innerTag helper method.
+// Why: Enables the controller to build, manage, and sync users with the inner Shadowsocks inbound on Xray core.
 type ShadowTLSController struct {
+	server        *vCore.XrayCore
 	tag           string
 	info          *panel.NodeInfo
 	apiClient     *panel.ClientV1
@@ -32,8 +35,9 @@ type ShadowTLSController struct {
 }
 
 // NewShadowTLSController creates a new ShadowTLS controller
-func NewShadowTLSController(apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *ShadowTLSController {
+func NewShadowTLSController(server *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *ShadowTLSController {
 	return &ShadowTLSController{
+		server:              server,
 		tag:                 generateShadowTLSTag(info),
 		info:                info,
 		apiClient:           apiClient,
@@ -47,8 +51,12 @@ func generateShadowTLSTag(info *panel.NodeInfo) string {
 	return "shadowtls-" + strconv.Itoa(info.Id) + "-" + strconv.Itoa(info.Protocol.Port)
 }
 
-// What changed: Updated version validation to strictly allow only versions 2 and 3 with an explicit error, and added a startup reachability self-check warning for local Shadowsocks port.
-// Why: Sing-shadowtls only supports versions 2 and 3, and checking Shadowsocks port reachability at startup alerts admins early if the local inbound is down.
+func (c *ShadowTLSController) innerTag() string {
+	return c.tag + "_inner_ss"
+}
+
+// What changed: Implemented auto-provisioning for inner Shadowsocks inbounds when ShadowsocksExternal is false, including reachability checks and user routing.
+// Why: Allows ShadowTLS nodes to automatically manage inner Shadowsocks transport inbounds on Xray core while preserving external setup capability.
 func (c *ShadowTLSController) Start() error {
 	// Get initial user list
 	var protoName string
@@ -62,6 +70,7 @@ func (c *ShadowTLSController) Start() error {
 		return err
 	}
 	c.userList = users
+	c.info.Users = users
 
 	// Get alive list for device limiting
 	aliveList, err := c.apiClient.GetUserAlive()
@@ -96,16 +105,55 @@ func (c *ShadowTLSController) Start() error {
 		return fmt.Errorf("ShadowTLS: shadowsocks_port is required (the local Shadowsocks port to forward to)")
 	}
 
-	// Startup self-check: verify local Shadowsocks inbound reachability
-	ssAddr := fmt.Sprintf("127.0.0.1:%d", shadowsocksPort)
-	if conn, err := net.DialTimeout("tcp", ssAddr, 3*time.Second); err != nil {
-		log.WithFields(log.Fields{
-			"tag":    c.tag,
-			"ssPort": shadowsocksPort,
-			"err":    err,
-		}).Warnf("ShadowTLS: local Shadowsocks inbound is not reachable on port %d; ShadowTLS will not work until it is running", shadowsocksPort)
+	ssListen := c.info.Protocol.ShadowsocksListen
+	if ssListen == "" {
+		ssListen = "127.0.0.1"
+	}
+	ssAddr := fmt.Sprintf("%s:%d", ssListen, shadowsocksPort)
+
+	// Handle inner Shadowsocks inbound provision or external check
+	if !c.info.Protocol.ShadowsocksExternal {
+		if c.server != nil {
+			innerInbound, err := vCore.BuildShadowTLSInnerSSInbound(c.info, c.innerTag())
+			if err != nil {
+				return fmt.Errorf("failed to build inner Shadowsocks inbound: %w", err)
+			}
+			if err := c.server.AddInbound(innerInbound); err != nil {
+				return fmt.Errorf("failed to add inner Shadowsocks inbound: %w", err)
+			}
+			// Verify our own inner inbound started
+			conn, err := net.DialTimeout("tcp", ssAddr, 3*time.Second)
+			if err != nil {
+				return fmt.Errorf("ShadowTLS: auto-provisioned inner Shadowsocks inbound is not reachable on %s: %w", ssAddr, err)
+			}
+			conn.Close()
+			log.WithFields(log.Fields{
+				"tag":      c.tag,
+				"innerTag": c.innerTag(),
+				"ssAddr":   ssAddr,
+			}).Info("ShadowTLS: auto-provisioned inner Shadowsocks inbound started successfully")
+
+			// Route user sync to inner SS inbound
+			_, err = c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      c.innerTag(),
+				Users:    users,
+				NodeInfo: c.info,
+			})
+			if err != nil {
+				log.WithError(err).Warn("ShadowTLS: failed to sync initial users to inner Shadowsocks inbound")
+			}
+		}
 	} else {
-		conn.Close()
+		// Startup self-check: verify external local Shadowsocks inbound reachability
+		if conn, err := net.DialTimeout("tcp", ssAddr, 3*time.Second); err != nil {
+			log.WithFields(log.Fields{
+				"tag":    c.tag,
+				"ssPort": shadowsocksPort,
+				"err":    err,
+			}).Warnf("ShadowTLS: external Shadowsocks inbound is not reachable on port %d; ShadowTLS will not work until it is running", shadowsocksPort)
+		} else {
+			conn.Close()
+		}
 	}
 
 	// Create and start ShadowTLS server
@@ -117,7 +165,7 @@ func (c *ShadowTLSController) Start() error {
 	c.shadowtlsCore = shadowtlsCore
 	c.shadowtlsCore.SetLimiter(c.limiter)
 
-	// Add initial users
+	// Add initial users to ShadowTLS core v3 auth
 	c.shadowtlsCore.AddUsers(users)
 
 	// Start ShadowTLS server
@@ -139,7 +187,8 @@ func (c *ShadowTLSController) Start() error {
 	return nil
 }
 
-// Close stops the ShadowTLS controller
+// What changed: Added inner Shadowsocks inbound teardown on controller Close.
+// Why: Ensures inner Shadowsocks transport inbounds are cleaned up when the controller stops.
 func (c *ShadowTLSController) Close() error {
 	if c.userListMonitorPeriodic != nil {
 		c.userListMonitorPeriodic.Close()
@@ -150,6 +199,10 @@ func (c *ShadowTLSController) Close() error {
 
 	if c.shadowtlsCore != nil {
 		c.shadowtlsCore.Stop()
+	}
+
+	if c.server != nil && c.info.Protocol != nil && !c.info.Protocol.ShadowsocksExternal {
+		_ = c.server.RemoveInbound(c.innerTag())
 	}
 
 	limiter.DeleteLimiter(c.tag)
@@ -217,11 +270,21 @@ func (c *ShadowTLSController) userListMonitor() error {
 
 	if len(deleted) > 0 {
 		c.shadowtlsCore.DelUsers(deleted)
+		if c.server != nil && c.info.Protocol != nil && !c.info.Protocol.ShadowsocksExternal {
+			_ = c.server.DelUsers(deleted, c.innerTag(), c.info)
+		}
 		c.limiter.UpdateUser(c.tag, nil, deleted)
 	}
 
 	if len(added) > 0 {
 		c.shadowtlsCore.AddUsers(added)
+		if c.server != nil && c.info.Protocol != nil && !c.info.Protocol.ShadowsocksExternal {
+			_, _ = c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      c.innerTag(),
+				Users:    added,
+				NodeInfo: c.info,
+			})
+		}
 		c.limiter.UpdateUser(c.tag, added, nil)
 	}
 

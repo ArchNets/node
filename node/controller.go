@@ -79,6 +79,10 @@ func (c *Controller) Start() error {
 			return fmt.Errorf("request cert error: %s", err)
 		}
 	}
+	// What changed: Set c.info.Users to initial user list before calling AddNode.
+	// Why: Allows buildInbound to access user credentials when populating static accounts for SOCKS and HTTP node types.
+	c.info.Users = c.userList
+
 	// Add new tag
 	err = c.server.AddNode(c.tag, c.info)
 	if err != nil {

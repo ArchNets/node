@@ -226,6 +226,10 @@ type Protocol struct {
 	CertDNSEnv              string `json:"cert_dns_env"`
 	AcceptProxyProtocol     bool   `json:"accept_proxy_protocol"`
 
+	// Shared static credentials (used by SOCKS/HTTP if configured)
+	User     string `json:"user,omitempty"`
+	Password string `json:"password,omitempty"`
+
 	// TCP HTTP Header obfuscation (for VMess/VLESS with tcp transport)
 	TCPHeaderType   string            `json:"tcp_header_type"` // "none" or "http"
 	TCPHeaderHost   []string          `json:"tcp_header_host"` // Host header values (e.g., ["www.digikala.com", "example.com"])
@@ -240,10 +244,15 @@ type Protocol struct {
 	SSHUdpgwAddr   string `json:"ssh_udpgw_addr"`     // Local addr to intercept as native udpgw (default "127.0.0.1:7300")
 
 	// ShadowTLS-specific fields
-	ShadowTLSVersion    int    `json:"shadowtls_version"`     // 1, 2 or 3
-	ShadowTLSHandshake  string `json:"shadowtls_handshake"`   // Handshake server (e.g., www.google.com:443)
-	ShadowTLSStrictMode bool   `json:"shadowtls_strict_mode"` // Require TLS 1.3
-	ShadowsocksPort     int    `json:"shadowsocks_port"`      // Local Shadowsocks port to forward to
+	ShadowTLSVersion     int    `json:"shadowtls_version"`                // 1, 2 or 3
+	ShadowTLSHandshake   string `json:"shadowtls_handshake"`              // Handshake server (e.g., www.google.com:443)
+	ShadowTLSStrictMode  bool   `json:"shadowtls_strict_mode"`            // Require TLS 1.3
+	ShadowsocksPort      int    `json:"shadowsocks_port"`                 // Local Shadowsocks port to forward to
+	ShadowsocksMethod    string `json:"shadowsocks_method,omitempty"`     // Cipher/method sent by panel
+	ShadowsocksServerKey string `json:"shadowsocks_server_key,omitempty"` // Server PSK for 2022 ciphers
+	ShadowsocksListen    string `json:"shadowsocks_listen,omitempty"`     // default "127.0.0.1"
+	ShadowsocksNetwork   string `json:"shadowsocks_network,omitempty"`    // default "tcp"
+	ShadowsocksExternal  bool   `json:"shadowsocks_external,omitempty"`   // true = do NOT auto-provision
 
 	// WireGuard-specific fields
 	WireguardInterface  string `json:"wireguard_interface"`   // Interface name (e.g., wg0)

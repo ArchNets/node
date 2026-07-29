@@ -176,6 +176,10 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	if !hasPublicIPv6() {
 		queryStrategy = "UseIPv4"
 	}
+	// Note: Xray DNS configured here is GLOBAL to the node's Xray instance (not per-inbound).
+	// TPROXY-captured tunnel traffic (WireGuard/OpenVPN/IPsec) only reaches this DNS for plain
+	// UDP :53 queries via the existing port-53 -> dns_out routing rule; DoH/DoT queries from
+	// clients bypass this DNS and are routed directly.
 	coreDnsConfig := &coreConf.DNSConfig{
 		Servers: []*coreConf.NameServerConfig{
 			{
@@ -187,9 +191,17 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 		QueryStrategy: queryStrategy,
 	}
 
-	//custom dns
+	// What changed: Implemented Proto handling (udp, tcp, tls, https, quic, local) and empty address validation for custom DNS items.
+	// Why: Allows panel-configured DoT, DoH, and DoQ DNS servers to format their address correctly for Xray, skipping invalid empty entries.
 	if dnsConfig != nil {
 		for _, item := range *dnsConfig {
+			addr := strings.TrimSpace(item.Address)
+			// Validate: skip entry if address is empty
+			if addr == "" {
+				log.WithField("proto", item.Proto).Warn("Skipping DNS item with empty address")
+				continue
+			}
+
 			var domains []string
 			for _, domainitem := range item.Domains {
 				data := strings.Split(domainitem, ":")
@@ -208,21 +220,33 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					domains = append(domains, "full:"+domainitem)
 				}
 			}
-			/*switch item.Proto {
-			case "udp":
-				item.Address = item.Address
+
+			proto := strings.ToLower(strings.TrimSpace(item.Proto))
+			var formattedAddr string
+			switch proto {
+			case "udp", "":
+				formattedAddr = addr
 			case "tcp":
-				item.Address = "tcp://" + item.Address
+				formattedAddr = "tcp://" + addr
 			case "tls":
-				item.Address = "tls://" + item.Address
+				formattedAddr = "tls://" + addr
 			case "https":
-				item.Address = "https://" + item.Address
+				formattedAddr = "https://" + addr
 			case "quic":
-				item.Address = "quic://" + item.Address
-			}*/
+				formattedAddr = "quic://" + addr
+			case "local", "localhost":
+				formattedAddr = "localhost"
+			default:
+				formattedAddr = addr
+				log.WithFields(log.Fields{
+					"proto":   item.Proto,
+					"address": addr,
+				}).Warn("Unknown DNS protocol, treating address as-is")
+			}
+
 			server := &coreConf.NameServerConfig{
 				Address: &coreConf.Address{
-					Address: xnet.ParseAddress(item.Address),
+					Address: xnet.ParseAddress(formattedAddr),
 				},
 				QueryStrategy: ip_strategy,
 				Domains:       domains,

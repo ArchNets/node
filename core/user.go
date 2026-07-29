@@ -45,7 +45,18 @@ func (v *XrayCore) GetUserManager(tag string) (proxy.UserManager, error) {
 	return userManager, nil
 }
 
-func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
+// What changed: Added no-op handling for SOCKS and HTTP node types in DelUsers.
+// Why: SOCKS and HTTP inbounds in Xray do NOT support a dynamic user manager. Credentials are static accounts applied at inbound build time. User changes are handled by rebuilding the inbound (RemoveInbound + AddInbound), not by the user manager.
+func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, nodeInfo *panel.NodeInfo) error {
+	if nodeInfo != nil {
+		switch nodeInfo.Type {
+		case "socks", "http":
+			// SOCKS and HTTP inbounds in Xray do NOT support dynamic user management.
+			// Credentials are static (inbound settings accounts) and applied at inbound build time.
+			// User changes are handled by rebuilding the inbound (RemoveInbound + AddInbound), not by the user manager.
+			return nil
+		}
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -109,6 +120,8 @@ func (vc *XrayCore) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.Use
 	return nil, nil
 }
 
+// What changed: Added no-op handling for SOCKS and HTTP node types in AddUsers.
+// Why: SOCKS and HTTP inbounds in Xray do NOT support a dynamic user manager. Credentials are static accounts applied at inbound build time. User changes are handled by rebuilding the inbound (RemoveInbound + AddInbound), not by the user manager.
 func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 	v.users.mapLock.Lock()
 	defer v.users.mapLock.Unlock()
@@ -117,6 +130,11 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
+	case "socks", "http":
+		// SOCKS and HTTP inbounds in Xray do NOT support dynamic user management.
+		// Credentials are static (inbound settings accounts) and applied at inbound build time.
+		// User changes are handled by rebuilding the inbound (RemoveInbound + AddInbound), not by the user manager.
+		return len(p.Users), nil
 	case "vmess":
 		users = buildVmessUsers(p.Tag, p.Users)
 	case "vless":
@@ -134,6 +152,21 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 		users = buildTuicUsers(p.Tag, p.Users)
 	case "anytls":
 		users = buildAnyTLSUsers(p.Tag, p.Users)
+	case "shadowtls":
+		// What changed: Resolved cipher from ShadowsocksMethod with Cipher fallback.
+		// Why: Backend panels send the cipher as "shadowsocks_method" in JSON; fallback ensures backward compatibility.
+		cipher := p.Protocol.ShadowsocksMethod
+		if cipher == "" {
+			cipher = p.Protocol.Cipher
+		}
+		serverKey := p.Protocol.ShadowsocksServerKey
+		if serverKey == "" {
+			serverKey = p.Protocol.ServerKey
+		}
+		users = buildSSUsers(p.Tag,
+			p.Users,
+			cipher,
+			serverKey)
 	default:
 		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
 	}

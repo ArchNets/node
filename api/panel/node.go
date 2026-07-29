@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// What changed: Added Users []UserInfo field to NodeInfo.
+// Why: Enables passing panel user credentials to inbound builders (such as SOCKS and HTTP static accounts).
 type NodeInfo struct {
 	Id                     int
 	Type                   string
@@ -13,6 +15,7 @@ type NodeInfo struct {
 	PullInterval           int
 	TrafficReportThreshold int
 	Protocol               *Protocol
+	Users                  []UserInfo
 }
 
 type ServerPushStatusRequest struct {

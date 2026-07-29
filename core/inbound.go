@@ -62,6 +62,10 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		err = buildTuic(nodeInfo, in)
 	case "anytls":
 		err = buildAnyTLS(nodeInfo, in)
+	case "socks":
+		err = buildSocks(nodeInfo, in)
+	case "http":
+		err = buildHTTP(nodeInfo, in)
 	default:
 		return nil, fmt.Errorf("unsupported node type: %s", nodeInfo.Type)
 	}
@@ -582,4 +586,195 @@ func mapSockopt(s *panel.Sockopt) *coreConf.SocketConfig {
 		}
 	}
 	return cfg
+}
+
+// What changed: Added buildAccounts helper to extract static credentials for SOCKS/HTTP inbounds.
+// Why: SOCKS and HTTP do not support dynamic user management. Credentials come from Protocol.User/Password if defined, otherwise from nodeInfo.Users (using Uuid as username and password).
+func buildAccounts(nodeInfo *panel.NodeInfo) []map[string]string {
+	var accounts []map[string]string
+	if nodeInfo.Protocol != nil && (nodeInfo.Protocol.User != "" || nodeInfo.Protocol.Password != "") {
+		accounts = append(accounts, map[string]string{
+			"user": nodeInfo.Protocol.User,
+			"pass": nodeInfo.Protocol.Password,
+		})
+		return accounts
+	}
+	for _, u := range nodeInfo.Users {
+		if u.Uuid != "" {
+			accounts = append(accounts, map[string]string{
+				"user": u.Uuid,
+				"pass": u.Uuid,
+			})
+		}
+	}
+	return accounts
+}
+
+// What changed: Added buildSocks function to configure Xray SOCKS inbounds with password auth or unauthenticated mode.
+// Why: Implements SOCKS inbound node support, generating static accounts or logging a warning if no auth credentials exist.
+func buildSocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
+	inbound.Protocol = "socks"
+	accounts := buildAccounts(nodeInfo)
+	var settings map[string]interface{}
+	listenIP := nodeInfo.Protocol.ListenIP
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+
+	if len(accounts) > 0 {
+		settings = map[string]interface{}{
+			"auth":     "password",
+			"accounts": accounts,
+			"udp":      true,
+			"ip":       "127.0.0.1",
+		}
+	} else {
+		settings = map[string]interface{}{
+			"auth": "noauth",
+			"udp":  true,
+			"ip":   "127.0.0.1",
+		}
+		log.WithFields(log.Fields{
+			"ip":   listenIP,
+			"port": nodeInfo.Protocol.Port,
+		}).Warnf("Unauthenticated SOCKS proxy exposed on %s:%d - open relay risk", listenIP, nodeInfo.Protocol.Port)
+	}
+
+	s, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("marshal socks config error: %s", err)
+	}
+	inbound.Settings = (*json.RawMessage)(&s)
+	return nil
+}
+
+// What changed: Added buildHTTP function to configure Xray HTTP inbounds with static user auth or open proxy mode.
+// Why: Implements HTTP inbound node support, generating static accounts or logging a warning if no auth credentials exist.
+func buildHTTP(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
+	inbound.Protocol = "http"
+	accounts := buildAccounts(nodeInfo)
+	var settings map[string]interface{}
+	listenIP := nodeInfo.Protocol.ListenIP
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+
+	if len(accounts) > 0 {
+		settings = map[string]interface{}{
+			"accounts":         accounts,
+			"allowTransparent": false,
+		}
+	} else {
+		settings = map[string]interface{}{
+			"allowTransparent": false,
+		}
+		log.WithFields(log.Fields{
+			"ip":   listenIP,
+			"port": nodeInfo.Protocol.Port,
+		}).Warnf("Unauthenticated HTTP proxy exposed on %s:%d - open relay risk", listenIP, nodeInfo.Protocol.Port)
+	}
+
+	s, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("marshal http config error: %s", err)
+	}
+	inbound.Settings = (*json.RawMessage)(&s)
+	return nil
+}
+
+// What changed: Added BuildShadowTLSInnerSSInbound function to build loopback Shadowsocks inbound configs for ShadowTLS.
+// Why: Enables node auto-provisioning of the inner Shadowsocks transport for ShadowTLS without applying outer TLS/Reality or sniffing settings.
+func BuildShadowTLSInnerSSInbound(nodeInfo *panel.NodeInfo, innerTag string) (*core.InboundHandlerConfig, error) {
+	proto := nodeInfo.Protocol
+	if proto == nil {
+		return nil, fmt.Errorf("protocol config is nil")
+	}
+
+	listenIP := proto.ShadowsocksListen
+	if listenIP == "" {
+		listenIP = "127.0.0.1"
+	}
+
+	network := proto.ShadowsocksNetwork
+	if network == "" {
+		network = "tcp"
+	}
+
+	// What changed: Resolved cipher from proto.ShadowsocksMethod, falling back to proto.Cipher for backward compatibility.
+	// Why: Backend panels send the cipher as "shadowsocks_method" in JSON; fallback ensures existing configs remain compatible.
+	cipher := proto.ShadowsocksMethod
+	if cipher == "" {
+		cipher = proto.Cipher
+	}
+	serverKey := proto.ShadowsocksServerKey
+	if serverKey == "" {
+		serverKey = proto.ServerKey
+	}
+
+	// Validate 2022 PSK length if using a 2022 cipher
+	if strings.Contains(cipher, "2022") {
+		if serverKey == "" {
+			return nil, fmt.Errorf("ShadowTLS inner Shadowsocks: 2022 cipher %s requires shadowsocks_server_key", cipher)
+		}
+		rawKey, err := base64.StdEncoding.DecodeString(serverKey)
+		if err != nil {
+			return nil, fmt.Errorf("ShadowTLS inner Shadowsocks: shadowsocks_server_key is invalid base64: %w", err)
+		}
+		if cipher == "2022-blake3-aes-128-gcm" {
+			if len(rawKey) != 16 {
+				return nil, fmt.Errorf("ShadowTLS inner Shadowsocks: 2022-blake3-aes-128-gcm server key must decode to exactly 16 bytes, got %d", len(rawKey))
+			}
+		} else {
+			if len(rawKey) != 32 {
+				return nil, fmt.Errorf("ShadowTLS inner Shadowsocks: %s server key must decode to exactly 32 bytes, got %d", cipher, len(rawKey))
+			}
+		}
+	}
+
+	in := &coreConf.InboundDetourConfig{
+		Protocol: "shadowsocks",
+		Tag:      innerTag,
+		PortList: &coreConf.PortList{
+			Range: []coreConf.PortRange{
+				{
+					From: uint32(proto.ShadowsocksPort),
+					To:   uint32(proto.ShadowsocksPort),
+				},
+			},
+		},
+		ListenOn: &coreConf.Address{
+			Address: net.ParseAddress(listenIP),
+		},
+	}
+
+	settings := &coreConf.ShadowsocksServerConfig{
+		Cipher:      cipher,
+		NetworkList: &coreConf.NetworkList{coreConf.Network(network)},
+	}
+
+	p := make([]byte, 32)
+	if _, err := rand.Read(p); err != nil {
+		return nil, fmt.Errorf("generate random password error: %w", err)
+	}
+	randomPasswd := hex.EncodeToString(p)
+
+	userCipher := cipher
+	if strings.Contains(cipher, "2022") {
+		settings.Password = serverKey
+		randomPasswd = serverKey
+		userCipher = ""
+	}
+	defaultSSuser := &coreConf.ShadowsocksUserConfig{
+		Cipher:   userCipher,
+		Password: randomPasswd,
+	}
+	settings.Users = append(settings.Users, defaultSSuser)
+
+	sets, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("marshal inner shadowsocks settings error: %w", err)
+	}
+	in.Settings = (*json.RawMessage)(&sets)
+
+	return in.Build()
 }

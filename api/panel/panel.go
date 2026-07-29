@@ -52,6 +52,8 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 	client.SetBaseURL(c.APIHost)
 	// Check node type
 	c.NodeType = strings.ToLower(c.NodeType)
+	// What changed: Whitelisted "socks" and "http" node types in NodeType switch.
+	// Why: Allows ClientV1 initialization when connecting to panel nodes configured as SOCKS or HTTP proxies.
 	switch c.NodeType {
 	case
 		"vmess",
@@ -69,7 +71,9 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"ikev2",
 		"l2tp",
 		"ipsec",
-		"openvpn":
+		"openvpn",
+		"socks",
+		"http":
 	default:
 		return nil, fmt.Errorf("unsupported Node type: %s", c.NodeType)
 	}

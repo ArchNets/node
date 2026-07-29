@@ -130,6 +130,21 @@ func (c *Controller) userListMonitor() (err error) {
 			}).Error("limiter users failed")
 			return nil
 		}
+
+		// What changed: For SOCKS and HTTP node types, trigger a full inbound rebuild on user list changes.
+		// Why: Xray SOCKS and HTTP inbounds rely on static account lists configured at inbound creation rather than dynamic user managers.
+		if c.info.Type == "socks" || c.info.Type == "http" {
+			c.info.Users = newU
+			_ = c.server.DelNode(c.tag)
+			if rebuildErr := c.server.AddNode(c.tag, c.info); rebuildErr != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": rebuildErr,
+				}).Error("Rebuild SOCKS/HTTP inbound failed")
+			} else {
+				log.WithField("node", c.tag).Infof("Rebuilt %s inbound with updated static accounts", c.info.Type)
+			}
+		}
 	}
 	c.userList = newU
 	if len(added)+len(deleted) != 0 {
