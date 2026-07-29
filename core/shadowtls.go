@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -98,10 +97,13 @@ func (l *shadowTLSLogger) PanicContext(ctx context.Context, args ...any) {
 
 var _ logger.ContextLogger = (*shadowTLSLogger)(nil)
 
-// NewShadowTLSCore creates a new ShadowTLS server
+const idleTimeout = 5 * time.Minute
+
+// What changed: Rejected version values outside [2, 3] by returning an error instead of silently mutating invalid versions to 3.
+// Why: Silently mutating the version creates a protocol mismatch between server and client when version 1 is supplied.
 func NewShadowTLSCore(tag string, port int, version int, handshakeServer string, strictMode bool, shadowsocksPort int) (*ShadowTLSCore, error) {
 	if version < 2 || version > 3 {
-		version = 3 // Default to v3
+		return nil, fmt.Errorf("ShadowTLS: version must be 2 or 3, got %d", version)
 	}
 
 	core := &ShadowTLSCore{
@@ -260,20 +262,30 @@ func (s *ShadowTLSCore) NewConnectionEx(ctx context.Context, conn net.Conn, sour
 	s.handleProxyRequest(conn, uid, ip)
 }
 
-// handleProxyRequest forwards the connection to local Shadowsocks
-// ShadowTLS is a wrapper protocol - after authentication, the raw Shadowsocks
-// protocol data is forwarded to the local Shadowsocks server
+// What changed: Added doc comment on local Shadowsocks requirement, and added closeBoth helper using sync.Once to close both conns when either direction ends.
+// Why: Ensures a matching Shadowsocks server setup is documented and dead connection ends clean up both sides immediately.
+// handleProxyRequest forwards the connection to local Shadowsocks.
+// Note: A matching local Shadowsocks inbound (configured with the same cipher/password
+// that the client uses, and bound to 127.0.0.1:<ShadowsocksPort>) MUST be provisioned
+// separately, or ShadowTLS will forward to nothing and connections will fail.
 func (s *ShadowTLSCore) handleProxyRequest(conn net.Conn, uid int, clientIP string) {
-	defer conn.Close()
-
 	// Connect to local Shadowsocks server
 	ssAddr := fmt.Sprintf("127.0.0.1:%d", s.ShadowsocksPort)
 	ssConn, err := net.DialTimeout("tcp", ssAddr, 10*time.Second)
 	if err != nil {
 		log.WithError(err).WithField("dest", ssAddr).Error("ShadowTLS: failed to connect to local Shadowsocks")
+		conn.Close()
 		return
 	}
-	defer ssConn.Close()
+
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			conn.Close()
+			ssConn.Close()
+		})
+	}
+	defer closeBoth()
 
 	log.WithFields(log.Fields{
 		"uid":    uid,
@@ -286,21 +298,26 @@ func (s *ShadowTLSCore) handleProxyRequest(conn net.Conn, uid int, clientIP stri
 
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		s.copyWithAccounting(ssConn, conn, uid, false) // upload (client -> shadowsocks)
 	}()
 
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		s.copyWithAccounting(conn, ssConn, uid, true) // download (shadowsocks -> client)
 	}()
 
 	wg.Wait()
 }
 
-// copyWithAccounting copies data and tracks traffic
-func (s *ShadowTLSCore) copyWithAccounting(dst io.Writer, src io.Reader, uid int, isDownload bool) {
+// What changed: Changed parameters to net.Conn, added setReadDeadline with idleTimeout (5 minutes) before each Read call.
+// Why: Prevents dead connection leaks by timing out inactive reads and returning to trigger connection cleanup.
+// copyWithAccounting copies data between connections, enforces idleTimeout, and tracks traffic
+func (s *ShadowTLSCore) copyWithAccounting(dst net.Conn, src net.Conn, uid int, isDownload bool) {
 	buf := make([]byte, 32*1024)
 	for {
+		_ = src.SetReadDeadline(time.Now().Add(idleTimeout))
 		n, err := src.Read(buf)
 		if n > 0 {
 			written, writeErr := dst.Write(buf[:n])

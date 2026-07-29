@@ -2,6 +2,7 @@ package node
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +47,8 @@ func generateShadowTLSTag(info *panel.NodeInfo) string {
 	return "shadowtls-" + strconv.Itoa(info.Id) + "-" + strconv.Itoa(info.Protocol.Port)
 }
 
-// Start starts the ShadowTLS controller
+// What changed: Updated version validation to strictly allow only versions 2 and 3 with an explicit error, and added a startup reachability self-check warning for local Shadowsocks port.
+// Why: Sing-shadowtls only supports versions 2 and 3, and checking Shadowsocks port reachability at startup alerts admins early if the local inbound is down.
 func (c *ShadowTLSController) Start() error {
 	// Get initial user list
 	var protoName string
@@ -77,8 +79,8 @@ func (c *ShadowTLSController) Start() error {
 	}
 
 	version := c.info.Protocol.ShadowTLSVersion
-	if version < 1 || version > 3 {
-		return fmt.Errorf("ShadowTLS: version must be 1, 2, or 3, got %d", version)
+	if version < 2 || version > 3 {
+		return fmt.Errorf("ShadowTLS: only versions 2 and 3 are supported, got %d", version)
 	}
 
 	handshakeServer := strings.TrimSpace(c.info.Protocol.ShadowTLSHandshake)
@@ -92,6 +94,18 @@ func (c *ShadowTLSController) Start() error {
 	// Validate shadowsocks port is set
 	if shadowsocksPort <= 0 {
 		return fmt.Errorf("ShadowTLS: shadowsocks_port is required (the local Shadowsocks port to forward to)")
+	}
+
+	// Startup self-check: verify local Shadowsocks inbound reachability
+	ssAddr := fmt.Sprintf("127.0.0.1:%d", shadowsocksPort)
+	if conn, err := net.DialTimeout("tcp", ssAddr, 3*time.Second); err != nil {
+		log.WithFields(log.Fields{
+			"tag":    c.tag,
+			"ssPort": shadowsocksPort,
+			"err":    err,
+		}).Warnf("ShadowTLS: local Shadowsocks inbound is not reachable on port %d; ShadowTLS will not work until it is running", shadowsocksPort)
+	} else {
+		conn.Close()
 	}
 
 	// Create and start ShadowTLS server
