@@ -170,6 +170,11 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noSSUDP bool) (Bucket *r
 }
 
 func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destination string, noSSUDP bool) (Bucket *ratelimit.Bucket, Reject bool) {
+	// SOCKS/HTTP inbounds are admin-only routing — bypass all limits
+	if l.Nodetype == "socks" || l.Nodetype == "http" {
+		return nil, false
+	}
+
 	// check if ipv4 mapped ipv6
 	ip = strings.TrimPrefix(ip, "::ffff:")
 
