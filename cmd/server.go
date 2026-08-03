@@ -86,16 +86,20 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 	log.Infof("started %d nodes", serverconfig.Data.Total)
 	if watch {
-		// On file change, just signal reload; do not run reload concurrently here
-		err = c.Watch(config, func() {
-			select {
-			case reloadCh <- struct{}{}:
-			default: // drop if a reload is already queued
+		if _, err := os.Stat(config); err == nil {
+			// On file change, just signal reload; do not run reload concurrently here
+			err = c.Watch(config, func() {
+				select {
+				case reloadCh <- struct{}{}:
+				default: // drop if a reload is already queued
+				}
+			})
+			if err != nil {
+				log.WithField("err", err).Error("start watch failed")
+				return
 			}
-		})
-		if err != nil {
-			log.WithField("err", err).Error("start watch failed")
-			return
+		} else {
+			log.Info("config file not present, skipping file watch (using environment variables)")
 		}
 	}
 	// clear memory
