@@ -3,6 +3,7 @@ package conf
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/spf13/viper"
 )
@@ -45,18 +46,30 @@ func New() *Conf {
 }
 
 func (p *Conf) LoadFromPath(filePath string) error {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("open config file error: %s", err)
-	}
-	defer f.Close()
 	v := viper.New()
 	v.SetConfigFile(filePath)
-	if err := v.ReadInConfig(); err != nil {
-		return fmt.Errorf("read config file error: %s", err)
+	if err := v.ReadInConfig(); err == nil {
+		if err := v.Unmarshal(p); err != nil {
+			return fmt.Errorf("unmarshal config error: %s", err)
+		}
 	}
-	if err := v.Unmarshal(p); err != nil {
-		return fmt.Errorf("unmarshal config error: %s", err)
+
+	// Environment variable overrides for Docker & Railway
+	if apiHost := os.Getenv("API_HOST"); apiHost != "" {
+		p.ApiConfig.ApiHost = apiHost
 	}
+	if serverID := os.Getenv("SERVER_ID"); serverID != "" {
+		if id, err := strconv.Atoi(serverID); err == nil {
+			p.ApiConfig.ServerId = id
+		}
+	}
+	if secretKey := os.Getenv("SECRET_KEY"); secretKey != "" {
+		p.ApiConfig.SecretKey = secretKey
+	}
+
+	if p.ApiConfig.ApiHost == "" {
+		return fmt.Errorf("ApiHost is required in %s or via API_HOST environment variable", filePath)
+	}
+
 	return nil
 }
