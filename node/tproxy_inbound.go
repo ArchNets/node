@@ -23,10 +23,11 @@ import (
 // Callers must pass the returned port to the core's SetTProxyPort before
 // starting it, and remove the inbound with the same tag on Close.
 func addTProxyInbound(xrayCore *vCore.XrayCore, tag string, tproxyPort int) (int, error) {
-	if tproxyPort < 1024 || tproxyPort > 65535 {
+	if tproxyPort <= 0 {
+		tproxyPort = nextTProxyPort()
+	} else if tproxyPort < 1024 || tproxyPort > 65535 {
 		return 0, fmt.Errorf("invalid tproxy port %d for %s (expected 1024-65535)", tproxyPort, tag)
-	}
-	if !portIsFree(tproxyPort) {
+	} else if !portIsFree(tproxyPort) {
 		return 0, fmt.Errorf("tproxy port %d for %s is already in use", tproxyPort, tag)
 	}
 	inboundJSON := fmt.Sprintf(`{

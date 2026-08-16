@@ -1,7 +1,6 @@
 package node
 
 import (
-	"strconv"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -93,7 +92,7 @@ func (c *Controller) userListMonitor() (err error) {
 	if newU == nil {
 		return nil
 	}
-	deleted, added := compareUserList(c.userList, newU)
+	deleted, added := diffUserList(c.userList, newU)
 	if len(deleted) > 0 {
 		// have deleted users
 		err = c.server.DelUsers(deleted, c.tag, c.info)
@@ -123,13 +122,6 @@ func (c *Controller) userListMonitor() (err error) {
 	if len(added) > 0 || len(deleted) > 0 {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("limiter users failed")
-			return nil
-		}
 
 		// What changed: For SOCKS and HTTP node types, trigger a full inbound rebuild on user list changes.
 		// Why: Xray SOCKS and HTTP inbounds rely on static account lists configured at inbound creation rather than dynamic user managers.
@@ -240,25 +232,3 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	return nil
 }
 
-func compareUserList(old, new []panel.UserInfo) (deleted, added []panel.UserInfo) {
-	oldMap := make(map[string]int)
-	for i, user := range old {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		oldMap[key] = i
-	}
-
-	for _, user := range new {
-		key := user.Uuid + strconv.Itoa(user.SpeedLimit)
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, user)
-		} else {
-			delete(oldMap, key)
-		}
-	}
-
-	for _, index := range oldMap {
-		deleted = append(deleted, old[index])
-	}
-
-	return deleted, added
-}

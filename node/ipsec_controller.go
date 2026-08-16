@@ -147,8 +147,10 @@ func (c *IPsecController) Close() error {
 		c.userReportPeriodic.Close()
 	}
 	// Remove Xray TPROXY inbound (uses xrayTag, not internal tag)
-	if err := c.xrayCore.RemoveInbound(c.xrayTag); err != nil {
-		log.WithError(err).WithField("tag", c.xrayTag).Warn("Failed to remove Xray inbound")
+	if c.info.Protocol != nil && c.info.Protocol.EnableTProxy && c.xrayCore != nil {
+		if err := c.xrayCore.RemoveInbound(c.xrayTag); err != nil {
+			log.WithError(err).WithField("tag", c.xrayTag).Warn("Failed to remove Xray inbound")
+		}
 	}
 	if c.ipsecCore != nil {
 		c.ipsecCore.Stop()

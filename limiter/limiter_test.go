@@ -84,3 +84,42 @@ func TestGetOnlineDevice(t *testing.T) {
 		t.Errorf("Expected OldUserOnline to store 3.3.3.3 -> 201")
 	}
 }
+
+func TestUpdateUserPreservesAliveList(t *testing.T) {
+	Init()
+
+	users := []panel.UserInfo{
+		{Id: 10, Uuid: "user-10", SpeedLimit: 100, DeviceLimit: 1},
+	}
+	aliveList := map[int]int{
+		10: 2,
+	}
+
+	l := AddLimiter("vless", "vless:1", users, aliveList)
+
+	// User limit modified: diffUserList returns user in both deleted and added
+	deleted := []panel.UserInfo{
+		{Id: 10, Uuid: "user-10", SpeedLimit: 100, DeviceLimit: 1},
+	}
+	added := []panel.UserInfo{
+		{Id: 10, Uuid: "user-10", SpeedLimit: 200, DeviceLimit: 3},
+	}
+
+	l.UpdateUser("vless:1", added, deleted)
+
+	// Verify AliveList wasn't destroyed
+	if count := l.aliveCount(10); count != 2 {
+		t.Fatalf("Expected aliveCount(10) to remain 2, got %d", count)
+	}
+
+	// Verify updated limits
+	val, ok := l.UserLimitInfo.Load("vless:1|user-10")
+	if !ok {
+		t.Fatalf("Expected UserLimitInfo for vless:1|user-10 to exist")
+	}
+	info := val.(*UserLimitInfo)
+	if info.DeviceLimit != 3 || info.SpeedLimit != 200 {
+		t.Errorf("Expected DeviceLimit=3, SpeedLimit=200; got DeviceLimit=%d, SpeedLimit=%d", info.DeviceLimit, info.SpeedLimit)
+	}
+}
+
