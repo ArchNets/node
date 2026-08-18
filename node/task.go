@@ -98,10 +98,11 @@ func (c *Controller) userListMonitor() (err error) {
 		err = c.server.DelUsers(deleted, c.tag, c.info)
 		if err != nil {
 			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
+				"tag":     c.tag,
+				"err":     err,
+				"deleted": len(deleted),
 			}).Error("Delete users failed")
-			return nil
+			// Continue: still update c.userList to avoid infinite diff loop
 		}
 	}
 	if len(added) > 0 {
@@ -113,10 +114,11 @@ func (c *Controller) userListMonitor() (err error) {
 		})
 		if err != nil {
 			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
+				"tag":   c.tag,
+				"err":   err,
+				"added": len(added),
 			}).Error("Add users failed")
-			return nil
+			// Continue: still update c.userList to avoid infinite diff loop
 		}
 	}
 	if len(added) > 0 || len(deleted) > 0 {
@@ -138,6 +140,7 @@ func (c *Controller) userListMonitor() (err error) {
 			}
 		}
 	}
+	// Always update c.userList to prevent stale diff loops
 	c.userList = newU
 	if len(added)+len(deleted) != 0 {
 		log.WithField("node", c.tag).

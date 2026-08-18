@@ -22,6 +22,8 @@ import (
 	"github.com/xtls/xray-core/proxy/trojan"
 	"github.com/xtls/xray-core/proxy/tuic"
 	"github.com/xtls/xray-core/proxy/vless"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func (v *XrayCore) GetUserManager(tag string) (proxy.UserManager, error) {
@@ -174,19 +176,31 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
+	var addedCount int
 	for _, u := range users {
 		mUser, err := u.ToMemoryUser()
 		if err != nil {
-			return 0, err
+			log.WithFields(log.Fields{
+				"tag":   p.Tag,
+				"email": u.Email,
+				"err":   err,
+			}).Warn("Failed to convert user to memory user, skipping")
+			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = man.AddUser(ctx, mUser)
 		cancel()
 		if err != nil {
-			return 0, err
+			log.WithFields(log.Fields{
+				"tag":   p.Tag,
+				"email": u.Email,
+				"err":   err,
+			}).Warn("Failed to add user to inbound, skipping")
+			continue
 		}
+		addedCount++
 	}
-	return len(users), nil
+	return addedCount, nil
 }
 
 func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
