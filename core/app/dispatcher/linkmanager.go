@@ -3,6 +3,7 @@ package dispatcher
 import (
 	sync "sync"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 )
@@ -32,6 +33,8 @@ func (m *LinkManager) AddLink(writer *ManagedWriter, reader buf.Reader) {
 	defer m.mu.Unlock()
 	if !m.closed {
 		m.links[writer] = reader
+	} else {
+		log.Warn("LinkManager.AddLink called on CLOSED manager — connection silently dropped!")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/archnets/node/common/rate"
 	"github.com/archnets/node/limiter"
 
+	logrus "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -194,13 +195,31 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, network net.Network, de
 			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
 		}
 		var lm *LinkManager
+		var lmIsNew bool
 		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
 			lm = &LinkManager{
 				links: make(map[*ManagedWriter]buf.Reader),
 			}
 			d.LinkManagers.Store(user.Email, lm)
+			lmIsNew = true
 		} else {
 			lm = lmloaded.(*LinkManager)
+		}
+		// Diagnostic: detect closed LinkManager reuse
+		lm.mu.RLock()
+		lmClosed := lm.closed
+		lmLinkCount := len(lm.links)
+		lm.mu.RUnlock()
+		if lmClosed || logrus.GetLevel() >= logrus.DebugLevel {
+			logrus.WithFields(logrus.Fields{
+				"user":      user.Email,
+				"path":      "getLink",
+				"lmNew":     lmIsNew,
+				"lmClosed":  lmClosed,
+				"lmLinks":   lmLinkCount,
+				"hasRateLimit": w != nil,
+				"dest":      destination.String(),
+			}).Warn("Dispatch diagnostic")
 		}
 		managedWriter := &ManagedWriter{
 			writer:  uplinkWriter,
@@ -374,13 +393,31 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			return errors.New("Limited ", user.Email, " by conn or ip")
 		}
 		var lm *LinkManager
+		var lmIsNew bool
 		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
 			lm = &LinkManager{
 				links: make(map[*ManagedWriter]buf.Reader),
 			}
 			d.LinkManagers.Store(user.Email, lm)
+			lmIsNew = true
 		} else {
 			lm = lmloaded.(*LinkManager)
+		}
+		// Diagnostic: detect closed LinkManager reuse in DispatchLink
+		lm.mu.RLock()
+		lmClosed := lm.closed
+		lmLinkCount := len(lm.links)
+		lm.mu.RUnlock()
+		if lmClosed || logrus.GetLevel() >= logrus.DebugLevel {
+			logrus.WithFields(logrus.Fields{
+				"user":      user.Email,
+				"path":      "DispatchLink",
+				"lmNew":     lmIsNew,
+				"lmClosed":  lmClosed,
+				"lmLinks":   lmLinkCount,
+				"hasRateLimit": w != nil,
+				"dest":      destination.String(),
+			}).Warn("Dispatch diagnostic")
 		}
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,

@@ -68,6 +68,11 @@ func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, nodeInfo *panel
 	defer vc.users.mapLock.Unlock()
 	for i := range users {
 		user = format.UserTag(tag, users[i].Uuid)
+		log.WithFields(log.Fields{
+			"tag":  tag,
+			"uid":  users[i].Id,
+			"uuid": users[i].Uuid,
+		}).Debug("DelUsers: removing user from inbound")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = userManager.RemoveUser(ctx, user)
 		cancel()
@@ -83,6 +88,11 @@ func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, nodeInfo *panel
 			lm := v.(*dispatcher.LinkManager)
 			lm.CloseAll()
 			vc.dispatcher.LinkManagers.Delete(user)
+			log.WithFields(log.Fields{
+				"tag":  tag,
+				"uid":  users[i].Id,
+				"uuid": users[i].Uuid,
+			}).Debug("DelUsers: closed and removed LinkManager")
 		}
 	}
 	return nil
