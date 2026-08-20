@@ -45,7 +45,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 
 	if security == "tls" {
 		switch node.Protocol.CertMode {
-		case "none", "", "file", "self":
+		case "none", "", "file", "self", "path":
 		default:
 			c.renewCertPeriodic = &task.Task{
 				Interval: time.Hour * 24,

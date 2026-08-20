@@ -112,11 +112,20 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 				in.StreamSetting = &coreConf.StreamConfig{}
 			}
 			in.StreamSetting.Security = "tls"
-			certFile, keyFile := certutil.GetCertPaths(nodeInfo.Protocol.SNI, nodeInfo.Type, nodeInfo.Id)
 			var alpn *coreConf.StringList
 			if len(nodeInfo.Protocol.Alpn) > 0 {
 				a := coreConf.StringList(nodeInfo.Protocol.Alpn)
 				alpn = &a
+			}
+			// Determine cert/key paths based on cert_mode
+			var certFile, keyFile string
+			if nodeInfo.Protocol.CertMode == "path" {
+				// Use user-provided filesystem paths directly
+				certFile = nodeInfo.Protocol.CertFile
+				keyFile = nodeInfo.Protocol.KeyFile
+			} else {
+				// Use auto-generated paths (for file, dns, http, self modes)
+				certFile, keyFile = certutil.GetCertPaths(nodeInfo.Protocol.SNI, nodeInfo.Type, nodeInfo.Id)
 			}
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				ALPN: alpn,

@@ -60,6 +60,18 @@ func (c *Controller) requestCert() error {
 		} else if !file.IsExist(certFile) || !file.IsExist(keyFile) {
 			return fmt.Errorf("cert_mode is 'file' but no certificate content provided and files do not exist")
 		}
+	case "path":
+		// Use cert_file and key_file as direct filesystem paths — just validate they exist
+		if c.info.Protocol.CertFile == "" || c.info.Protocol.KeyFile == "" {
+			return fmt.Errorf("cert_mode is 'path' but cert_file or key_file is empty")
+		}
+		if !file.IsExist(c.info.Protocol.CertFile) {
+			return fmt.Errorf("cert_mode is 'path' but cert file does not exist: %s", c.info.Protocol.CertFile)
+		}
+		if !file.IsExist(c.info.Protocol.KeyFile) {
+			return fmt.Errorf("cert_mode is 'path' but key file does not exist: %s", c.info.Protocol.KeyFile)
+		}
+		log.WithField("node", c.tag).Infof("Using cert path: %s, key path: %s", c.info.Protocol.CertFile, c.info.Protocol.KeyFile)
 	case "dns", "http":
 		if file.IsExist(certFile) && file.IsExist(keyFile) {
 			return nil
