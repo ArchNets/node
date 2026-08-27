@@ -56,6 +56,11 @@ type Data struct {
 	StatsPolicy            *StatsPolicy      `json:"stats_policy"`
 	Protocols              *[]Protocol       `json:"protocols"`
 	Total                  int               `json:"total"`
+
+	// Connectivity-check bypass. Absent in older panels, so both stay zero-valued
+	// and the feature is off unless the panel opts in.
+	BypassConnectivityChecks bool      `json:"bypass_connectivity_checks,omitempty"`
+	ConnectivityCheckDomains *[]string `json:"connectivity_check_domains,omitempty"`
 }
 
 type DNSItem struct {

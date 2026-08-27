@@ -439,6 +439,12 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 		}
 	}
 
+	// Captive-portal / connectivity-check bypass. Appended after the block rules so
+	// blocking still wins, and before the panel routing rules below so a probe is not
+	// swallowed by a broad geosite rule. Returns nothing unless the feature is on.
+	coreRouterConfig.RuleList = append(coreRouterConfig.RuleList,
+		connectivityCheckRules(serverconfig.Data)...)
+
 	//custom outbound
 	if outboundList != nil {
 		for _, outbounditem := range *outboundList {
