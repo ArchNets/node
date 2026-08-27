@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"strconv"
@@ -37,6 +38,110 @@ func hasPublicIPv6() bool {
 	return false
 }
 
+// forceDomainStrategies is the exact enum accepted by the Xray wireguard OUTBOUND
+// (settings.domainStrategy). The Use* family is deliberately absent: wireguard must
+// obtain a usable IP and cannot fall back to a domain name after resolution fails.
+// See https://xtls.github.io/en/config/outbounds/wireguard.html
+var forceDomainStrategies = map[string]string{
+	"forceip":     "ForceIP",
+	"forceipv4":   "ForceIPv4",
+	"forceipv6":   "ForceIPv6",
+	"forceipv4v6": "ForceIPv4v6",
+	"forceipv6v4": "ForceIPv6v4",
+}
+
+// sockoptDomainStrategies is the enum accepted by streamSettings.sockopt.domainStrategy,
+// which is how every NON-wireguard outbound receives a per-outbound strategy.
+var sockoptDomainStrategies = map[string]string{
+	"asis":        "AsIs",
+	"useip":       "UseIP",
+	"useipv4":     "UseIPv4",
+	"useipv6":     "UseIPv6",
+	"useipv4v6":   "UseIPv4v6",
+	"useipv6v4":   "UseIPv6v4",
+	"forceip":     "ForceIP",
+	"forceipv4":   "ForceIPv4",
+	"forceipv6":   "ForceIPv6",
+	"forceipv4v6": "ForceIPv4v6",
+	"forceipv6v4": "ForceIPv6v4",
+}
+
+// normalizeForceDomainStrategy validates a panel-supplied strategy for a wireguard
+// outbound and returns its canonical spelling. ok is false for empty or unknown input.
+func normalizeForceDomainStrategy(s string) (string, bool) {
+	v, ok := forceDomainStrategies[strings.ToLower(strings.TrimSpace(s))]
+	return v, ok
+}
+
+// normalizeSockoptDomainStrategy validates a panel-supplied strategy for any
+// non-wireguard outbound and returns its canonical spelling.
+func normalizeSockoptDomainStrategy(s string) (string, bool) {
+	v, ok := sockoptDomainStrategies[strings.ToLower(strings.TrimSpace(s))]
+	return v, ok
+}
+
+// wireguardAddresses splits a comma-separated wireguard_address value into trimmed
+// entries and reports whether any of them is IPv6.
+func wireguardAddresses(raw string) ([]string, bool) {
+	var addresses []string
+	hasIPv6 := false
+	for _, p := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		addresses = append(addresses, trimmed)
+		ipStr := trimmed
+		if idx := strings.Index(ipStr, "/"); idx != -1 {
+			ipStr = ipStr[:idx]
+		}
+		if ip := net.ParseIP(ipStr); ip != nil && ip.To4() == nil {
+			hasIPv6 = true
+		}
+	}
+	return addresses, hasIPv6
+}
+
+// hasIPv6Egress reports whether this node can actually egress over IPv6: either the
+// host holds a public IPv6 address, or a wireguard outbound carries an IPv6 tunnel
+// address. The second case is invisible to net.InterfaceAddrs() because those
+// outbounds run a gVisor userspace TUN (noKernelTun: true), so relying on
+// hasPublicIPv6() alone makes the resolver strip AAAA records and leaves every
+// Force*IPv6* outbound strategy with nothing to work with.
+func hasIPv6Egress(serverconfig *panel.ServerConfigResponse) bool {
+	if hasPublicIPv6() {
+		return true
+	}
+	if serverconfig == nil || serverconfig.Data == nil || serverconfig.Data.Outbound == nil {
+		return false
+	}
+	for _, o := range *serverconfig.Data.Outbound {
+		if o.Protocol != "wireguard" {
+			continue
+		}
+		if _, hasIPv6 := wireguardAddresses(o.WireguardAddress); hasIPv6 {
+			return true
+		}
+	}
+	return false
+}
+
+// validPresharedKey reports whether psk is a standard-base64 encoded 32-byte key.
+func validPresharedKey(psk string) bool {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(psk))
+	return err == nil && len(b) == 32
+}
+
+// isHostnameEndpoint reports whether the host part of endpoint is a domain rather
+// than an IP literal.
+func isHostnameEndpoint(endpoint string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(endpoint))
+	if err != nil {
+		return false
+	}
+	return net.ParseIP(host) == nil
+}
+
 func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 	for _, o := range list {
 		if o != nil && o.Tag == tag {
@@ -56,32 +161,31 @@ func BuildWireguardOutboundJSON(outbounditem panel.Outbound, endpoint string) (m
 		"secretKey": outbounditem.WireguardPrivateKey,
 	}
 
-	var addresses []string
-	hasIPv6 := false
-	if len(outbounditem.WireguardAddress) > 0 {
-		parts := strings.Split(outbounditem.WireguardAddress, ",")
-		for _, p := range parts {
-			trimmed := strings.TrimSpace(p)
-			if trimmed != "" {
-				addresses = append(addresses, trimmed)
-				ipStr := trimmed
-				if idx := strings.Index(ipStr, "/"); idx != -1 {
-					ipStr = ipStr[:idx]
-				}
-				ip := net.ParseIP(ipStr)
-				if ip != nil && ip.To4() == nil {
-					hasIPv6 = true
-				}
-			}
-		}
-	}
+	addresses, hasIPv6 := wireguardAddresses(outbounditem.WireguardAddress)
 	if len(addresses) > 0 {
 		jsonsettings["address"] = addresses
 	}
-	if hasIPv6 {
-		jsonsettings["domainStrategy"] = "ForceIPv4v6"
+
+	// Per-outbound resolution strategy, chosen by the admin in the panel and passed
+	// through verbatim. Nothing is inferred here: Xray already constrains the strategy
+	// by the address list, so ForceIPv6v4 on a v4-only tunnel degrades to IPv4 for
+	// proxied traffic instead of breaking.
+	if ds, ok := normalizeForceDomainStrategy(outbounditem.DomainStrategy); ok {
+		jsonsettings["domainStrategy"] = ds
 	} else {
-		jsonsettings["domainStrategy"] = "ForceIPv4"
+		if strings.TrimSpace(outbounditem.DomainStrategy) != "" {
+			log.WithFields(log.Fields{
+				"name":           outbounditem.Name,
+				"domainStrategy": outbounditem.DomainStrategy,
+			}).Warn("Unrecognised domain_strategy for wireguard outbound; using the legacy default. Allowed: ForceIP, ForceIPv4, ForceIPv6, ForceIPv4v6, ForceIPv6v4")
+		}
+		// Legacy fallback, kept only so nodes talking to an un-upgraded panel behave
+		// exactly as they did before this change. Xray's own default is ForceIP.
+		if hasIPv6 {
+			jsonsettings["domainStrategy"] = "ForceIPv4v6"
+		} else {
+			jsonsettings["domainStrategy"] = "ForceIPv4"
+		}
 	}
 
 	if outbounditem.WireguardMTU > 0 {
@@ -92,6 +196,15 @@ func BuildWireguardOutboundJSON(outbounditem panel.Outbound, endpoint string) (m
 		"publicKey": outbounditem.WireguardPeerPublicKey,
 		"endpoint":  endpoint,
 		"keepAlive": 25,
+	}
+	// peers[].preSharedKey is peer-level and optional. Never emit an empty string:
+	// Xray's default is the all-zero key.
+	if psk := strings.TrimSpace(outbounditem.WireguardPeerPresharedKey); psk != "" {
+		if validPresharedKey(psk) {
+			peer["preSharedKey"] = psk
+		} else {
+			log.WithField("name", outbounditem.Name).Warn("Ignoring invalid wireguard_peer_preshared_key: must be standard base64 decoding to 32 bytes")
+		}
 	}
 	jsonsettings["peers"] = []interface{}{peer}
 
@@ -139,17 +252,34 @@ func BuildWireguardOutbound(outbounditem panel.Outbound, endpoint string) (*core
 	
 	// Log the WireGuard outbound config for debugging
 	log.WithFields(log.Fields{
-		"tag":      outbounditem.Name,
-		"address":  outbounditem.WireguardAddress,
-		"endpoint": endpoint,
-		"mtu":      outbounditem.WireguardMTU,
+		"tag":            outbounditem.Name,
+		"address":        outbounditem.WireguardAddress,
+		"endpoint":       endpoint,
+		"mtu":            outbounditem.WireguardMTU,
+		"domainStrategy": jsonsettings["domainStrategy"],
+		"psk":            strings.TrimSpace(outbounditem.WireguardPeerPresharedKey) != "",
 	}).Info("Built WireGuard outbound config")
+
+	// Endpoint resolution is NOT constrained by the address list the way proxied
+	// traffic is, so a Force*IPv6* strategy can make Xray resolve a hostname endpoint
+	// to an AAAA record this host cannot reach. Warn once per outbound.
+	if ds, _ := jsonsettings["domainStrategy"].(string); strings.HasPrefix(ds, "ForceIPv6") && isHostnameEndpoint(endpoint) && !hasPublicIPv6() {
+		log.WithFields(log.Fields{
+			"tag":            outbounditem.Name,
+			"endpoint":       endpoint,
+			"domainStrategy": ds,
+		}).Warn("IPv6 domain strategy with a hostname peer endpoint on a host without native IPv6; use an IP:Port literal (e.g. 162.159.192.1:2408) if the handshake fails")
+	}
 
 	return outbound.Build()
 }
 
 func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, map[string]*WireguardOutbound, error) {
 	wgOutbounds := make(map[string]*WireguardOutbound)
+	// ipv6Egress is derived from configuration, not from host interfaces, because a
+	// wireguard outbound's IPv6 tunnel address never shows up in net.InterfaceAddrs().
+	ipv6Egress := hasIPv6Egress(serverconfig)
+
 	var ip_strategy string
 	if serverconfig.Data.IPStrategy != "" {
 		switch serverconfig.Data.IPStrategy {
@@ -161,7 +291,7 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			ip_strategy = "UseIPv4v6"
 		}
 	} else {
-		if hasPublicIPv6() {
+		if ipv6Egress {
 			ip_strategy = "UseIPv4v6"
 		} else {
 			ip_strategy = "UseIPv4"
@@ -171,11 +301,15 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	blockList := serverconfig.Data.Block
 	outboundList := serverconfig.Data.Outbound
 
-	//default dns
-	queryStrategy := "UseIPv4v6"
-	if !hasPublicIPv6() {
-		queryStrategy = "UseIPv4"
-	}
+	// default dns - the panel-wide ip_strategy now also applies to the default
+	// localhost server, not only to the custom DNS entries below. Without this the
+	// resolver strips AAAA records and every Force*IPv6* outbound strategy no-ops.
+	queryStrategy := ip_strategy
+	log.WithFields(log.Fields{
+		"queryStrategy": queryStrategy,
+		"ipv6Egress":    ipv6Egress,
+		"ipStrategy":    serverconfig.Data.IPStrategy,
+	}).Info("Resolved DNS query strategy")
 	// Note: Xray DNS configured here is GLOBAL to the node's Xray instance (not per-inbound).
 	// TPROXY-captured tunnel traffic (WireGuard/OpenVPN/IPsec) only reaches this DNS for plain
 	// UDP :53 queries via the existing port-53 -> dns_out routing rule; DoH/DoT queries from
@@ -256,7 +390,7 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	}
 
 	//default outbound
-	defaultoutbound, _ := buildDefaultOutbound()
+	defaultoutbound, _ := buildDefaultOutbound(ip_strategy)
 	coreOutboundConfig := append([]*core.OutboundHandlerConfig{}, defaultoutbound)
 	block, _ := buildBlockOutbound()
 	coreOutboundConfig = append(coreOutboundConfig, block)
@@ -488,6 +622,29 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 					Protocol:      outbounditem.Protocol,
 					Settings:      &rawSettings,
 					StreamSetting: streamSettings,
+				}
+
+				// Per-outbound domain resolution strategy for non-wireguard outbounds.
+				// Xray exposes no settings.domainStrategy for these protocols, so the
+				// strategy goes on streamSettings.sockopt.domainStrategy, which accepts
+				// the AsIs / Use* / Force* families. streamSettings is a pointer already
+				// stored on the detour config, so mutating it here is safe.
+				if ds, ok := normalizeSockoptDomainStrategy(outbounditem.DomainStrategy); ok {
+					if streamSettings.SocketSettings == nil {
+						streamSettings.SocketSettings = &coreConf.SocketConfig{}
+					}
+					streamSettings.SocketSettings.DomainStrategy = ds
+					log.WithFields(log.Fields{
+						"name":           outbounditem.Name,
+						"protocol":       outbounditem.Protocol,
+						"domainStrategy": ds,
+					}).Info("Applied per-outbound sockopt domainStrategy")
+				} else if strings.TrimSpace(outbounditem.DomainStrategy) != "" {
+					log.WithFields(log.Fields{
+						"name":           outbounditem.Name,
+						"protocol":       outbounditem.Protocol,
+						"domainStrategy": outbounditem.DomainStrategy,
+					}).Warn("Ignoring unrecognised domain_strategy for outbound")
 				}
 
 			custom_outbound, err := outbound.Build()

@@ -97,6 +97,17 @@ type Outbound struct {
 	WireguardPeerEndpoint  string `json:"wireguard_peer_endpoint,omitempty"`
 	WireguardReserved      string `json:"wireguard_reserved,omitempty"`
 
+	// WireguardPeerPresharedKey maps to peers[].preSharedKey on the Xray wireguard
+	// outbound. It is peer-level and optional; omitted from the config when empty.
+	WireguardPeerPresharedKey string `json:"wireguard_peer_preshared_key,omitempty"`
+
+	// DomainStrategy is the panel-selected per-outbound domain resolution strategy.
+	// wireguard outbounds map it to settings.domainStrategy (Force* family only);
+	// every other protocol maps it to streamSettings.sockopt.domainStrategy, which
+	// also accepts the AsIs / Use* families. Empty means "not configured" and the
+	// node keeps its previous behaviour.
+	DomainStrategy string `json:"domain_strategy,omitempty"`
+
 	DialerProxy string `json:"dialer_proxy,omitempty"`
 }
 
