@@ -563,6 +563,23 @@ EOF
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
 }
 
+install_logrotate() {
+    if [[ -d /etc/logrotate.d ]]; then
+        cat > /etc/logrotate.d/archnet-node <<'EOF'
+/var/log/archnet/*.log /etc/archnets/logs/*.log /etc/archnets/log/*.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+        chmod 644 /etc/logrotate.d/archnet-node
+    fi
+}
+
 install_openrc_service() {
     rm -f /etc/init.d/${SERVICE_NAME}
     cat > /etc/init.d/${SERVICE_NAME} <<EOF
@@ -670,6 +687,7 @@ install_node() {
     else
         install_systemd_unit
     fi
+    install_logrotate
     ok "archnets ${version} installed and enabled at boot"
 
     local first_install=false

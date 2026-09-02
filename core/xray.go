@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,6 +107,38 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+	dispatcher.SetUserResolver(func(email string, clientIP string) (dispatcher.UserDetails, bool) {
+		if email != "" {
+			v.users.mapLock.RLock()
+			uid := v.users.uidMap[email]
+			v.users.mapLock.RUnlock()
+
+			parts := strings.SplitN(email, "|", 2)
+			tag := ""
+			uuid := email
+			if len(parts) == 2 {
+				tag = parts[0]
+				uuid = parts[1]
+			}
+			return dispatcher.UserDetails{
+				UID:  uid,
+				UUID: uuid,
+				Tag:  tag,
+			}, true
+		}
+
+		if clientIP != "" {
+			if tu, ok := LookupTunnelUser(clientIP); ok {
+				return dispatcher.UserDetails{
+					UID:  tu.UID,
+					UUID: tu.UUID,
+					Tag:  tu.Tag,
+				}, true
+			}
+		}
+
+		return dispatcher.UserDetails{}, false
+	})
 	if sm := v.Server.GetFeature(xraystats.ManagerType()); sm != nil {
 		v.statsManager = sm.(xraystats.Manager)
 	}
@@ -184,7 +219,24 @@ func (v *XrayCore) Close() error {
 	return nil
 }
 
+func ensureLogDir(path string) {
+	p := strings.TrimSpace(path)
+	if p == "" || p == "none" || p == "stdout" || p == "console" {
+		return
+	}
+	dir := filepath.Dir(p)
+	if dir != "." && dir != "/" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.WithFields(log.Fields{"path": p, "dir": dir, "err": err}).Warn("Failed to create log directory")
+		}
+	}
+}
+
 func getCore(c *conf.Conf, dnsConfig *dns.Config, outBoundConfig []*core.OutboundHandlerConfig, routeConfig *router.Config, serverconfig *panel.ServerConfigResponse) *core.Instance {
+	// Ensure log directory exists before initializing Xray logger
+	ensureLogDir(c.LogConfig.Access)
+	ensureLogDir(c.LogConfig.Output)
+
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,

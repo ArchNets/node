@@ -266,6 +266,7 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		w.users.uuidToID[user.Uuid] = user.Id
 		w.users.idToUUID[user.Id] = user.Uuid
 		w.users.ipToUID[assignedIP] = user.Id
+		RegisterTunnelUser(assignedIP, user.Id, user.Uuid, w.Tag)
 	}
 
 	// Update WireGuard configuration with new peers
@@ -299,6 +300,7 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 		delete(w.users.idToUUID, user.Id)
 		if assignedIP != "" {
 			delete(w.users.ipToUID, assignedIP)
+			UnregisterTunnelUser(assignedIP)
 		}
 	}
 

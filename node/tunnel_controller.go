@@ -60,6 +60,17 @@ type trafficSnapshot struct {
 	txBytes int64
 }
 
+func ensureLogDir(path string) {
+	p := strings.TrimSpace(path)
+	if p == "" || p == "none" || p == "stdout" || p == "console" {
+		return
+	}
+	dir := filepath.Dir(p)
+	if dir != "." && dir != "/" {
+		_ = os.MkdirAll(dir, 0755)
+	}
+}
+
 // TunnelController manages WaterWall tunnel nodes
 type TunnelController struct {
 	tag                   string
@@ -985,6 +996,8 @@ func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {
 
 	// We forcibly inject Node's global logging config so Xray prints everything to the Node controller's log output
 	// Ensure fallback to warning if config is omitted
+	ensureLogDir(c.nodeConfig.LogConfig.Access)
+	ensureLogDir(c.nodeConfig.LogConfig.Output)
 
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  logLevel,
@@ -1210,6 +1223,9 @@ func (c *TunnelController) startXrayReverseInstance(t panel.TunnelInfo) error {
 	if err != nil {
 		return fmt.Errorf("failed to build xray-reverse config protobuf: %v", err)
 	}
+
+	ensureLogDir(c.nodeConfig.LogConfig.Access)
+	ensureLogDir(c.nodeConfig.LogConfig.Output)
 
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  logLevel,
@@ -1669,6 +1685,9 @@ func (c *TunnelController) startNipovpnXrayInstance(t panel.TunnelInfo) error {
 		return fmt.Errorf("failed to build nipovpn xray config protobuf: %v", err)
 	}
 
+	ensureLogDir(c.nodeConfig.LogConfig.Access)
+	ensureLogDir(c.nodeConfig.LogConfig.Output)
+
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  logLevel,
 		ErrorLog:  c.nodeConfig.LogConfig.Output,
@@ -1824,6 +1843,9 @@ func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
 	if err != nil {
 		return fmt.Errorf("failed to build xray-stealth config protobuf: %v", err)
 	}
+
+	ensureLogDir(c.nodeConfig.LogConfig.Access)
+	ensureLogDir(c.nodeConfig.LogConfig.Output)
 
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  logLevel,

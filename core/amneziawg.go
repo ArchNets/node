@@ -231,6 +231,7 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 		w.users.uuidToID[user.Uuid] = user.Id
 		w.users.idToUUID[user.Id] = user.Uuid
 		w.users.ipToUID[assignedIP] = user.Id
+		RegisterTunnelUser(assignedIP, user.Id, user.Uuid, w.Tag)
 
 		// Execute awg command
 		// awg set <iface> peer <key> allowed-ips <ip>/32
@@ -270,10 +271,15 @@ func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 		}
 
 		if uuid, exists := w.users.idToUUID[user.Id]; exists {
+			if peer, ok := w.peers.Load(uuid); ok {
+				if wgPeer, ok := peer.(*WireGuardPeer); ok && wgPeer.IP != "" {
+					delete(w.users.ipToUID, wgPeer.IP)
+					UnregisterTunnelUser(wgPeer.IP)
+				}
+			}
 			w.peers.Delete(uuid)
 			delete(w.users.uuidToID, uuid)
 			delete(w.users.idToUUID, user.Id)
-			// Remove from ipToUID map...
 		}
 
 		// Execute awg command

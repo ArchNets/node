@@ -4,6 +4,7 @@ package dispatcher
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,37 @@ type DefaultDispatcher struct {
 	fdns         dns.FakeDNSEngine
 	Counter      sync.Map
 	LinkManagers sync.Map // map[string]*LinkManager
+}
+
+// UserDetails contains resolved user identity attributes for access logging.
+type UserDetails struct {
+	UID  int
+	UUID string
+	Tag  string
+}
+
+// UserResolver resolves a user from their email (proxy inbounds) or client IP (tunnel inbounds).
+type UserResolver func(email string, clientIP string) (UserDetails, bool)
+
+var (
+	globalUserResolver UserResolver
+	resolverMu         sync.RWMutex
+)
+
+// SetUserResolver registers the global user lookup function for access logging.
+func SetUserResolver(r UserResolver) {
+	resolverMu.Lock()
+	defer resolverMu.Unlock()
+	globalUserResolver = r
+}
+
+func resolveUser(email string, clientIP string) (UserDetails, bool) {
+	resolverMu.RLock()
+	defer resolverMu.RUnlock()
+	if globalUserResolver != nil {
+		return globalUserResolver(email, clientIP)
+	}
+	return UserDetails{}, false
 }
 
 func init() {
@@ -614,6 +646,58 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				accessMessage.Detour = inTag + " >> " + tag
 			}
 		}
+
+		// Enrich To with sniffed website/host, original destination IP, and detected protocol
+		destStr := destination.String()
+		origAddr := ""
+		if ob.OriginalTarget.IsValid() && ob.OriginalTarget.Address != destination.Address {
+			origAddr = ob.OriginalTarget.Address.String()
+		}
+		var formattedTo strings.Builder
+		formattedTo.WriteString(destStr)
+		if origAddr != "" {
+			formattedTo.WriteString(" (")
+			formattedTo.WriteString(origAddr)
+			formattedTo.WriteString(")")
+		}
+		if protocol != "" {
+			formattedTo.WriteString(" [")
+			formattedTo.WriteString(protocol)
+			formattedTo.WriteString("]")
+		}
+		accessMessage.To = formattedTo.String()
+
+		// Enrich Email with UID and resolve TPROXY tunnel users
+		var emailStr string
+		sessionInbound := session.InboundFromContext(ctx)
+		if sessionInbound != nil && sessionInbound.User != nil {
+			emailStr = sessionInbound.User.Email
+		}
+		var clientIPStr string
+		if sessionInbound != nil && sessionInbound.Source.IsValid() {
+			clientIPStr = sessionInbound.Source.Address.String()
+		}
+
+		if userDetails, found := resolveUser(emailStr, clientIPStr); found {
+			if emailStr != "" {
+				if userDetails.UID > 0 {
+					accessMessage.Email = fmt.Sprintf("%s [uid:%d]", emailStr, userDetails.UID)
+				} else {
+					accessMessage.Email = emailStr
+				}
+			} else if userDetails.UUID != "" {
+				userTag := userDetails.Tag
+				if userTag == "" {
+					userTag = inTag
+				}
+				if userDetails.UID > 0 {
+					accessMessage.Email = fmt.Sprintf("%s|%s [uid:%d]", userTag, userDetails.UUID, userDetails.UID)
+				} else {
+					accessMessage.Email = fmt.Sprintf("%s|%s", userTag, userDetails.UUID)
+				}
+			}
+		}
+
 		log.Record(accessMessage)
 	}
 
