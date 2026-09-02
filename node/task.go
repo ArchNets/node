@@ -229,6 +229,20 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 		if err != nil {
 			log.Print(err)
 		}
+
+		// Flush aggregated destination telemetry
+		if c.server != nil {
+			if records := c.server.DrainDestinationTelemetry(); len(records) > 0 {
+				if err := c.apiClient.PushDestinationTelemetry(records); err != nil {
+					log.WithFields(log.Fields{
+						"node": c.tag,
+						"err":  err,
+					}).Warn("Report destination telemetry failed")
+				} else {
+					log.WithField("node", c.tag).Infof("Reported %d destination telemetry records", len(records))
+				}
+			}
+		}
 	}
 
 	userTraffic = nil

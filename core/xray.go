@@ -14,6 +14,7 @@ import (
 	"github.com/archnets/node/conf"
 	"github.com/archnets/node/core/app/dispatcher"
 	_ "github.com/archnets/node/core/distro/all"
+	"github.com/archnets/node/core/telemetry"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/proxyman"
@@ -139,6 +140,23 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 
 		return dispatcher.UserDetails{}, false
 	})
+
+	// Register destination telemetry collector
+	collector := telemetry.GetGlobalCollector()
+	dispatcher.SetTelemetryRecorder(func(rec dispatcher.TelemetryRecord) {
+		collector.Record(panel.DestinationRecord{
+			UID:             rec.UID,
+			ClientIP:        rec.ClientIP,
+			DestinationHost: rec.DestinationHost,
+			DestinationIP:   rec.DestinationIP,
+			Port:            rec.Port,
+			Protocol:        rec.Protocol,
+			Blocked:         rec.Blocked,
+			Hits:            1,
+			Timestamp:       rec.Timestamp,
+		})
+	})
+
 	if sm := v.Server.GetFeature(xraystats.ManagerType()); sm != nil {
 		v.statsManager = sm.(xraystats.Manager)
 	}
@@ -379,4 +397,9 @@ func (c *XrayCore) ServerConfigMonitor() (err error) {
 		}
 	}
 	return nil
+}
+
+// DrainDestinationTelemetry atomically retrieves and flushes buffered destination telemetry
+func (c *XrayCore) DrainDestinationTelemetry() []panel.DestinationRecord {
+	return telemetry.GetGlobalCollector().Drain()
 }

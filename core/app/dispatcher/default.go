@@ -142,6 +142,41 @@ func resolveUser(email string, clientIP string) (UserDetails, bool) {
 	return UserDetails{}, false
 }
 
+// TelemetryRecord represents connection telemetry emitted per user flow
+type TelemetryRecord struct {
+	UID             int64
+	ClientIP        string
+	DestinationHost string
+	DestinationIP   string
+	Port            int
+	Protocol        string
+	Blocked         bool
+	Timestamp       int64
+}
+
+type TelemetryRecorder func(record TelemetryRecord)
+
+var (
+	globalTelemetryRecorder TelemetryRecorder
+	telemetryRecorderMu     sync.RWMutex
+)
+
+// SetTelemetryRecorder registers the global callback for connection destination telemetry
+func SetTelemetryRecorder(r TelemetryRecorder) {
+	telemetryRecorderMu.Lock()
+	defer telemetryRecorderMu.Unlock()
+	globalTelemetryRecorder = r
+}
+
+func recordTelemetry(record TelemetryRecord) {
+	telemetryRecorderMu.RLock()
+	r := globalTelemetryRecorder
+	telemetryRecorderMu.RUnlock()
+	if r != nil {
+		r(record)
+	}
+}
+
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		d := new(DefaultDispatcher)
@@ -695,6 +730,27 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				} else {
 					accessMessage.Email = fmt.Sprintf("%s|%s", userTag, userDetails.UUID)
 				}
+			}
+
+			// Emit connection telemetry for authenticated users
+			if userDetails.UID > 0 {
+				destHost := destination.Address.String()
+				destIP := origAddr
+				if destIP == "" && destination.Address.Family().IsIP() {
+					destIP = destination.Address.String()
+				}
+				destTag := strings.ToLower(handler.Tag())
+				isBlocked := destTag == "block" || strings.Contains(destTag, "block")
+				recordTelemetry(TelemetryRecord{
+					UID:             int64(userDetails.UID),
+					ClientIP:        clientIPStr,
+					DestinationHost: destHost,
+					DestinationIP:   destIP,
+					Port:            int(destination.Port),
+					Protocol:        protocol,
+					Blocked:         isBlocked,
+					Timestamp:       time.Now().Unix(),
+				})
 			}
 		}
 

@@ -79,3 +79,36 @@ func TestEnrichedAccessMessageFormatting(t *testing.T) {
 	formattedToIP.WriteString(ipDest.String())
 	assert.Equal(t, "tcp:178.162.202.97:9166", formattedToIP.String())
 }
+
+func TestTelemetryRecorderCallback(t *testing.T) {
+	var received TelemetryRecord
+	var called bool
+
+	SetTelemetryRecorder(func(record TelemetryRecord) {
+		called = true
+		received = record
+	})
+
+	testRecord := TelemetryRecord{
+		UID:             20306,
+		ClientIP:        "5.126.109.232",
+		DestinationHost: "i.instagram.com",
+		DestinationIP:   "157.240.22.174",
+		Port:            443,
+		Protocol:        "tls",
+		Blocked:         false,
+		Timestamp:       1725297600,
+	}
+
+	recordTelemetry(testRecord)
+
+	assert.True(t, called)
+	assert.Equal(t, int64(20306), received.UID)
+	assert.Equal(t, "5.126.109.232", received.ClientIP)
+	assert.Equal(t, "i.instagram.com", received.DestinationHost)
+	assert.Equal(t, "157.240.22.174", received.DestinationIP)
+	assert.Equal(t, 443, received.Port)
+	assert.Equal(t, "tls", received.Protocol)
+	assert.False(t, received.Blocked)
+}
+

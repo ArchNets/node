@@ -202,3 +202,42 @@ func (c *ClientV1) PushOutboundTraffic(traffic []OutboundTraffic) error {
 	}
 	return nil
 }
+
+// DestinationRecord represents a single connection destination telemetry event
+type DestinationRecord struct {
+	UID             int64  `json:"uid"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	DestinationHost string `json:"destination_host,omitempty"`
+	DestinationIP   string `json:"destination_ip,omitempty"`
+	Port            int    `json:"port,omitempty"`
+	Protocol        string `json:"protocol,omitempty"`
+	Blocked         bool   `json:"blocked,omitempty"`
+	Hits            int    `json:"hits,omitempty"`
+	Timestamp       int64  `json:"timestamp,omitempty"`
+}
+
+type PushDestinationTelemetryRequest struct {
+	ServerId int64               `json:"server_id,omitempty"`
+	Records  []DestinationRecord `json:"records"`
+}
+
+func (c *ClientV1) PushDestinationTelemetry(records []DestinationRecord) error {
+	const p = "/v1/server/telemetry/destinations"
+	req := PushDestinationTelemetryRequest{
+		ServerId: int64(c.NodeId),
+		Records:  records,
+	}
+	r, err := c.Client.R().
+		SetBody(req).
+		ForceContentType("application/json").
+		Post(p)
+	if err != nil {
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), err)
+	}
+	if r.StatusCode() >= 400 {
+		body := r.Body()
+		return fmt.Errorf("failed to access %s: %s", path.Join(c.APIHost+p), string(body))
+	}
+	return nil
+}
+
