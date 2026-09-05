@@ -15,7 +15,7 @@ import (
 const connectivityBypassEnv = "NODE_BYPASS_CONNECTIVITY_CHECKS"
 
 // connectivityBypassTag is the tag of the node's direct (freedom) outbound.
-const connectivityBypassTag = "Default"
+const connectivityBypassTag = "direct"
 
 // defaultConnectivityCheckDomains lists the hostnames used by operating system and
 // browser captive-portal probes. They are matched with "full:" so only the exact

@@ -142,3 +142,40 @@ func TestGetCustomConfig_DNSProtocols(t *testing.T) {
 	assert.Equal(t, "localhost", dnsCfg.NameServer[6].Address.Address.AsAddress().String())
 	assert.Equal(t, "8.8.8.8", dnsCfg.NameServer[7].Address.Address.AsAddress().String())
 }
+
+func TestGetCustomConfig_DirectOutboundAndRouting(t *testing.T) {
+	serverConfig := &panel.ServerConfigResponse{
+		Data: &panel.Data{
+			Routing: &[]panel.RoutingRule{
+				{
+					Domain:      []string{"full:www.google.com"},
+					OutboundTag: "direct",
+				},
+				{
+					Domain:      []string{"domain:legacy.com"},
+					OutboundTag: "Default",
+				},
+			},
+		},
+	}
+
+	_, outboundCfg, routerCfg, _, err := GetCustomConfig(serverConfig)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, outboundCfg)
+
+	// The default freedom outbound must be tagged "direct"
+	assert.Equal(t, "direct", outboundCfg[0].Tag)
+	assert.Equal(t, "block", outboundCfg[1].Tag)
+	assert.Equal(t, "dns_out", outboundCfg[2].Tag)
+
+	assert.NotNil(t, routerCfg)
+	// Both rules targeting "direct" and legacy "Default" must route to tag "direct"
+	var directRuleCount int
+	for _, rule := range routerCfg.Rule {
+		if rule.GetTag() == "direct" {
+			directRuleCount++
+		}
+	}
+	assert.Equal(t, 2, directRuleCount, "expected both direct and legacy Default to route to tag 'direct'")
+}
+

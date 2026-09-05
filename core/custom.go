@@ -702,7 +702,11 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			if rule.BalancerTag != "" && validBalancerTags[rule.BalancerTag] {
 				xrayRule["balancerTag"] = rule.BalancerTag
 			} else if rule.OutboundTag != "" {
-				xrayRule["outboundTag"] = rule.OutboundTag
+				outTag := rule.OutboundTag
+				if outTag == "Default" {
+					outTag = "direct"
+				}
+				xrayRule["outboundTag"] = outTag
 			} else {
 				// Neither valid balancer nor outbound — skip this rule
 				continue

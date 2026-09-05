@@ -15,7 +15,7 @@ import (
 func buildDefaultOutbound(domainStrategy string) (*core.OutboundHandlerConfig, error) {
 	outboundDetourConfig := &conf.OutboundDetourConfig{}
 	outboundDetourConfig.Protocol = "freedom"
-	outboundDetourConfig.Tag = "Default"
+	outboundDetourConfig.Tag = "direct"
 	//sendthrough := "origin"
 	//outboundDetourConfig.SendThrough = &sendthrough
 
