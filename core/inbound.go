@@ -310,7 +310,9 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 			Host: nodeInfo.Protocol.Host,
 			Path: nodeInfo.Protocol.Path,
 			Mode: nodeInfo.Protocol.XHTTPMode,
-			//Extra: json.RawMessage(nodeInfo.Protocol.XHTTPExtra),
+		}
+		if nodeInfo.Protocol.XHTTPExtra != "" {
+			inbound.StreamSetting.SplitHTTPSettings.Extra = json.RawMessage(nodeInfo.Protocol.XHTTPExtra)
 		}
 	default:
 		return errors.New("the network type is not vail")

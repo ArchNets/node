@@ -1072,6 +1072,23 @@ func (c *TunnelController) buildXrayReverseJSON(t panel.TunnelInfo, cfg *panel.X
 				},
 			}
 		}
+	} else if cfg.Transport == "xhttp" || cfg.Transport == "splithttp" {
+		xhttpSettings := map[string]interface{}{
+			"path": cfg.Path,
+		}
+		if cfg.Host != "" {
+			xhttpSettings["host"] = cfg.Host
+		}
+		if cfg.XhttpMode != "" {
+			xhttpSettings["mode"] = cfg.XhttpMode
+		}
+		if cfg.XhttpExtra != "" {
+			var extraObj interface{}
+			if err := json.Unmarshal([]byte(cfg.XhttpExtra), &extraObj); err == nil {
+				xhttpSettings["extra"] = extraObj
+			}
+		}
+		streamSettings["xhttpSettings"] = xhttpSettings
 	}
 
 	if cfg.Security == "tls" || cfg.Security == "reality" {
@@ -1442,13 +1459,19 @@ func buildXrayStreamSettings(cfg *panel.XrayTunnelProtocol, isServer bool) map[s
 		ss["realitySettings"] = realitySettings
 	}
 
-	if cfg.Transport == "xhttp" {
+	if cfg.Transport == "xhttp" || cfg.Transport == "splithttp" {
 		xhttpSettings := map[string]interface{}{
 			"mode": cfg.XhttpMode,
 			"path": cfg.Path,
 		}
 		if cfg.Host != "" {
 			xhttpSettings["host"] = cfg.Host
+		}
+		if cfg.XhttpExtra != "" {
+			var extraObj interface{}
+			if err := json.Unmarshal([]byte(cfg.XhttpExtra), &extraObj); err == nil {
+				xhttpSettings["extra"] = extraObj
+			}
 		}
 		ss["xhttpSettings"] = xhttpSettings
 	} else if cfg.Transport == "ws" {

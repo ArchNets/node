@@ -76,6 +76,8 @@ type XrayReverseTunnelConfig struct {
 	RealitySpiderX   string `json:"reality_spider_x,omitempty"`
 	PortalAddress    string `json:"portal_address"`
 	PortalPublicPort int    `json:"portal_public_port"`
+	XhttpMode        string `json:"xhttp_mode,omitempty"`
+	XhttpExtra       string `json:"xhttp_extra,omitempty"`
 }
 
 type NipovpnConfig struct {
@@ -123,6 +125,7 @@ type XrayTunnelProtocol struct {
 	Path              string `json:"path,omitempty"`
 	ServiceName       string `json:"service_name,omitempty"`
 	XhttpMode         string `json:"xhttp_mode,omitempty"`
+	XhttpExtra        string `json:"xhttp_extra,omitempty"`
 	Flow              string `json:"flow,omitempty"`
 	Encryption        string `json:"encryption,omitempty"`
 	EncryptionMode    string `json:"encryption_mode,omitempty"`
