@@ -312,12 +312,47 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 			Mode: nodeInfo.Protocol.XHTTPMode,
 		}
 		if nodeInfo.Protocol.XHTTPExtra != "" {
-			inbound.StreamSetting.SplitHTTPSettings.Extra = json.RawMessage(nodeInfo.Protocol.XHTTPExtra)
+			if cleaned := cleanInboundXHTTPExtra(nodeInfo.Protocol.XHTTPExtra); cleaned != "" {
+				inbound.StreamSetting.SplitHTTPSettings.Extra = json.RawMessage(cleaned)
+			}
 		}
 	default:
 		return errors.New("the network type is not vail")
 	}
 	return nil
+}
+
+// cleanInboundXHTTPExtra strips client-only dialer knobs (such as xmux, downloadSettings,
+// uplinkChunkSize, noGRPCHeader) before passing extra JSON to xray-core inbound listener.
+func cleanInboundXHTTPExtra(extraJSON string) string {
+	if extraJSON == "" {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(extraJSON), &m); err != nil {
+		return extraJSON
+	}
+	clientOnly := []string{
+		"xmux",
+		"downloadSettings",
+		"uplinkChunkSize",
+		"noGRPCHeader",
+	}
+	changed := false
+	for _, k := range clientOnly {
+		if _, ok := m[k]; ok {
+			delete(m, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return extraJSON
+	}
+	cleaned, err := json.Marshal(m)
+	if err != nil {
+		return extraJSON
+	}
+	return string(cleaned)
 }
 
 func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
@@ -388,6 +423,11 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 			Path: nodeInfo.Protocol.Path,
 			Mode: nodeInfo.Protocol.XHTTPMode,
 		}
+		if nodeInfo.Protocol.XHTTPExtra != "" {
+			if cleaned := cleanInboundXHTTPExtra(nodeInfo.Protocol.XHTTPExtra); cleaned != "" {
+				inbound.StreamSetting.SplitHTTPSettings.Extra = json.RawMessage(cleaned)
+			}
+		}
 	default:
 		return errors.New("the network type is not vail")
 	}
@@ -415,6 +455,22 @@ func buildTrojan(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	case "grpc":
 		inbound.StreamSetting.GRPCSettings = &coreConf.GRPCConfig{
 			ServiceName: nodeInfo.Protocol.ServiceName,
+		}
+	case "httpupgrade":
+		inbound.StreamSetting.HTTPUPGRADESettings = &coreConf.HttpUpgradeConfig{
+			Host: nodeInfo.Protocol.Host,
+			Path: nodeInfo.Protocol.Path,
+		}
+	case "splithttp", "xhttp":
+		inbound.StreamSetting.SplitHTTPSettings = &coreConf.SplitHTTPConfig{
+			Host: nodeInfo.Protocol.Host,
+			Path: nodeInfo.Protocol.Path,
+			Mode: nodeInfo.Protocol.XHTTPMode,
+		}
+		if nodeInfo.Protocol.XHTTPExtra != "" {
+			if cleaned := cleanInboundXHTTPExtra(nodeInfo.Protocol.XHTTPExtra); cleaned != "" {
+				inbound.StreamSetting.SplitHTTPSettings.Extra = json.RawMessage(cleaned)
+			}
 		}
 	default:
 		return errors.New("the network type is not vail")
