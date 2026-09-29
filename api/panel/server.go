@@ -114,6 +114,7 @@ type Outbound struct {
 	DomainStrategy string `json:"domain_strategy,omitempty"`
 
 	DialerProxy string `json:"dialer_proxy,omitempty"`
+	EchConfigList string `json:"ech_config_list,omitempty"`
 }
 
 type Balancer struct {
@@ -236,10 +237,12 @@ type Protocol struct {
 	EncryptionClientPadding string `json:"encryption_client_padding"`
 	EncryptionPassword      string `json:"encryption_password"`
 	CertMode                string `json:"cert_mode"`
-	CertFile                string `json:"cert_file"`
-	KeyFile                 string `json:"key_file"`
 	CertDNSProvider         string `json:"cert_dns_provider"`
 	CertDNSEnv              string `json:"cert_dns_env"`
+	CertFile                string `json:"cert_file"`
+	KeyFile                 string `json:"key_file"`
+	EchServerKeys           string `json:"ech_server_keys,omitempty"`
+	EchConfigList           string `json:"ech_config_list,omitempty"`
 	AcceptProxyProtocol     bool   `json:"accept_proxy_protocol"`
 
 	// Shared static credentials (used by SOCKS/HTTP if configured)

@@ -600,11 +600,16 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				security := outbounditem.Security
 				if security == "tls" {
 					streamSettings.Security = "tls"
-					streamSettings.TLSSettings = &coreConf.TLSConfig{
+					tlsConf := &coreConf.TLSConfig{
 						ServerName:    outbounditem.SNI,
 						AllowInsecure: outbounditem.AllowInsecure,
 						Fingerprint:   outbounditem.Fingerprint,
 					}
+					if outbounditem.EchConfigList != "" {
+						tlsConf.ECHConfigList = outbounditem.EchConfigList
+						tlsConf.MinVersion = "1.3"
+					}
+					streamSettings.TLSSettings = tlsConf
 				} else if security == "reality" {
 					streamSettings.Security = "reality"
 					streamSettings.REALITYSettings = &coreConf.REALITYConfig{

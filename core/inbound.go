@@ -136,6 +136,13 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 					},
 				},
 			}
+			if nodeInfo.Protocol.EchServerKeys != "" {
+				in.StreamSetting.TLSSettings.ECHServerKeys = nodeInfo.Protocol.EchServerKeys
+				if nodeInfo.Protocol.EchConfigList != "" {
+					in.StreamSetting.TLSSettings.ECHConfigList = nodeInfo.Protocol.EchConfigList
+				}
+				in.StreamSetting.TLSSettings.MinVersion = "1.3"
+			}
 		}
 	case "reality":
 		if in.StreamSetting == nil {
