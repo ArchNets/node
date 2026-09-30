@@ -606,6 +606,11 @@ func (w *AmneziaWGCore) setupNAT() error {
 		}
 	}
 
+	// Always add TCPMSS clamping rule for forwarded / outbound traffic to prevent MTU blackholing
+	if err := execCommand("iptables -w 5 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"); err != nil {
+		_ = execCommand("iptables -w 5 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
+	}
+
 	tproxySubnet := w.TProxySubnet
 	if tproxySubnet == "" { tproxySubnet = subnet }
 
@@ -687,6 +692,7 @@ func (w *AmneziaWGCore) teardownNAT() {
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand("iptables -w 5 -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
 
 	// Always clean up MASQUERADE (added in both paths)
 	if subnet != "" {

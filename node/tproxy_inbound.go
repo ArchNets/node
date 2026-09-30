@@ -39,8 +39,7 @@ func addTProxyInbound(xrayCore *vCore.XrayCore, tag string, tproxyPort int) (int
 			"followRedirect": true
 		},
 		"sniffing": {
-			"enabled": true,
-			"destOverride": []
+			"enabled": false
 		},
 		"streamSettings": {
 			"sockopt": {
