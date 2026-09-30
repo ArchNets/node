@@ -599,6 +599,12 @@ func (w *AmneziaWGCore) setupNAT() error {
 			log.WithError(err).Warn("Failed to add FORWARD output rule for AmneziaWG")
 		}
 	}
+	// Always add INPUT ACCEPT rule for the AWG interface (needed for local DNS like Technitium on 10.0.0.1:53)
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C INPUT -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -A INPUT -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+			log.WithError(err).Warn("Failed to add INPUT rule for AmneziaWG")
+		}
+	}
 
 	tproxySubnet := w.TProxySubnet
 	if tproxySubnet == "" { tproxySubnet = subnet }
@@ -677,9 +683,10 @@ func (w *AmneziaWGCore) teardownNAT() {
 		defaultIface = "eth0"
 	}
 
-	// Always clean up FORWARD rules (added in both paths)
+	// Always clean up FORWARD and INPUT rules (added in both paths)
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", w.InterfaceName))
 
 	// Always clean up MASQUERADE (added in both paths)
 	if subnet != "" {

@@ -315,13 +315,7 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 	// UDP :53 queries via the existing port-53 -> dns_out routing rule; DoH/DoT queries from
 	// clients bypass this DNS and are routed directly.
 	coreDnsConfig := &coreConf.DNSConfig{
-		Servers: []*coreConf.NameServerConfig{
-			{
-				Address: &coreConf.Address{
-					Address: xnet.ParseAddress("localhost"),
-				},
-			},
-		},
+		Servers:       []*coreConf.NameServerConfig{},
 		QueryStrategy: queryStrategy,
 	}
 
@@ -387,6 +381,22 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 			}
 			coreDnsConfig.Servers = append(coreDnsConfig.Servers, server)
 		}
+	}
+
+	// If no catch-all server was defined in custom DNS, append localhost fallback
+	hasCatchAll := false
+	for _, s := range coreDnsConfig.Servers {
+		if len(s.Domains) == 0 {
+			hasCatchAll = true
+			break
+		}
+	}
+	if !hasCatchAll {
+		coreDnsConfig.Servers = append(coreDnsConfig.Servers, &coreConf.NameServerConfig{
+			Address: &coreConf.Address{
+				Address: xnet.ParseAddress("localhost"),
+			},
+		})
 	}
 
 	//default outbound

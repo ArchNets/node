@@ -127,20 +127,30 @@ func TestGetCustomConfig_DNSProtocols(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, dnsCfg)
 
-	// Expected 1 default (localhost) + 7 valid items = 8 total
-	assert.Len(t, dnsCfg.NameServer, 8)
-
-	// Check default localhost nameserver is first
-	assert.Equal(t, "localhost", dnsCfg.NameServer[0].Address.Address.AsAddress().String())
+	// 7 valid custom items (custom DNS takes priority over localhost fallback)
+	assert.Len(t, dnsCfg.NameServer, 7)
 
 	// Check formatted addresses
-	assert.Equal(t, "1.1.1.1", dnsCfg.NameServer[1].Address.Address.AsAddress().String())
-	assert.Equal(t, "tcp://1.0.0.1", dnsCfg.NameServer[2].Address.Address.AsAddress().String())
-	assert.Equal(t, "tls://1.1.1.1:853", dnsCfg.NameServer[3].Address.Address.AsAddress().String())
-	assert.Equal(t, "https://1.1.1.1/dns-query", dnsCfg.NameServer[4].Address.Address.AsAddress().String())
-	assert.Equal(t, "quic://dns.adguard.com", dnsCfg.NameServer[5].Address.Address.AsAddress().String())
-	assert.Equal(t, "localhost", dnsCfg.NameServer[6].Address.Address.AsAddress().String())
-	assert.Equal(t, "8.8.8.8", dnsCfg.NameServer[7].Address.Address.AsAddress().String())
+	assert.Equal(t, "1.1.1.1", dnsCfg.NameServer[0].Address.Address.AsAddress().String())
+	assert.Equal(t, "tcp://1.0.0.1", dnsCfg.NameServer[1].Address.Address.AsAddress().String())
+	assert.Equal(t, "tls://1.1.1.1:853", dnsCfg.NameServer[2].Address.Address.AsAddress().String())
+	assert.Equal(t, "https://1.1.1.1/dns-query", dnsCfg.NameServer[3].Address.Address.AsAddress().String())
+	assert.Equal(t, "quic://dns.adguard.com", dnsCfg.NameServer[4].Address.Address.AsAddress().String())
+	assert.Equal(t, "localhost", dnsCfg.NameServer[5].Address.Address.AsAddress().String())
+	assert.Equal(t, "8.8.8.8", dnsCfg.NameServer[6].Address.Address.AsAddress().String())
+}
+
+func TestGetCustomConfig_DNSFallbackLocalhost(t *testing.T) {
+	// When no custom DNS configured, should fall back to localhost
+	serverConfig := &panel.ServerConfigResponse{
+		Data: &panel.Data{},
+	}
+
+	dnsCfg, _, _, _, err := GetCustomConfig(serverConfig)
+	assert.NoError(t, err)
+	assert.NotNil(t, dnsCfg)
+	assert.Len(t, dnsCfg.NameServer, 1)
+	assert.Equal(t, "localhost", dnsCfg.NameServer[0].Address.Address.AsAddress().String())
 }
 
 func TestGetCustomConfig_DirectOutboundAndRouting(t *testing.T) {

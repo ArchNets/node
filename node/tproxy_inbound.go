@@ -40,7 +40,7 @@ func addTProxyInbound(xrayCore *vCore.XrayCore, tag string, tproxyPort int) (int
 		},
 		"sniffing": {
 			"enabled": true,
-			"destOverride": ["http", "tls", "quic"]
+			"destOverride": []
 		},
 		"streamSettings": {
 			"sockopt": {
