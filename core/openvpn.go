@@ -609,14 +609,22 @@ func (o *OpenVPNCore) setupNAT() error {
 	}
 
 	// Always add FORWARD ACCEPT rules for the OpenVPN interface
+	// Use -I 1 so they take precedence over UFW or firewall DROP rules
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -j ACCEPT", o.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -j ACCEPT", o.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -j ACCEPT", o.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD input rule for OpenVPN")
 		}
 	}
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -j ACCEPT", o.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -j ACCEPT", o.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -j ACCEPT", o.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD output rule for OpenVPN")
+		}
+	}
+	// Always add INPUT ACCEPT rule for the OpenVPN interface (needed for local DNS like Technitium on local IP)
+	// Use -I INPUT 1 so it takes precedence over UFW/default DROP rules
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C INPUT -i %s -j ACCEPT", o.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -j ACCEPT", o.InterfaceName)); err != nil {
+			log.WithError(err).Warn("Failed to add INPUT rule for OpenVPN")
 		}
 	}
 
@@ -721,6 +729,7 @@ func (o *OpenVPNCore) teardownNAT() {
 		defaultIface = "eth0"
 	}
 
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", o.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", o.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", o.InterfaceName))
 

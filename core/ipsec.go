@@ -816,6 +816,25 @@ func (c *IPsecCore) setupNAT() error {
 	tproxySubnet := c.TProxySubnet
 	if tproxySubnet == "" { tproxySubnet = c.getSubnet() }
 
+	// Forwarding & Input rules for VPN subnet
+	// Use -I 1 so they take precedence over UFW or firewall DROP rules
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -s %s -j ACCEPT", subnet)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -s %s -j ACCEPT", subnet)); err != nil {
+			log.WithError(err).Warn("Failed to add FORWARD input rule for IPsec")
+		}
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -d %s -j ACCEPT", subnet)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -d %s -j ACCEPT", subnet)); err != nil {
+			log.WithError(err).Warn("Failed to add FORWARD output rule for IPsec")
+		}
+	}
+	// Always add INPUT ACCEPT rule for the IPsec subnet (needed for local DNS like Technitium)
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -C INPUT -s %s -j ACCEPT", subnet)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I INPUT 1 -s %s -j ACCEPT", subnet)); err != nil {
+			log.WithError(err).Warn("Failed to add INPUT rule for IPsec")
+		}
+	}
+
 	if c.DropICMPUnreachable {
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet)); err != nil {
 			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
@@ -879,6 +898,10 @@ func (c *IPsecCore) setupNAT() error {
 // teardownNAT removes NAT/TPROXY rules for the VPN subnet
 func (c *IPsecCore) teardownNAT() {
 	subnet := c.getSubnet()
+
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -s %s -j ACCEPT", subnet))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -j ACCEPT", subnet))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -d %s -j ACCEPT", subnet))
 
 	if c.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))

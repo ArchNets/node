@@ -593,19 +593,21 @@ func (w *AmneziaWGCore) setupNAT() error {
 	}
 
 	// Always add FORWARD ACCEPT rules for the AWG interface (needed in both paths)
+	// Use -I 1 so they are placed before any UFW or firewall DROP rules
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD input rule for AmneziaWG")
 		}
 	}
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add FORWARD output rule for AmneziaWG")
 		}
 	}
 	// Always add INPUT ACCEPT rule for the AWG interface (needed for local DNS like Technitium on 10.0.0.1:53)
+	// Use -I INPUT 1 so it takes precedence over UFW/default DROP rules
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -C INPUT -i %s -j ACCEPT", w.InterfaceName)); err != nil {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -A INPUT -i %s -j ACCEPT", w.InterfaceName)); err != nil {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -j ACCEPT", w.InterfaceName)); err != nil {
 			log.WithError(err).Warn("Failed to add INPUT rule for AmneziaWG")
 		}
 	}
