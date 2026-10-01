@@ -303,9 +303,11 @@ type Protocol struct {
 	IPsecMTU         int    `json:"ipsec_mtu"`          // MTU for L2TP PPP links (default: 1400)
 
 	// Per-inbound TPROXY fields (provided by backend)
-	EnableTProxy  bool   `json:"enable_tproxy"`
-	TProxySubnet  string `json:"tproxy_subnet"`
-	TProxyPort    int    `json:"tproxy_port"`
+	EnableTProxy        bool   `json:"enable_tproxy"`
+	TProxySubnet        string `json:"tproxy_subnet"`
+	TProxyPort          int    `json:"tproxy_port"`
+	TProxyBypassUDP     bool   `json:"tproxy_bypass_udp"`
+	DropICMPUnreachable bool   `json:"drop_icmp_unreachable"`
 
 	// OpenVPN-specific fields
 	OpenVPNSubnet   string `json:"openvpn_subnet"`

@@ -112,11 +112,17 @@ func (c *IPsecController) Start() error {
 
 	// Create and start IPsec core
 	c.ipsecCore = vCore.NewIPsecCore(cfg)
+	c.ipsecCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
 
 	if c.info.Protocol.EnableTProxy {
 		tproxyPort, err := addTProxyInbound(c.xrayCore, c.xrayTag, c.info.Protocol.TProxyPort)
 		if err != nil { return err }
-		c.ipsecCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
+		c.ipsecCore.SetTProxyConfig(
+			tproxyPort,
+			c.info.Protocol.TProxySubnet,
+			c.info.Protocol.TProxyBypassUDP,
+			c.info.Protocol.DropICMPUnreachable,
+		)
 	}
 
 	if err := c.ipsecCore.Start(); err != nil {

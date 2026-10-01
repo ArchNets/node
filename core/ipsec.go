@@ -42,8 +42,10 @@ type IPsecConfig struct {
 // IPsecCore manages strongSwan IKEv2 and xl2tpd L2TP servers.
 type IPsecCore struct {
 	IPsecConfig
-	TProxyPort int // Xray TPROXY port for routing traffic
-	TProxySubnet   string
+	TProxyPort          int // Xray TPROXY port for routing traffic
+	TProxySubnet        string
+	TProxyBypassUDP     bool
+	DropICMPUnreachable bool
 
 	mu    sync.RWMutex
 	users map[int]*IPsecUser // key: subscription ID
@@ -799,10 +801,12 @@ func (c *IPsecCore) stopXl2tpd() {
 	}
 }
 
-// SetTProxyPort sets the local Xray port to route traffic to.
-func (c *IPsecCore) SetTProxyConfig(port int, subnet string) {
+// SetTProxyConfig sets the local Xray port to route traffic to, subnet, and routing options.
+func (c *IPsecCore) SetTProxyConfig(port int, subnet string, bypassUDP bool, dropICMP bool) {
 	c.TProxyPort = port
 	c.TProxySubnet = subnet
+	c.TProxyBypassUDP = bypassUDP
+	c.DropICMPUnreachable = dropICMP
 }
 
 // setupNAT configures TPROXY or MASQUERADE for the VPN subnet
@@ -811,6 +815,15 @@ func (c *IPsecCore) setupNAT() error {
 
 	tproxySubnet := c.TProxySubnet
 	if tproxySubnet == "" { tproxySubnet = c.getSubnet() }
+
+	if c.DropICMPUnreachable {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -d %s -p icmp --icmp-type destination-unreachable -j DROP", subnet)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -d %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+		}
+	}
 
 	if c.TProxyPort > 0 {
 		// TPROXY mode: route VPN traffic through Xray.
@@ -822,30 +835,40 @@ func (c *IPsecCore) setupNAT() error {
 		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
 
 		// Create chain in mangle table (ignore error if exists)
-		if err := exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)).Run(); err != nil {
-			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName)).Run()
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -N %s", chainName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
 		}
 
 		// Skip traffic destined to VPN subnet itself
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet)).Run()
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet))
 
 		// TPROXY capture rules for TCP and UDP
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort)).Run()
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort))
+		if !c.TProxyBypassUDP {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort))
+		} else {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j RETURN", chainName))
+		}
 
 		// Apply to PREROUTING for packets from VPN subnet
 		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -s %s -j %s", subnet, chainName)
-		if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
-			_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -s %s -j %s", subnet, chainName)).Run()
+		if err := execCommand(checkCmd); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -s %s -j %s", subnet, chainName))
+		}
+
+		// Also add MASQUERADE for the subnet so bypassed UDP or outbound traffic is NATed
+		checkNatCmd := fmt.Sprintf("iptables -w 5 -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
+		if err := execCommand(checkNatCmd); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet))
 		}
 
 		log.WithFields(log.Fields{"tag": c.Tag, "port": c.TProxyPort}).Info("IPsec TPROXY routing enabled")
 	} else {
 		// Standard masquerade (direct internet)
 		checkCmd := fmt.Sprintf("iptables -w 5 -t nat -C POSTROUTING -s %s -j MASQUERADE", subnet)
-		if err := exec.Command("sh", "-c", checkCmd).Run(); err != nil {
+		if err := execCommand(checkCmd); err != nil {
 			addCmd := fmt.Sprintf("iptables -w 5 -t nat -A POSTROUTING -s %s -j MASQUERADE", subnet)
-			if err := exec.Command("sh", "-c", addCmd).Run(); err != nil {
+			if err := execCommand(addCmd); err != nil {
 				return err
 			}
 		}
@@ -857,13 +880,18 @@ func (c *IPsecCore) setupNAT() error {
 func (c *IPsecCore) teardownNAT() {
 	subnet := c.getSubnet()
 
+	if c.DropICMPUnreachable {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -d %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+	}
+
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet))
+
 	if c.TProxyPort > 0 {
 		chainName := fmt.Sprintf("XRAY_IPSEC_%s", c.Tag)
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -s %s -j %s", subnet, chainName)).Run()
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName)).Run()
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t mangle -X %s", chainName)).Run()
-	} else {
-		_ = exec.Command("sh", "-c", fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet)).Run()
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -s %s -j %s", subnet, chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -X %s", chainName))
 	}
 }
 

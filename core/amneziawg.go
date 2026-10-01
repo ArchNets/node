@@ -53,14 +53,18 @@ type AmneziaWGCore struct {
 	traffic        map[int]*UserTraffic // key: uid
 	lastPeerStats  map[string]*peerStats
 	statsCollector *amneziaStatsCollectorTask
-	TProxyPort     int
-	TProxySubnet   string
+	TProxyPort          int
+	TProxySubnet        string
+	TProxyBypassUDP     bool
+	DropICMPUnreachable bool
 }
 
-// SetTProxyPort sets the local Xray port to route traffic to
-func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string) {
+// SetTProxyConfig sets the local Xray port to route traffic to, subnet, and routing options
+func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string, bypassUDP bool, dropICMP bool) {
 	w.TProxyPort = port
 	w.TProxySubnet = subnet
+	w.TProxyBypassUDP = bypassUDP
+	w.DropICMPUnreachable = dropICMP
 }
 
 // Reuse structs from wireguard.go where possible or redefine if private
@@ -611,6 +615,16 @@ func (w *AmneziaWGCore) setupNAT() error {
 		_ = execCommand("iptables -w 5 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
 	}
 
+	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
+	if w.DropICMPUnreachable {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		}
+	}
+
 	tproxySubnet := w.TProxySubnet
 	if tproxySubnet == "" { tproxySubnet = subnet }
 
@@ -642,12 +656,17 @@ func (w *AmneziaWGCore) setupNAT() error {
 				"err":   err,
 			}).Error("Failed to add TPROXY TCP rule — AmneziaWG traffic will not be routed through Xray")
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
-			log.WithFields(log.Fields{
-				"chain": chainName,
-				"port":  w.TProxyPort,
-				"err":   err,
-			}).Error("Failed to add TPROXY UDP rule — AmneziaWG traffic will not be routed through Xray")
+		if !w.TProxyBypassUDP {
+			if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, w.TProxyPort)); err != nil {
+				log.WithFields(log.Fields{
+					"chain": chainName,
+					"port":  w.TProxyPort,
+					"err":   err,
+				}).Error("Failed to add TPROXY UDP rule — AmneziaWG traffic will not be routed through Xray")
+			}
+		} else {
+			// Explicitly RETURN so UDP packets bypass mangle TPROXY and fall through to standard kernel MASQUERADE
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j RETURN", chainName))
 		}
 
 		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -j %s", w.InterfaceName, chainName)
@@ -693,6 +712,11 @@ func (w *AmneziaWGCore) teardownNAT() {
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand("iptables -w 5 -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
+
+	if w.DropICMPUnreachable {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+	}
 
 	// Always clean up MASQUERADE (added in both paths)
 	if subnet != "" {

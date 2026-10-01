@@ -42,6 +42,11 @@ type AmneziaWGCore struct {
 
 	trafficMu sync.RWMutex
 	traffic   map[int]*UserTraffic
+
+	TProxyPort          int
+	TProxySubnet        string
+	TProxyBypassUDP     bool
+	DropICMPUnreachable bool
 }
 
 // NewAmneziaWGCore creates a new AmneziaWG VPN server
@@ -83,5 +88,5 @@ func (w *AmneziaWGCore) SetLimiter(l *limiter.Limiter) {
 }
 
 // SetTProxyConfig sets the TPROXY config (stub for FreeBSD)
-func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string) {
+func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string, bypassUDP bool, dropICMP bool) {
 }

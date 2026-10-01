@@ -38,8 +38,10 @@ type OpenVPNCore struct {
 	KeyFile       string // real key path, optional
 	TlsCryptKey   string // tls-crypt static key content, optional
 	InterfaceName string
-	TProxyPort    int
-	TProxySubnet   string
+	TProxyPort          int
+	TProxySubnet        string
+	TProxyBypassUDP     bool
+	DropICMPUnreachable bool
 
 	cmd        *exec.Cmd
 	mgmt       *ovpnMgmtClient
@@ -565,9 +567,11 @@ func waitForManagementSocket(path string, timeout time.Duration) (*ovpnMgmtClien
 	return nil, fmt.Errorf("timed out waiting for management socket at %s", path)
 }
 
-func (o *OpenVPNCore) SetTProxyConfig(port int, subnet string) {
+func (o *OpenVPNCore) SetTProxyConfig(port int, subnet string, bypassUDP bool, dropICMP bool) {
 	o.TProxyPort = port
 	o.TProxySubnet = subnet
+	o.TProxyBypassUDP = bypassUDP
+	o.DropICMPUnreachable = dropICMP
 }
 
 // makeReadableByUnprivilegedUser makes a secret file readable by the
@@ -616,6 +620,16 @@ func (o *OpenVPNCore) setupNAT() error {
 		}
 	}
 
+	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
+	if o.DropICMPUnreachable {
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		}
+	}
+
 	tproxySubnet := o.TProxySubnet
 	if tproxySubnet == "" { tproxySubnet = subnet }
 
@@ -651,12 +665,17 @@ func (o *OpenVPNCore) setupNAT() error {
 				"err":   err,
 			}).Error("Failed to add TPROXY TCP rule — OpenVPN traffic will not be routed through Xray")
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, o.TProxyPort)); err != nil {
-			log.WithFields(log.Fields{
-				"chain": chainName,
-				"port":  o.TProxyPort,
-				"err":   err,
-			}).Error("Failed to add TPROXY UDP rule — OpenVPN traffic will not be routed through Xray")
+		if !o.TProxyBypassUDP {
+			if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j TPROXY --on-port %d --tproxy-mark 1", chainName, o.TProxyPort)); err != nil {
+				log.WithFields(log.Fields{
+					"chain": chainName,
+					"port":  o.TProxyPort,
+					"err":   err,
+				}).Error("Failed to add TPROXY UDP rule — OpenVPN traffic will not be routed through Xray")
+			}
+		} else {
+			// Explicitly RETURN so UDP packets bypass mangle TPROXY and fall through to standard kernel MASQUERADE
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p udp -j RETURN", chainName))
 		}
 
 		// Apply chain to PREROUTING
@@ -704,6 +723,11 @@ func (o *OpenVPNCore) teardownNAT() {
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", o.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", o.InterfaceName))
+
+	if o.DropICMPUnreachable {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+	}
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
 

@@ -120,11 +120,17 @@ func (c *AmneziaWGController) Start() error {
 	}
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
+	c.wgCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
 	// Inject Xray TPROXY Inbound
 	if c.info.Protocol.EnableTProxy {
 		tproxyPort, err := addTProxyInbound(c.xrayCore, c.tag, c.info.Protocol.TProxyPort)
 		if err != nil { return err }
-		c.wgCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
+		c.wgCore.SetTProxyConfig(
+			tproxyPort,
+			c.info.Protocol.TProxySubnet,
+			c.info.Protocol.TProxyBypassUDP,
+			c.info.Protocol.DropICMPUnreachable,
+		)
 	}
 
 	// Start server

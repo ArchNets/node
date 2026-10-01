@@ -123,6 +123,8 @@ func (c *OpenVPNController) Start() error {
 	}
 	c.openvpnCore = openvpnCore
 
+	c.openvpnCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
+
 	// Route OpenVPN client traffic through Xray's routing engine via TPROXY.
 	// If inbound registration fails, deliberately fall back to plain
 	// MASQUERADE NAT (TProxyPort stays 0) instead of failing the node:
@@ -133,7 +135,12 @@ func (c *OpenVPNController) Start() error {
 			log.WithError(err).WithField("tag", c.xrayTag).Error(
 				"TPROXY setup failed — OpenVPN will use MASQUERADE only")
 		} else {
-			c.openvpnCore.SetTProxyConfig(tproxyPort, c.info.Protocol.TProxySubnet)
+			c.openvpnCore.SetTProxyConfig(
+				tproxyPort,
+				c.info.Protocol.TProxySubnet,
+				c.info.Protocol.TProxyBypassUDP,
+				c.info.Protocol.DropICMPUnreachable,
+			)
 			c.tproxyEnabled = true
 			log.WithFields(log.Fields{"tag": c.xrayTag, "tproxyPort": tproxyPort}).Info("OpenVPN TPROXY inbound registered")
 		}

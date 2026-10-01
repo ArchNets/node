@@ -30,6 +30,11 @@ type WireGuardCore struct {
 
 	trafficMu sync.RWMutex
 	traffic   map[int]*UserTraffic
+
+	TProxyPort          int
+	TProxySubnet        string
+	TProxyBypassUDP     bool
+	DropICMPUnreachable bool
 }
 
 // NewWireGuardCore creates a new WireGuard VPN server
@@ -71,5 +76,5 @@ func (w *WireGuardCore) SetLimiter(l *limiter.Limiter) {
 }
 
 // SetTProxyConfig sets the TPROXY config (stub for FreeBSD)
-func (w *WireGuardCore) SetTProxyConfig(port int, subnet string) {
+func (w *WireGuardCore) SetTProxyConfig(port int, subnet string, bypassUDP bool, dropICMP bool) {
 }
