@@ -22,23 +22,21 @@ type AmneziaWGController struct {
 
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
-	userReportPeriodic      *task.Task
-	protocolIndex           int
-	perProtocolUserList     bool
-	isPrimaryReporter       bool
-	xrayCore                *vCore.XrayCore
+	userReportPeriodic *task.Task
+	protocolIndex      int
+	isPrimaryReporter  bool
+	xrayCore           *vCore.XrayCore
 }
 
 // NewAmneziaWGController creates a new AmneziaWG controller
-func NewAmneziaWGController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *AmneziaWGController {
+func NewAmneziaWGController(core *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *AmneziaWGController {
 	return &AmneziaWGController{
-		tag:                 generateAmneziaWGTag(info),
-		info:                info,
-		apiClient:           apiClient,
-		protocolIndex:       protocolIndex,
-		perProtocolUserList: perProtocolUserList,
-		isPrimaryReporter:   isPrimaryReporter,
-		xrayCore:            core,
+		tag:               generateAmneziaWGTag(info),
+		info:              info,
+		apiClient:         apiClient,
+		protocolIndex:     protocolIndex,
+		isPrimaryReporter: isPrimaryReporter,
+		xrayCore:          core,
 	}
 }
 
@@ -49,12 +47,7 @@ func generateAmneziaWGTag(info *panel.NodeInfo) string {
 // Start starts the AmneziaWG controller
 func (c *AmneziaWGController) Start() error {
 	// Get initial user list
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
@@ -198,12 +191,7 @@ func (c *AmneziaWGController) startTasks() {
 
 func (c *AmneziaWGController) userListMonitor() error {
 	// Get updated user list
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{

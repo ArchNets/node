@@ -22,21 +22,19 @@ type SSHController struct {
 
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
-	userReportPeriodic      *task.Task
-	protocolIndex           int
-	perProtocolUserList     bool
-	isPrimaryReporter       bool
+	userReportPeriodic *task.Task
+	protocolIndex      int
+	isPrimaryReporter  bool
 }
 
 // NewSSHController creates a new SSH controller
-func NewSSHController(apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *SSHController {
+func NewSSHController(apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *SSHController {
 	return &SSHController{
-		tag:                 generateSSHTag(info),
-		info:                info,
-		apiClient:           apiClient,
-		protocolIndex:       protocolIndex,
-		perProtocolUserList: perProtocolUserList,
-		isPrimaryReporter:   isPrimaryReporter,
+		tag:               generateSSHTag(info),
+		info:              info,
+		apiClient:         apiClient,
+		protocolIndex:     protocolIndex,
+		isPrimaryReporter: isPrimaryReporter,
 	}
 }
 
@@ -52,12 +50,7 @@ func (c *SSHController) Start() error {
 	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
 
 	for i := 0; i <= len(backoffs); i++ {
-		var protoName string
-		if c.perProtocolUserList {
-			protoName = c.getIndexedProtocolName()
-		} else {
-			protoName = c.info.Type
-		}
+		protoName := c.getIndexedProtocolName()
 		users, err = c.apiClient.GetUserList(protoName)
 		if err == nil {
 			break
@@ -161,12 +154,7 @@ func (c *SSHController) startTasks() {
 
 func (c *SSHController) userListMonitor() error {
 	// Get updated user list
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{

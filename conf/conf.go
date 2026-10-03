@@ -42,16 +42,25 @@ func New() *Conf {
 			Output: "",
 			Access: "none",
 		},
+		ApiConfig: ServerApiConfig{
+			PerProtocolUserList: true,
+		},
 	}
 }
 
 func (p *Conf) LoadFromPath(filePath string) error {
 	v := viper.New()
 	v.SetConfigFile(filePath)
+	v.SetDefault("Api.PerProtocolUserList", true)
 	if err := v.ReadInConfig(); err == nil {
 		if err := v.Unmarshal(p); err != nil {
 			return fmt.Errorf("unmarshal config error: %s", err)
 		}
+	}
+
+	// Ensure PerProtocolUserList defaults to true if not explicitly configured
+	if !v.IsSet("Api.PerProtocolUserList") {
+		p.ApiConfig.PerProtocolUserList = true
 	}
 
 	// Environment variable overrides for Docker & Railway

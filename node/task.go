@@ -60,12 +60,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 
 func (c *Controller) userListMonitor() (err error) {
 	// get user info
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	newU, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{

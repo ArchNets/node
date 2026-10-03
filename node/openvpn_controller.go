@@ -27,23 +27,21 @@ type OpenVPNController struct {
 
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
-	userReportPeriodic      *task.Task
-	protocolIndex           int
-	perProtocolUserList     bool
-	isPrimaryReporter       bool
-	tproxyEnabled           bool
+	userReportPeriodic *task.Task
+	protocolIndex      int
+	isPrimaryReporter  bool
+	tproxyEnabled      bool
 }
 
-func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *OpenVPNController {
+func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *OpenVPNController {
 	return &OpenVPNController{
-		tag:                 generateOpenVPNTag(info),
-		xrayTag:             generateOpenVPNXrayTag(info),
-		info:                info,
-		apiClient:           apiClient,
-		xrayCore:            xrayCore,
-		protocolIndex:       protocolIndex,
-		perProtocolUserList: perProtocolUserList,
-		isPrimaryReporter:   isPrimaryReporter,
+		tag:               generateOpenVPNTag(info),
+		xrayTag:           generateOpenVPNXrayTag(info),
+		info:              info,
+		apiClient:         apiClient,
+		xrayCore:          xrayCore,
+		protocolIndex:     protocolIndex,
+		isPrimaryReporter: isPrimaryReporter,
 	}
 }
 
@@ -68,12 +66,7 @@ func generateOpenVPNXrayTag(info *panel.NodeInfo) string {
 
 // Start starts the OpenVPN controller.
 func (c *OpenVPNController) Start() error {
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithError(err).Warn("Failed to fetch initial user list, starting with empty list")
@@ -204,12 +197,7 @@ func (c *OpenVPNController) startTasks() {
 }
 
 func (c *OpenVPNController) userListMonitor() error {
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("OpenVPN: Get user list failed")

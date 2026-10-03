@@ -109,19 +109,19 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 
 		// Handle SSH protocol separately
 		if nodeconfig.Type == "ssh" {
-			node.sshControllers = append(node.sshControllers, NewSSHController(p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.sshControllers = append(node.sshControllers, NewSSHController(p, n, protocolIndex, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "ssh",
 				"port": nodeconfig.Port,
 			}).Info("SSH protocol detected, using SSH controller")
 		} else if nodeconfig.Type == "wireguard" {
-			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.wireguardControllers = append(node.wireguardControllers, NewWireGuardController(core, p, n, protocolIndex, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "wireguard",
 				"port": nodeconfig.Port,
 			}).Info("WireGuard protocol detected, using WireGuard controller")
 		} else if nodeconfig.Type == "amneziawg" {
-			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.amneziawgControllers = append(node.amneziawgControllers, NewAmneziaWGController(core, p, n, protocolIndex, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "amneziawg",
 				"port": nodeconfig.Port,
@@ -137,25 +137,25 @@ func New(core *vCore.XrayCore, config *conf.Conf, serverconfig *panel.ServerConf
 			n.Protocol = &cfg
 			// What changed: Passed Xray core instance to NewShadowTLSController.
 			// Why: Allows ShadowTLS controller to auto-provision and manage the inner Shadowsocks inbound on Xray core.
-			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.shadowtlsControllers = append(node.shadowtlsControllers, NewShadowTLSController(core, p, n, protocolIndex, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "shadowtls",
 				"port": nodeconfig.Port,
 			}).Info("ShadowTLS protocol detected, using ShadowTLS controller")
 		} else if nodeconfig.Type == "ikev2" || nodeconfig.Type == "l2tp" || nodeconfig.Type == "ipsec" {
-			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.ipsecControllers = append(node.ipsecControllers, NewIPsecController(core, p, n, protocolIndex, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": nodeconfig.Type,
 				"port": nodeconfig.Port,
 			}).Info("IPsec/IKEv2 protocol detected, using IPsec controller")
 		} else if nodeconfig.Type == "openvpn" {
-			node.openvpnControllers = append(node.openvpnControllers, NewOpenVPNController(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.openvpnControllers = append(node.openvpnControllers, NewOpenVPNController(core, p, n, protocolIndex, isPrimaryReporter))
 			log.WithFields(log.Fields{
 				"type": "openvpn",
 				"port": nodeconfig.Port,
 			}).Info("OpenVPN protocol detected, using OpenVPN controller")
 		} else {
-			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, config.ApiConfig.PerProtocolUserList, isPrimaryReporter))
+			node.xrayControllers = append(node.xrayControllers, NewControllerWithIndex(core, p, n, protocolIndex, isPrimaryReporter))
 		}
 	}
 

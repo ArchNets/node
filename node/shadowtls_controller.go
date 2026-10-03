@@ -30,20 +30,18 @@ type ShadowTLSController struct {
 	userListMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	protocolIndex           int
-	perProtocolUserList     bool
 	isPrimaryReporter       bool
 }
 
 // NewShadowTLSController creates a new ShadowTLS controller
-func NewShadowTLSController(server *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, perProtocolUserList bool, isPrimaryReporter bool) *ShadowTLSController {
+func NewShadowTLSController(server *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *ShadowTLSController {
 	return &ShadowTLSController{
-		server:              server,
-		tag:                 generateShadowTLSTag(info),
-		info:                info,
-		apiClient:           apiClient,
-		protocolIndex:       protocolIndex,
-		perProtocolUserList: perProtocolUserList,
-		isPrimaryReporter:   isPrimaryReporter,
+		server:            server,
+		tag:               generateShadowTLSTag(info),
+		info:              info,
+		apiClient:         apiClient,
+		protocolIndex:     protocolIndex,
+		isPrimaryReporter: isPrimaryReporter,
 	}
 }
 
@@ -63,12 +61,7 @@ func (c *ShadowTLSController) Start() error {
 	}
 
 	// Get initial user list
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		return err
@@ -235,12 +228,7 @@ func (c *ShadowTLSController) startTasks() {
 
 func (c *ShadowTLSController) userListMonitor() error {
 	// Get updated user list
-	var protoName string
-	if c.perProtocolUserList {
-		protoName = c.getIndexedProtocolName()
-	} else {
-		protoName = c.info.Type
-	}
+	protoName := c.getIndexedProtocolName()
 	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
 		log.WithFields(log.Fields{
