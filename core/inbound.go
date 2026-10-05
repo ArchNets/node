@@ -551,10 +551,29 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 
 func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "hysteria"
-	settings := &coreConf.HysteriaServerConfig{}
+	settings := &coreConf.HysteriaServerConfig{
+		Version: 2,
+	}
 
 	t := coreConf.TransportProtocol("hysteria")
-	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
+	inbound.StreamSetting = &coreConf.StreamConfig{
+		Network: &t,
+		HysteriaSettings: &coreConf.HysteriaConfig{
+			Version: 2,
+		},
+	}
+
+	if strings.EqualFold(nodeInfo.Protocol.Obfs, "salamander") && nodeInfo.Protocol.ObfsPassword != "" {
+		raw := json.RawMessage(fmt.Sprintf(`{"password":%q}`, nodeInfo.Protocol.ObfsPassword))
+		inbound.StreamSetting.FinalMask = &coreConf.FinalMask{
+			Udp: []coreConf.Mask{
+				{
+					Type:     "salamander",
+					Settings: &raw,
+				},
+			},
+		}
+	}
 
 	sets, err := json.Marshal(settings)
 	inbound.Settings = (*json.RawMessage)(&sets)
@@ -603,7 +622,35 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	return nil
 }
 
+func isSockoptEmpty(s *panel.Sockopt) bool {
+	if s == nil {
+		return true
+	}
+	return s.Mark == 0 &&
+		!s.TCPFastOpen &&
+		s.TCPKeepAliveInterval == 0 &&
+		s.TCPKeepAliveIdle == 0 &&
+		s.TCPMaxSeg == 0 &&
+		s.TCPUserTimeout == 0 &&
+		s.TCPWindowClamp == 0 &&
+		!s.Mptcp &&
+		!s.Penetrate &&
+		!s.V6Only &&
+		s.DomainStrategy == "" &&
+		s.TCPCongestion == "" &&
+		s.TProxy == "" &&
+		s.DialerProxy == "" &&
+		s.InterfaceName == "" &&
+		len(s.TrustedXForwardedFor) == 0 &&
+		s.AddressPortStrategy == "" &&
+		!s.HappyEyeballs &&
+		s.CustomSockopt == ""
+}
+
 func mapSockopt(s *panel.Sockopt) *coreConf.SocketConfig {
+	if isSockoptEmpty(s) {
+		return nil
+	}
 	cfg := &coreConf.SocketConfig{
 		Mark:                 int32(s.Mark),
 		TProxy:               s.TProxy,
