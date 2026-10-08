@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -25,6 +26,16 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	log.WithField("node", c.tag).Info("User list monitor task started")
 	_ = c.userReportPeriodic.Start(false)
 	log.WithField("node", c.tag).Info("User traffic report task started")
+
+	if c.isPrimaryReporter {
+		c.serviceProbePeriodic = &task.Task{
+			Interval: 10 * time.Minute,
+			Execute:  c.serviceProbeTask,
+		}
+		_ = c.serviceProbePeriodic.Start(true)
+		log.WithField("node", c.tag).Info("Service probe task started (10m interval)")
+	}
+
 	var security string
 	switch node.Type {
 	case "vless":
@@ -241,6 +252,49 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	}
 
 	userTraffic = nil
+	return nil
+}
+
+func (c *Controller) serviceProbeTask() error {
+	if !c.isPrimaryReporter || c.server == nil {
+		return nil
+	}
+
+	targets, err := c.apiClient.GetServicesToProbe()
+	if err != nil {
+		log.WithFields(log.Fields{"node": c.tag, "err": err}).Warn("GetServicesToProbe failed")
+		return nil
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	outbounds := c.server.GetConfiguredOutboundTags()
+	var probes []panel.NodeServiceProbeItem
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	for _, ob := range outbounds {
+		for _, tgt := range targets {
+			res := c.server.ProbeServiceOutbound(ctx, ob, tgt.Key, tgt.TestUrl)
+			probes = append(probes, panel.NodeServiceProbeItem{
+				OutboundTag: res.OutboundTag,
+				ServiceKey:  res.ServiceKey,
+				Status:      res.Status,
+				LatencyMs:   res.LatencyMs,
+				HttpCode:    res.HttpCode,
+				Message:     res.Message,
+			})
+		}
+	}
+
+	if len(probes) > 0 {
+		if err := c.apiClient.ReportServiceProbes(c.info.Id, probes); err != nil {
+			log.WithFields(log.Fields{"node": c.tag, "err": err}).Warn("ReportServiceProbes failed")
+		} else {
+			log.WithField("node", c.tag).Infof("Reported %d service probe results across %d outbounds", len(probes), len(outbounds))
+		}
+	}
 	return nil
 }
 

@@ -23,6 +23,7 @@ type Controller struct {
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
 	onlineIpReportPeriodic  *task.Task
+	serviceProbePeriodic    *task.Task
 	isPrimaryReporter       bool // true if this controller is responsible for reporting status/online users
 }
 
