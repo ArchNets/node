@@ -209,7 +209,7 @@ func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destinati
 	} else {
 		return nil, true
 	}
-	if (noSSUDP || l.Nodetype == "hysteria2") && !skipDeviceLimit {
+	if (noSSUDP || l.Nodetype == "hysteria2" || l.Nodetype == "hysteria") && !skipDeviceLimit {
 		// Store online user for device limit
 		ipMap := new(sync.Map)
 		ipMap.Store(ip, uid)
