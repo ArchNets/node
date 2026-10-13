@@ -426,6 +426,10 @@ func (w *WireGuardCore) configureInterface() error {
 		return fmt.Errorf("failed to bring interface up: %w", err)
 	}
 
+	// Ensure the full allocatable pool subnet is routed through this interface
+	poolSubnet := getPoolSubnet(w.Address)
+	_ = execCommand(fmt.Sprintf("ip route replace %s dev %s", poolSubnet, w.InterfaceName))
+
 	return nil
 }
 
@@ -617,12 +621,8 @@ func (w *WireGuardCore) setupNAT() error {
 		log.WithError(err).Warn("Failed to enable IP forwarding")
 	}
 
-	// Calculate subnet for the routing exclusions
-	_, ipnet, err := net.ParseCIDR(w.Address)
-	if err != nil {
-		return fmt.Errorf("invalid address for NAT: %w", err)
-	}
-	subnet := ipnet.String()
+	// Calculate pool subnet covering all possible allocatable user IPs
+	subnet := getPoolSubnet(w.Address)
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
@@ -656,12 +656,16 @@ func (w *WireGuardCore) setupNAT() error {
 	}
 
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
+	// Must be inserted at head of chain (index 1) BEFORE the ACCEPT rules so they take effect
 	if w.DropICMPUnreachable {
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		}
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		}
 	}
 
@@ -749,11 +753,7 @@ func (w *WireGuardCore) setupMasquerade(subnet, defaultIface string) error {
 
 // teardownNAT removes NAT rules invoked by setupNAT
 func (w *WireGuardCore) teardownNAT() {
-	_, ipnet, _ := net.ParseCIDR(w.Address)
-	var subnet string
-	if ipnet != nil {
-		subnet = ipnet.String()
-	}
+	subnet := getPoolSubnet(w.Address)
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
@@ -768,6 +768,7 @@ func (w *WireGuardCore) teardownNAT() {
 
 	if w.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 	}
 
@@ -787,6 +788,48 @@ func (w *WireGuardCore) teardownNAT() {
 		// Note: We leave `ip rule` and `ip route` intact since other interfaces might be using them
 	}
 }
+
+// getPoolSubnet returns the enclosing subnet covering the full allocation range for the given interface address.
+// e.g. "10.0.0.1/24" -> "10.0.0.0/16" so that users allocated in 10.0.x.x are properly routed and masqueraded.
+func getPoolSubnet(address string) string {
+	ip, ipnet, err := net.ParseCIDR(address)
+	if err != nil {
+		ip = net.ParseIP(address)
+	}
+	if ip == nil {
+		return "10.0.0.0/16"
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		if ipnet != nil {
+			return ipnet.String()
+		}
+		return "10.0.0.0/16"
+	}
+
+	if ipnet != nil {
+		ones, bits := ipnet.Mask.Size()
+		// If already wider than /16 (e.g. /8), respect the configured CIDR
+		if bits == 32 && ones <= 16 {
+			return ipnet.String()
+		}
+	}
+
+	// Expand /24 or narrow subnets to /16 covering 10.{B}.0.0/16
+	if ip4[0] == 10 {
+		return fmt.Sprintf("10.%d.0.0/16", ip4[1])
+	} else if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+		return fmt.Sprintf("172.%d.0.0/16", ip4[1])
+	} else if ip4[0] == 192 && ip4[1] == 168 {
+		return "192.168.0.0/16"
+	}
+
+	if ipnet != nil {
+		return ipnet.String()
+	}
+	return "10.0.0.0/16"
+}
+
 
 // getDefaultInterface returns the default network interface
 func getDefaultInterface() (string, error) {

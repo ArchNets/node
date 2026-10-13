@@ -66,7 +66,7 @@ func (c *WireGuardController) Start() error {
 	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, users, aliveList)
 
 	// Get WireGuard configuration from protocol
-	address := "10.0.0.1/24" // Default
+	address := "10.0.0.1/16" // Default
 	if c.info.Protocol != nil && c.info.Protocol.WireguardAddress != "" {
 		address = c.info.Protocol.WireguardAddress
 	}

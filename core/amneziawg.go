@@ -333,6 +333,10 @@ func (w *AmneziaWGCore) configureInterface() error {
 		return fmt.Errorf("failed to up interface: %w", err)
 	}
 
+	// Ensure the full allocatable pool subnet is routed through this interface
+	poolSubnet := getPoolSubnet(w.Address)
+	_ = execCommand(fmt.Sprintf("ip route replace %s dev %s", poolSubnet, w.InterfaceName))
+
 	return nil
 }
 
@@ -580,11 +584,7 @@ func (w *AmneziaWGCore) setupNAT() error {
 		log.WithError(err).Warn("Failed to enable IP forwarding")
 	}
 
-	_, ipnet, err := net.ParseCIDR(w.Address)
-	if err != nil {
-		return fmt.Errorf("invalid address for NAT: %w", err)
-	}
-	subnet := ipnet.String()
+	subnet := getPoolSubnet(w.Address)
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
@@ -618,12 +618,16 @@ func (w *AmneziaWGCore) setupNAT() error {
 	}
 
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
+	// Must be inserted at head of chain (index 1) BEFORE the ACCEPT rules so they take effect
 	if w.DropICMPUnreachable {
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		}
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		}
 	}
 
@@ -698,11 +702,7 @@ func (w *AmneziaWGCore) setupMasquerade(subnet, defaultIface string) error {
 }
 
 func (w *AmneziaWGCore) teardownNAT() {
-	_, ipnet, _ := net.ParseCIDR(w.Address)
-	var subnet string
-	if ipnet != nil {
-		subnet = ipnet.String()
-	}
+	subnet := getPoolSubnet(w.Address)
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
@@ -717,6 +717,7 @@ func (w *AmneziaWGCore) teardownNAT() {
 
 	if w.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 	}
 
