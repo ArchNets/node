@@ -89,25 +89,39 @@ func (c *AmneziaWGController) Start() error {
 	}
 
 	// Amnezia Params
-	var jc, jmin, jmax, s1, s2, s3, s4 int
-	var h1, h2, h3, h4 string
+	var awgCfg vCore.AmneziaConfig
 	if c.info.Protocol != nil {
-		jc = c.info.Protocol.AmneziaJc
-		jmin = c.info.Protocol.AmneziaJmin
-		jmax = c.info.Protocol.AmneziaJmax
-		s1 = c.info.Protocol.AmneziaS1
-		s2 = c.info.Protocol.AmneziaS2
-		s3 = c.info.Protocol.AmneziaS3
-		s4 = c.info.Protocol.AmneziaS4
-		h1 = c.info.Protocol.AmneziaH1.String()
-		h2 = c.info.Protocol.AmneziaH2.String()
-		h3 = c.info.Protocol.AmneziaH3.String()
-		h4 = c.info.Protocol.AmneziaH4.String()
+		awgCfg = vCore.AmneziaConfig{
+			Jc:                     c.info.Protocol.AmneziaJc,
+			Jmin:                   c.info.Protocol.AmneziaJmin,
+			Jmax:                   c.info.Protocol.AmneziaJmax,
+			S1:                     c.info.Protocol.AmneziaS1,
+			S2:                     c.info.Protocol.AmneziaS2,
+			S3:                     c.info.Protocol.AmneziaS3,
+			S4:                     c.info.Protocol.AmneziaS4,
+			H1:                     c.info.Protocol.AmneziaH1.String(),
+			H2:                     c.info.Protocol.AmneziaH2.String(),
+			H3:                     c.info.Protocol.AmneziaH3.String(),
+			H4:                     c.info.Protocol.AmneziaH4.String(),
+			I1:                     c.info.Protocol.AmneziaI1.String(),
+			I2:                     c.info.Protocol.AmneziaI2.String(),
+			I3:                     c.info.Protocol.AmneziaI3.String(),
+			I4:                     c.info.Protocol.AmneziaI4.String(),
+			I5:                     c.info.Protocol.AmneziaI5.String(),
+			HeaderProtectionKey:    c.info.Protocol.AmneziaHeaderProtectionKey.String(),
+			ContentPaddingAddition: c.info.Protocol.AmneziaContentPaddingAddition.String(),
+			RekeyAfterTime:         c.info.Protocol.AmneziaRekeyAfterTime.String(),
+			RekeyTimeout:           c.info.Protocol.AmneziaRekeyTimeout.String(),
+			RejectAfterTime:        c.info.Protocol.AmneziaRejectAfterTime.String(),
+			KeepaliveTimeout:       c.info.Protocol.AmneziaKeepaliveTimeout.String(),
+			MaxHandshakeAttempts:   c.info.Protocol.AmneziaMaxHandshakeAttempts.String(),
+			RandomTrailers:         c.info.Protocol.AmneziaRandomTrailers,
+			DisableCookies:         c.info.Protocol.AmneziaDisableCookies,
+		}
 	}
 
 	// Create and start AmneziaWG server
-	wgCore, err := vCore.NewAmneziaWGCore(c.tag, c.info.Protocol.Port, address, interfaceName, mtu, dns, c.info.Protocol.WireguardPrivateKey,
-		jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4)
+	wgCore, err := vCore.NewAmneziaWGCore(c.tag, c.info.Protocol.Port, address, interfaceName, mtu, dns, c.info.Protocol.WireguardPrivateKey, awgCfg)
 	if err != nil {
 		return err
 	}

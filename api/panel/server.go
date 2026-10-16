@@ -282,17 +282,31 @@ type Protocol struct {
 	WireguardDNS        string `json:"wireguard_dns"`         // DNS servers (e.g., 1.1.1.1,8.8.8.8)
 
 	// AmneziaWG-specific fields
-	AmneziaJc   int        `json:"amnezia_jc"`
-	AmneziaJmin int        `json:"amnezia_jmin"`
-	AmneziaJmax int        `json:"amnezia_jmax"`
-	AmneziaS1   int        `json:"amnezia_s1"`
-	AmneziaS2   int        `json:"amnezia_s2"`
-	AmneziaS3   int        `json:"amnezia_s3"`
-	AmneziaS4   int        `json:"amnezia_s4"`
-	AmneziaH1   FlexString `json:"amnezia_h1"`
-	AmneziaH2   FlexString `json:"amnezia_h2"`
-	AmneziaH3   FlexString `json:"amnezia_h3"`
-	AmneziaH4   FlexString `json:"amnezia_h4"`
+	AmneziaJc                     int        `json:"amnezia_jc"`
+	AmneziaJmin                   int        `json:"amnezia_jmin"`
+	AmneziaJmax                   int        `json:"amnezia_jmax"`
+	AmneziaS1                     int        `json:"amnezia_s1"`
+	AmneziaS2                     int        `json:"amnezia_s2"`
+	AmneziaS3                     int        `json:"amnezia_s3"`
+	AmneziaS4                     int        `json:"amnezia_s4"`
+	AmneziaH1                     FlexString `json:"amnezia_h1"`
+	AmneziaH2                     FlexString `json:"amnezia_h2"`
+	AmneziaH3                     FlexString `json:"amnezia_h3"`
+	AmneziaH4                     FlexString `json:"amnezia_h4"`
+	AmneziaI1                     FlexString `json:"amnezia_i1"`
+	AmneziaI2                     FlexString `json:"amnezia_i2"`
+	AmneziaI3                     FlexString `json:"amnezia_i3"`
+	AmneziaI4                     FlexString `json:"amnezia_i4"`
+	AmneziaI5                     FlexString `json:"amnezia_i5"`
+	AmneziaHeaderProtectionKey    FlexString `json:"amnezia_header_protection_key"`
+	AmneziaContentPaddingAddition FlexString `json:"amnezia_content_padding_addition"`
+	AmneziaRekeyAfterTime         FlexString `json:"amnezia_rekey_after_time"`
+	AmneziaRekeyTimeout           FlexString `json:"amnezia_rekey_timeout"`
+	AmneziaRejectAfterTime        FlexString `json:"amnezia_reject_after_time"`
+	AmneziaKeepaliveTimeout       FlexString `json:"amnezia_keepalive_timeout"`
+	AmneziaMaxHandshakeAttempts   FlexString `json:"amnezia_max_handshake_attempts"`
+	AmneziaRandomTrailers         bool       `json:"amnezia_random_trailers"`
+	AmneziaDisableCookies         bool       `json:"amnezia_disable_cookies"`
 
 	// IPsec/IKEv2/L2TP fields
 	IPsecPSK         string `json:"ipsec_psk"`          // Pre-Shared Key for IPsec

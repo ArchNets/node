@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -19,6 +20,35 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+// AmneziaConfig holds obfuscation and mimicry parameters for AmneziaWG 3.1
+type AmneziaConfig struct {
+	Jc                     int
+	Jmin                   int
+	Jmax                   int
+	S1                     int
+	S2                     int
+	S3                     int
+	S4                     int
+	H1                     string
+	H2                     string
+	H3                     string
+	H4                     string
+	I1                     string
+	I2                     string
+	I3                     string
+	I4                     string
+	I5                     string
+	HeaderProtectionKey    string
+	ContentPaddingAddition string
+	RekeyAfterTime         string
+	RekeyTimeout           string
+	RejectAfterTime        string
+	KeepaliveTimeout       string
+	MaxHandshakeAttempts   string
+	RandomTrailers         bool
+	DisableCookies         bool
+}
+
 // AmneziaWGCore manages a AmneziaWG VPN server
 type AmneziaWGCore struct {
 	Tag           string
@@ -31,17 +61,31 @@ type AmneziaWGCore struct {
 	DNS           string
 
 	// Amnezia Params
-	Jc   int
-	Jmin int
-	Jmax int
-	S1   int
-	S2   int
-	S3   int
-	S4   int
-	H1   string
-	H2   string
-	H3   string
-	H4   string
+	Jc                     int
+	Jmin                   int
+	Jmax                   int
+	S1                     int
+	S2                     int
+	S3                     int
+	S4                     int
+	H1                     string
+	H2                     string
+	H3                     string
+	H4                     string
+	I1                     string
+	I2                     string
+	I3                     string
+	I4                     string
+	I5                     string
+	HeaderProtectionKey    string
+	ContentPaddingAddition string
+	RekeyAfterTime         string
+	RekeyTimeout           string
+	RejectAfterTime        string
+	KeepaliveTimeout       string
+	MaxHandshakeAttempts   string
+	RandomTrailers         bool
+	DisableCookies         bool
 
 	peers      sync.Map // map[string]*WireGuardPeer (key: UUID)
 	users      *WGUserMap
@@ -71,7 +115,7 @@ func (w *AmneziaWGCore) SetTProxyConfig(port int, subnet string, bypassUDP bool,
 
 // NewAmneziaWGCore creates a new AmneziaWG VPN server
 func NewAmneziaWGCore(tag string, port int, address string, interfaceName string, mtu int, dns string, privateKeyStr string,
-	jc, jmin, jmax, s1, s2, s3, s4 int, h1, h2, h3, h4 string) (*AmneziaWGCore, error) {
+	cfg AmneziaConfig) (*AmneziaWGCore, error) {
 
 	var privateKey wgtypes.Key
 	var err error
@@ -98,25 +142,39 @@ func NewAmneziaWGCore(tag string, port int, address string, interfaceName string
 	}
 
 	core := &AmneziaWGCore{
-		Tag:           tag,
-		Port:          port,
-		InterfaceName: interfaceName,
-		PrivateKey:    privateKey,
-		PublicKey:     publicKey,
-		Address:       address,
-		MTU:           mtu,
-		DNS:           dns,
-		Jc:            jc,
-		Jmin:          jmin,
-		Jmax:          jmax,
-		S1:            s1,
-		S2:            s2,
-		S3:            s3,
-		S4:            s4,
-		H1:            h1,
-		H2:            h2,
-		H3:            h3,
-		H4:            h4,
+		Tag:                    tag,
+		Port:                   port,
+		InterfaceName:          interfaceName,
+		PrivateKey:             privateKey,
+		PublicKey:              publicKey,
+		Address:                address,
+		MTU:                    mtu,
+		DNS:                    dns,
+		Jc:                     cfg.Jc,
+		Jmin:                   cfg.Jmin,
+		Jmax:                   cfg.Jmax,
+		S1:                     cfg.S1,
+		S2:                     cfg.S2,
+		S3:                     cfg.S3,
+		S4:                     cfg.S4,
+		H1:                     cfg.H1,
+		H2:                     cfg.H2,
+		H3:                     cfg.H3,
+		H4:                     cfg.H4,
+		I1:                     cfg.I1,
+		I2:                     cfg.I2,
+		I3:                     cfg.I3,
+		I4:                     cfg.I4,
+		I5:                     cfg.I5,
+		HeaderProtectionKey:    cfg.HeaderProtectionKey,
+		ContentPaddingAddition: cfg.ContentPaddingAddition,
+		RekeyAfterTime:         cfg.RekeyAfterTime,
+		RekeyTimeout:           cfg.RekeyTimeout,
+		RejectAfterTime:        cfg.RejectAfterTime,
+		KeepaliveTimeout:       cfg.KeepaliveTimeout,
+		MaxHandshakeAttempts:   cfg.MaxHandshakeAttempts,
+		RandomTrailers:         cfg.RandomTrailers,
+		DisableCookies:         cfg.DisableCookies,
 		users: &WGUserMap{
 			uuidToID: make(map[string]int),
 			idToUUID: make(map[int]string),
@@ -301,24 +359,114 @@ func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 
 // configureInterface configures params using awg command
 func (w *AmneziaWGCore) configureInterface() error {
-	// 1. Set simple params first
-	// awg set <iface> listen-port <port> private-key <file>
-	// We need to write private key to temp file or pipe it?
-	// Piping: echo <key> | awg set <iface> private-key /dev/stdin
-
+	// 1. Set basic config (listen-port and private-key)
 	cmd := fmt.Sprintf("echo %s | awg set %s listen-port %d private-key /dev/stdin", w.PrivateKey.String(), w.InterfaceName, w.Port)
-	// We need to execute utilizing shell for pipe
 	if err := execShellCommand(cmd); err != nil {
 		return fmt.Errorf("failed to set basic config: %w", err)
 	}
 
-	// 2. Set Amnezia params
-	// awg set <iface> jc <jc> jmin <jmin> jmax <jmax> s1 <s1> s2 <s2> s3 <s3> s4 <s4> h1 <code> h2 <code> h3 <code> h4 <code>
-	amneziaCmd := fmt.Sprintf("awg set %s jc %d jmin %d jmax %d s1 %d s2 %d s3 %d s4 %d h1 %s h2 %s h3 %s h4 %s",
-		w.InterfaceName, w.Jc, w.Jmin, w.Jmax, w.S1, w.S2, w.S3, w.S4, w.H1, w.H2, w.H3, w.H4)
+	// 2. Prepare HeaderProtectionKey file if configured
+	var hpkFile string
+	if w.HeaderProtectionKey != "" {
+		tmp, err := os.CreateTemp("", fmt.Sprintf("awg_hpk_%s_*", w.InterfaceName))
+		if err != nil {
+			return fmt.Errorf("failed to create temporary header protection key file: %w", err)
+		}
+		hpkFile = tmp.Name()
+		_ = os.Chmod(hpkFile, 0600)
+		if _, err := tmp.WriteString(strings.TrimSpace(w.HeaderProtectionKey) + "\n"); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(hpkFile)
+			return fmt.Errorf("failed to write header protection key: %w", err)
+		}
+		_ = tmp.Close()
+		defer os.Remove(hpkFile)
+	}
 
-	if err := execCommand(amneziaCmd); err != nil {
-		return fmt.Errorf("failed to set amnezia params: %w", err)
+	// 3. Set Amnezia 3.1 parameters directly via exec (avoids shell redirection issues with CPS tags)
+	var args []string
+	args = append(args, w.InterfaceName)
+
+	if w.Jc > 0 {
+		args = append(args, "jc", strconv.Itoa(w.Jc))
+	}
+	if w.Jmin > 0 {
+		args = append(args, "jmin", strconv.Itoa(w.Jmin))
+	}
+	if w.Jmax > 0 {
+		args = append(args, "jmax", strconv.Itoa(w.Jmax))
+	}
+	if w.S1 > 0 {
+		args = append(args, "s1", strconv.Itoa(w.S1))
+	}
+	if w.S2 > 0 {
+		args = append(args, "s2", strconv.Itoa(w.S2))
+	}
+	if w.S3 > 0 {
+		args = append(args, "s3", strconv.Itoa(w.S3))
+	}
+	if w.S4 > 0 {
+		args = append(args, "s4", strconv.Itoa(w.S4))
+	}
+	if w.H1 != "" {
+		args = append(args, "h1", w.H1)
+	}
+	if w.H2 != "" {
+		args = append(args, "h2", w.H2)
+	}
+	if w.H3 != "" {
+		args = append(args, "h3", w.H3)
+	}
+	if w.H4 != "" {
+		args = append(args, "h4", w.H4)
+	}
+	if w.I1 != "" {
+		args = append(args, "i1", w.I1)
+	}
+	if w.I2 != "" {
+		args = append(args, "i2", w.I2)
+	}
+	if w.I3 != "" {
+		args = append(args, "i3", w.I3)
+	}
+	if w.I4 != "" {
+		args = append(args, "i4", w.I4)
+	}
+	if w.I5 != "" {
+		args = append(args, "i5", w.I5)
+	}
+	if hpkFile != "" {
+		args = append(args, "header-protection-key", hpkFile)
+	}
+	if w.ContentPaddingAddition != "" {
+		args = append(args, "content-padding-addition", w.ContentPaddingAddition)
+	}
+	if w.RekeyAfterTime != "" {
+		args = append(args, "rekey-after-time", w.RekeyAfterTime)
+	}
+	if w.RekeyTimeout != "" {
+		args = append(args, "rekey-timeout", w.RekeyTimeout)
+	}
+	if w.RejectAfterTime != "" {
+		args = append(args, "reject-after-time", w.RejectAfterTime)
+	}
+	if w.KeepaliveTimeout != "" {
+		args = append(args, "keepalive-timeout", w.KeepaliveTimeout)
+	}
+	if w.MaxHandshakeAttempts != "" {
+		args = append(args, "max-handshake-attempts", w.MaxHandshakeAttempts)
+	}
+	if w.RandomTrailers {
+		args = append(args, "random-trailers", "on")
+	}
+	if w.DisableCookies {
+		args = append(args, "disable-cookies", "on")
+	}
+
+	if len(args) > 1 {
+		if err := execCommandDirect("awg", append([]string{"set"}, args...)...); err != nil {
+			return fmt.Errorf("failed to set amnezia params: %w", err)
+		}
 	}
 
 	// 3. Set IP
@@ -372,6 +520,18 @@ func execShellCommand(cmd string) error {
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("command failed: %s, output: %s", err, string(output))
+	}
+	return nil
+}
+
+func execCommandDirect(name string, args ...string) error {
+	execMu.Lock()
+	defer execMu.Unlock()
+
+	command := exec.Command(name, args...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("command failed: %s %v, output: %s", name, args, string(output))
 	}
 	return nil
 }

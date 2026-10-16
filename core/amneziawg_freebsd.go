@@ -12,6 +12,35 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+// AmneziaConfig holds obfuscation and mimicry parameters for AmneziaWG 3.1
+type AmneziaConfig struct {
+	Jc                     int
+	Jmin                   int
+	Jmax                   int
+	S1                     int
+	S2                     int
+	S3                     int
+	S4                     int
+	H1                     string
+	H2                     string
+	H3                     string
+	H4                     string
+	I1                     string
+	I2                     string
+	I3                     string
+	I4                     string
+	I5                     string
+	HeaderProtectionKey    string
+	ContentPaddingAddition string
+	RekeyAfterTime         string
+	RekeyTimeout           string
+	RejectAfterTime        string
+	KeepaliveTimeout       string
+	MaxHandshakeAttempts   string
+	RandomTrailers         bool
+	DisableCookies         bool
+}
+
 // AmneziaWGCore manages a AmneziaWG VPN server (Stub for FreeBSD)
 type AmneziaWGCore struct {
 	Tag           string
@@ -24,17 +53,31 @@ type AmneziaWGCore struct {
 	DNS           string
 
 	// Amnezia Params
-	Jc   int
-	Jmin int
-	Jmax int
-	S1   int
-	S2   int
-	S3   int
-	S4   int
-	H1   string
-	H2   string
-	H3   string
-	H4   string
+	Jc                     int
+	Jmin                   int
+	Jmax                   int
+	S1                     int
+	S2                     int
+	S3                     int
+	S4                     int
+	H1                     string
+	H2                     string
+	H3                     string
+	H4                     string
+	I1                     string
+	I2                     string
+	I3                     string
+	I4                     string
+	I5                     string
+	HeaderProtectionKey    string
+	ContentPaddingAddition string
+	RekeyAfterTime         string
+	RekeyTimeout           string
+	RejectAfterTime        string
+	KeepaliveTimeout       string
+	MaxHandshakeAttempts   string
+	RandomTrailers         bool
+	DisableCookies         bool
 
 	peers      sync.Map
 	limiterRef *limiter.Limiter
@@ -50,7 +93,7 @@ type AmneziaWGCore struct {
 }
 
 // NewAmneziaWGCore creates a new AmneziaWG VPN server
-func NewAmneziaWGCore(tag string, port int, address string, interfaceName string, mtu int, dns string, privateKeyStr string, jc, jmin, jmax, s1, s2, s3, s4 int, h1, h2, h3, h4 string) (*AmneziaWGCore, error) {
+func NewAmneziaWGCore(tag string, port int, address string, interfaceName string, mtu int, dns string, privateKeyStr string, cfg AmneziaConfig) (*AmneziaWGCore, error) {
 	return nil, fmt.Errorf("AmneziaWG is not supported on FreeBSD")
 }
 
