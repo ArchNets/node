@@ -23,7 +23,6 @@ import (
 	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
 	"github.com/archnets/node/conf"
-	nodeCore "github.com/archnets/node/core"
 	"github.com/archnets/node/core/relay/telemetry"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/serial"
@@ -86,15 +85,9 @@ type TunnelController struct {
 	// Pluggable Tunnel Drivers
 	relayDriver *RelayDriver
 
-	// Traffic monitoring for userspace proxies (e.g. NipoVPN)
-	lastTraffic map[int]trafficSnapshot
-
 	// Xray instances
 	xrayInstances map[int]*core.Instance
 	xrayMu        sync.Mutex
-	// NipoVPN instances
-	nipovpnManagers map[int]*nodeCore.NipovpnManager
-	nipovpnMu       sync.Mutex
 	// SNI-Spoofing
 	sniSpoofingProcesses map[int]*exec.Cmd
 	sniSpoofingMu        sync.Mutex
@@ -120,9 +113,7 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		forwarderProcesses:   make(map[int]*exec.Cmd),
 		logger:               log.WithField("tag", tag),
 		relayDriver:          relayDrv,
-		lastTraffic:          make(map[int]trafficSnapshot),
 		xrayInstances:        make(map[int]*core.Instance),
-		nipovpnManagers:      make(map[int]*nodeCore.NipovpnManager),
 		sniSpoofingProcesses: make(map[int]*exec.Cmd),
 	}
 }
@@ -145,26 +136,15 @@ func (c *TunnelController) Start() error {
 		return fmt.Errorf("failed to create libs directory: %v", err)
 	}
 
-	// Initialize dedicated logger that writes to controller.log
-	controllerLogPath := filepath.Join(c.tunnelDir, "log", ControllerLogFile)
-	controllerLogFile, err := os.OpenFile(controllerLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		log.WithField("err", err).Warn("Failed to open controller log file, using stdout")
-		c.logger = log.WithField("tag", c.tag)
-	} else {
-		// Create a new logger instance for the controller
-		controllerLogger := log.New()
-		// Only write to file, NOT stdout
-		controllerLogger.SetOutput(controllerLogFile)
-		controllerLogger.SetFormatter(&log.TextFormatter{FullTimestamp: true})
-		c.logger = controllerLogger.WithField("tag", c.tag)
-	}
+	// Initialize dedicated logger that writes directly to stdout/journalctl
+	c.logger = log.WithField("tag", c.tag)
 
 	// Open forwarder log file
 	forwarderLogPath := filepath.Join(c.tunnelDir, "log", ForwarderLogFile)
-	c.forwarderLogFile, err = os.OpenFile(forwarderLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		c.logger.WithField("err", err).Warn("Failed to open forwarder log file")
+	if fFile, fErr := os.OpenFile(forwarderLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); fErr != nil {
+		c.logger.WithField("err", fErr).Warn("Failed to open forwarder log file")
+	} else {
+		c.forwarderLogFile = fFile
 	}
 
 	// Auto-install missing binaries
@@ -217,14 +197,6 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 		c.logger.Info("NodePass binary missing, attempting auto-installation...")
 		if err := installer.InstallNodepass(); err != nil {
 			c.logger.WithField("err", err).Warn("NodePass auto-installation failed")
-		}
-	}
-
-	// Check Nipovpn
-	if _, err := os.Stat(nodeCore.NipovpnBinary); os.IsNotExist(err) {
-		c.logger.Info("NipoVPN binary missing, attempting auto-installation...")
-		if err := installer.InstallNipovpn(); err != nil {
-			c.logger.WithField("err", err).Warn("NipoVPN auto-installation failed")
 		}
 	}
 
@@ -282,9 +254,6 @@ func (c *TunnelController) Close() error {
 
 	// Stop all Xray instances
 	c.stopAllXrayInstances()
-
-	// Stop all NipoVPN managers
-	c.stopAllNipovpnManagers()
 
 	// Stop all SNI-Spoofing processes
 	c.stopAllSniSpoofingProcesses()
@@ -438,35 +407,7 @@ func (c *TunnelController) statusReport() error {
 
 		var deltaUpload, deltaDownload int64
 
-		if t.Method == "nipovpn" {
-			c.nipovpnMu.Lock()
-			mgr := c.nipovpnManagers[t.Id]
-			c.nipovpnMu.Unlock()
-			if mgr != nil {
-				online = mgr.IsAlive()
-				pid := mgr.GetPID()
-				if online && pid > 0 {
-					rchar, wchar, err := readProcessIO(pid)
-					if err == nil {
-						rxBytes := rchar / 2
-						txBytes := wchar / 2
-						if last, exists := c.lastTraffic[t.Id]; exists {
-							if rxBytes >= last.rxBytes {
-								deltaDownload = rxBytes - last.rxBytes
-							} else {
-								deltaDownload = rxBytes
-							}
-							if txBytes >= last.txBytes {
-								deltaUpload = txBytes - last.txBytes
-							} else {
-								deltaUpload = txBytes
-							}
-						}
-						c.lastTraffic[t.Id] = trafficSnapshot{rxBytes: rxBytes, txBytes: txBytes}
-					}
-				}
-			}
-		} else if t.Method == "xray" || t.Method == "xray-reverse" || t.Method == "xray-stealth" {
+		if t.Method == "xray" || t.Method == "xray-reverse" || t.Method == "xray-stealth" {
 			c.xrayMu.Lock()
 			instance := c.xrayInstances[t.Id]
 			c.xrayMu.Unlock()
@@ -569,12 +510,10 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 
 	c.stopAllForwarders()
 	c.stopAllXrayInstances()
-	c.stopAllNipovpnManagers()
 	c.stopAllSniSpoofingProcesses()
 
 	var unhandledTunnels []panel.TunnelInfo
 	var xrayTunnels []panel.TunnelInfo
-	var nipovpnTunnels []panel.TunnelInfo
 	var xrayReverseTunnels []panel.TunnelInfo
 	var xrayStealthTunnels []panel.TunnelInfo
 
@@ -598,8 +537,6 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 			xrayReverseTunnels = append(xrayReverseTunnels, t)
 		case "xray-stealth":
 			xrayStealthTunnels = append(xrayStealthTunnels, t)
-		case "nipovpn":
-			nipovpnTunnels = append(nipovpnTunnels, t)
 		default:
 			unhandledTunnels = append(unhandledTunnels, t)
 		}
@@ -635,41 +572,9 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
-	// Start NipoVPN tunnels
-	for _, t := range nipovpnTunnels {
-		mgr := nodeCore.NewNipovpnManager(t, c.logger)
-		if err := mgr.GenerateConfig(c.tunnelDir); err != nil {
-			c.logger.WithFields(log.Fields{
-				"tunnelId": t.Id,
-				"err":      err,
-			}).Warn("Failed to generate NipoVPN config")
-			continue
-		}
-		if err := mgr.Start(); err != nil {
-			c.logger.WithFields(log.Fields{
-				"tunnelId": t.Id,
-				"err":      err,
-			}).Warn("Failed to start NipoVPN")
-			continue
-		}
-		c.nipovpnMu.Lock()
-		c.nipovpnManagers[t.Id] = mgr
-		c.nipovpnMu.Unlock()
-
-		if t.Role == "exit" {
-			// Start plain Xray instance (VLESS on 127.0.0.1:ExitXrayPort, freedom outbound)
-			if err := c.startNipovpnXrayInstance(t); err != nil {
-				c.logger.WithFields(log.Fields{
-					"tunnelId": t.Id,
-					"err":      err,
-				}).Warn("Failed to start exit Xray for NipoVPN")
-			}
-		}
-	}
-
-	// Start external forwarders (gost, nodepass, paqet) only for non-relay tunnels
+	// Start external forwarders (gost, nodepass) only for non-relay tunnels
 	for _, t := range data.Tunnels {
-		if t.Method == "xray" || t.Method == "nipovpn" || t.Method == "xray-reverse" || t.Method == "xray-stealth" ||
+		if t.Method == "xray" || t.Method == "xray-reverse" || t.Method == "xray-stealth" ||
 			t.Method == "reverse-reality" || t.Method == "tls-reverse" || t.Method == "waterwall" || t.Method == "" {
 			continue
 		}
@@ -1325,127 +1230,6 @@ func (c *TunnelController) stopAllForwarders() {
 	c.forwarderWg.Wait()
 
 	c.logger.Info("All forwarders stopped")
-}
-
-func (c *TunnelController) stopAllNipovpnManagers() {
-	c.nipovpnMu.Lock()
-	defer c.nipovpnMu.Unlock()
-
-	for id, mgr := range c.nipovpnManagers {
-		if mgr != nil {
-			mgr.Stop()
-			c.logger.WithField("tunnelId", id).Info("NipoVPN process stopped")
-		}
-	}
-	c.nipovpnManagers = make(map[int]*nodeCore.NipovpnManager)
-}
-
-func (c *TunnelController) startNipovpnXrayInstance(t panel.TunnelInfo) error {
-	logLevel := c.nodeConfig.LogConfig.Level
-	if logLevel == "" {
-		logLevel = "warning"
-	}
-	xrayJSON := c.buildNipovpnXrayJSON(t, logLevel)
-
-	c.logger.WithField("json", xrayJSON).Debug("Generated NipoVPN exit Xray JSON")
-
-	reader := bytes.NewReader([]byte(xrayJSON))
-	confObj, err := confserial.DecodeJSONConfig(reader)
-	if err != nil {
-		return fmt.Errorf("failed to parse nipovpn xray config JSON: %v", err)
-	}
-
-	configObj, err := confObj.Build()
-	if err != nil {
-		return fmt.Errorf("failed to build nipovpn xray config protobuf: %v", err)
-	}
-
-	ensureLogDir(c.nodeConfig.LogConfig.Access)
-	ensureLogDir(c.nodeConfig.LogConfig.Output)
-
-	coreLogConfig := &coreConf.LogConfig{
-		LogLevel:  logLevel,
-		ErrorLog:  c.nodeConfig.LogConfig.Output,
-		AccessLog: c.nodeConfig.LogConfig.Access,
-	}
-	appLogMsg := serial.ToTypedMessage(coreLogConfig.Build())
-	configObj.App = append([]*serial.TypedMessage{appLogMsg}, configObj.App...)
-
-	instance, err := core.New(configObj)
-	if err != nil {
-		return fmt.Errorf("failed to initialize nipovpn xray instance: %v", err)
-	}
-
-	if err := instance.Start(); err != nil {
-		return fmt.Errorf("failed to start nipovpn xray instance: %v", err)
-	}
-
-	c.xrayMu.Lock()
-	if c.xrayInstances == nil {
-		c.xrayInstances = make(map[int]*core.Instance)
-	}
-	c.xrayInstances[t.Id] = instance
-	c.xrayMu.Unlock()
-
-	c.logger.WithField("tunnelId", t.Id).Info("NipoVPN exit Xray instance started natively in Go")
-	return nil
-}
-
-func (c *TunnelController) buildNipovpnXrayJSON(t panel.TunnelInfo, logLevel string) string {
-	obj := map[string]interface{}{
-		"log": map[string]interface{}{
-			"loglevel": logLevel,
-		},
-		"inbounds": []interface{}{
-			map[string]interface{}{
-				"listen":   "127.0.0.1",
-				"port":     t.ExitXrayPort,
-				"protocol": "vless",
-				"settings": map[string]interface{}{
-					"clients": []interface{}{
-						map[string]interface{}{
-							"id": t.ExitXrayUUID,
-						},
-					},
-					"decryption": "none",
-				},
-				"streamSettings": map[string]interface{}{
-					"network":  "tcp",
-					"security": "none",
-				},
-				"tag": "vless-in",
-			},
-		},
-		"outbounds": []interface{}{
-			map[string]interface{}{
-				"protocol": "freedom",
-				"settings": map[string]interface{}{},
-				"tag":      "direct",
-			},
-		},
-	}
-	b, _ := json.Marshal(obj)
-	return string(b)
-}
-
-func readProcessIO(pid int) (rchar, wchar int64, err error) {
-	path := fmt.Sprintf("/proc/%d/io", pid)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, 0, err
-	}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			if fields[0] == "rchar:" {
-				rchar, _ = strconv.ParseInt(fields[1], 10, 64)
-			} else if fields[0] == "wchar:" {
-				wchar, _ = strconv.ParseInt(fields[1], 10, 64)
-			}
-		}
-	}
-	return rchar, wchar, nil
 }
 
 func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {

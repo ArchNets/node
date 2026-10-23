@@ -18,12 +18,12 @@ const TunnelPidFile = "/var/run/archnets-tunnel.pid"
 
 var tunnelCommand = &cobra.Command{
 	Use:   "tunnel",
-	Short: "Manage tunnel nodes (WaterWall, Gost, NodePass)",
+	Short: "Manage native tunnel nodes (Reverse Reality, TLS Reverse, Forwarders)",
 }
 
 var tunnelInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install tunnel binaries (WaterWall, Gost, NodePass)",
+	Short: "Verify and install tunnel forwarder binaries",
 	Run: func(cmd *cobra.Command, args []string) {
 		c := loadConfig()
 		tc := node.NewTunnelController(panel.NewClientV2(&c.ApiConfig), c.ApiConfig.ServerId, c)

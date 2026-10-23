@@ -413,19 +413,11 @@ show_enable_status() {
 }
 
 show_tunnel_status() {
-    if pgrep -x nipovpn >/dev/null 2>&1; then
-        echo -e "Tunnel: ${green}running${plain} (method: nipovpn)"
-    elif pgrep -x Waterwall >/dev/null 2>&1; then
-        echo -e "Tunnel: ${green}running${plain} (method: waterwall)"
-    elif [[ -f /var/run/archnets-tunnel.pid ]]; then
-        local pid=$(cat /var/run/archnets-tunnel.pid)
-        if kill -0 "$pid" 2>/dev/null; then
-            echo -e "Tunnel: ${green}running${plain} (controller PID $pid)"
-        else
-            echo -e "Tunnel: ${yellow}not running${plain} (stale PID file)"
-        fi
+    check_status
+    if [[ $? == 0 ]]; then
+        echo -e "Tunnel: ${green}running${plain} (native Go engine in archnets core)"
     else
-        echo -e "Tunnel: ${yellow}not running${plain}"
+        echo -e "Tunnel: ${yellow}not running${plain} (archnets service is stopped)"
     fi
 }
 
@@ -523,12 +515,12 @@ open_ports() {
 
 # Tunnel management functions
 tunnel_install() {
-    echo -e "${green}Installing tunnel components (WaterWall, Gost, NodePass)...${plain}"
+    echo -e "${green}Tunnel engine is native pure Go inside archnets core. Checking forwarder binaries...${plain}"
     /usr/local/archnets/node tunnel install
     if [[ $? == 0 ]]; then
-        echo -e "${green}Tunnel components installed successfully${plain}"
+        echo -e "${green}Tunnel components verified successfully${plain}"
     else
-        echo -e "${red}Failed to install tunnel components${plain}"
+        echo -e "${red}Failed to verify tunnel components${plain}"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -536,39 +528,25 @@ tunnel_install() {
 }
 
 tunnel_start() {
-    # Check if a controller is already running
-    if [[ -f /var/run/archnets-tunnel.pid ]]; then
-        local pid=$(cat /var/run/archnets-tunnel.pid)
-        if kill -0 "$pid" 2>/dev/null; then
-            echo -e "${red}Tunnel controller already running (PID $pid). Stop it first with 'node tunnel-stop'.${plain}"
-            if [[ $# == 0 ]]; then
-                before_show_menu
-            fi
-            return 1
-        fi
-    fi
-    echo -e "${green}Starting tunnel nodes...${plain}"
-    nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
+    echo -e "${green}Starting archnets service (runs native tunnel engine automatically)...${plain}"
+    systemctl restart archnets
     sleep 2
-    echo -e "${green}Tunnel nodes started in background${plain}"
+    check_status
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
 tunnel_stop() {
-    echo -e "${green}Stopping tunnel processes...${plain}"
-    /usr/local/archnets/node tunnel stop
-    # Also kill any orphaned forwarder processes
-    killall -9 paqet 2>/dev/null
+    echo -e "${green}Stopping archnets service...${plain}"
+    systemctl stop archnets
     killall -9 gost 2>/dev/null
     killall -9 nodepass 2>/dev/null
-    killall -9 nipovpn 2>/dev/null
     killall -9 sni-spoofing 2>/dev/null
     if [[ $? == 0 ]]; then
-        echo -e "${green}Tunnel processes stopped successfully${plain}"
+        echo -e "${green}Service stopped successfully${plain}"
     else
-        echo -e "${red}Failed to stop tunnel processes${plain}"
+        echo -e "${red}Failed to stop service${plain}"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -576,17 +554,10 @@ tunnel_stop() {
 }
 
 tunnel_restart() {
-    echo -e "${green}Restarting tunnel nodes...${plain}"
-    /usr/local/archnets/node tunnel stop 2>/dev/null
-    killall -9 paqet 2>/dev/null
-    killall -9 gost 2>/dev/null
-    killall -9 nodepass 2>/dev/null
-    killall -9 nipovpn 2>/dev/null
-    killall -9 sni-spoofing 2>/dev/null
-    sleep 1
-    nohup /usr/local/archnets/node tunnel start >/dev/null 2>&1 &
+    echo -e "${green}Restarting archnets service (native relay)...${plain}"
+    systemctl restart archnets
     sleep 2
-    echo -e "${green}Tunnel nodes restarted${plain}"
+    check_status
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
@@ -615,38 +586,35 @@ tunnel_uninstall() {
 
 tunnel_log() {
     echo -e "${green}Select log to view:${plain}"
-    echo -e "  1. WaterWall Logs (Tunnel Connectivity)"
-    echo -e "  2. Controller Logs (Management/Updates)"
-    echo -e "  3. Forwarder Logs (Gost/NodePass/SNI-Spoofing)"
-    echo -e "  4. NipoVPN Logs"
-    echo -e "  5. Xray Stealth Config (Written JSON)"
-    echo && read -rp "Please choose [1-5] (default 1): " log_choice
+    echo -e "  1. Live Service & Relay Logs (journalctl)"
+    echo -e "  2. Forwarder Logs (Gost/NodePass/SNI-Spoofing)"
+    echo -e "  3. Xray Stealth Configs (Written JSON)"
+    echo && read -rp "Please choose [1-3] (default 1): " log_choice
     [[ -z "$log_choice" ]] && log_choice=1
 
     case "$log_choice" in
         1) 
-            echo -e "${green}Viewing WaterWall logs (Ctrl+C to exit)...${plain}"
-            tail -f /etc/archnets/tunnel/log/waterwall.log
+            echo -e "${green}Viewing live service & relay logs (Ctrl+C to exit)...${plain}"
+            journalctl -u archnets -n 100 -f
             ;;
         2)
-            echo -e "${green}Viewing Controller logs (Ctrl+C to exit)...${plain}"
-            tail -f /etc/archnets/tunnel/log/controller.log
-            ;;
-        3)
             echo -e "${green}Viewing Forwarder logs (Ctrl+C to exit)...${plain}"
             tail -f /etc/archnets/tunnel/log/forwarder.log
             ;;
-        4)
-            echo -e "${green}Viewing NipoVPN logs (Ctrl+C to exit)...${plain}"
-            tail -f /etc/archnets/tunnel/log/nipovpn_*.log
-            ;;
-        5)
+        3)
             echo -e "${green}Xray Stealth generated configs:${plain}"
             ls -la /etc/archnets/tunnel/xray_stealth_*.json /etc/archnets/tunnel/sni_spoofing_*.ini 2>/dev/null
             echo ""
             for f in /etc/archnets/tunnel/xray_stealth_*.json; do
                 [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f" | python3 -m json.tool 2>/dev/null || cat "$f"
                 echo ""
+            done
+            ;;
+        *)
+            echo -e "${red}Please enter a valid number [1-3]${plain}"
+            ;;
+    esac
+}
             done
             for f in /etc/archnets/tunnel/sni_spoofing_*.ini; do
                 [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f"

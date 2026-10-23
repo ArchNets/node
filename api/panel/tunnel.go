@@ -62,14 +62,13 @@ type TunnelInfo struct {
 	Id                int                      `json:"id"`
 	Name              string                   `json:"name"`
 	Role              string                   `json:"role"`      // "entry" or "exit"
-	Method            string                   `json:"method"`    // "reverse-reality", "tls-reverse", "xray", "xray-reverse", "xray-stealth", "nipovpn"
+	Method            string                   `json:"method"`    // "reverse-reality", "tls-reverse", "xray", "xray-reverse", "xray-stealth"
 	LocalIP           string                   `json:"local_ip"`  // Local server IP
 	RemoteIP          string                   `json:"remote_ip"` // Remote server IP
 	Config            string                   `json:"config,omitempty"`
 	RelayConfig       *RelayTunnelConfig       `json:"relay_config,omitempty"`
 	XrayConfig        *XrayTunnelProtocol      `json:"xray_config,omitempty"`
 	XrayReverseConfig *XrayReverseTunnelConfig `json:"xray_reverse_config,omitempty"`
-	NipovpnConfig     *NipovpnConfig           `json:"nipovpn_config,omitempty"`
 	ExitServerIP      string                   `json:"exit_server_ip,omitempty"`
 	ExitXrayPort      int                      `json:"exit_xray_port,omitempty"`
 	ExitXrayUUID      string                   `json:"exit_xray_uuid,omitempty"`
@@ -110,33 +109,6 @@ type XrayReverseTunnelConfig struct {
 	PortalPublicPort int    `json:"portal_public_port"`
 	XhttpMode        string `json:"xhttp_mode,omitempty"`
 	XhttpExtra       string `json:"xhttp_extra,omitempty"`
-}
-
-type NipovpnConfig struct {
-	Token            string   `json:"token"`
-	FakeUrls         []string `json:"fake_urls"`
-	Methods          []string `json:"methods"`
-	Endpoints        []string `json:"endpoints"`
-	AgentPort        int      `json:"agent_port"`
-	ServerPort       int      `json:"server_port"`
-	TlsEnable        bool     `json:"tls_enable"`
-	TlsCertPath      string   `json:"tls_cert_path"`
-	TlsKeyPath       string   `json:"tls_key_path"`
-	TunnelMode       string   `json:"tunnel_mode"`
-	Timeout          int      `json:"timeout"`
-	PullTimeout      int      `json:"pull_timeout"`
-	ConnectionReuse  *bool    `json:"connection_reuse"`
-	LogLevel         string   `json:"log_level"`
-	ServerThreads    int      `json:"server_threads"`
-	AgentThreads     int      `json:"agent_threads"`
-	TlsCertFile      string   `json:"tls_cert_file"`
-	TlsKeyFile       string   `json:"tls_key_file"`
-	TlsCaFile        string   `json:"tls_ca_file"`
-	HttpVersion      string   `json:"http_version"`
-	UserAgent        string   `json:"user_agent"`
-	Protocol         string   `json:"protocol"`
-	NipoExitXrayPort int      `json:"nipo_exit_xray_port,omitempty"`
-	NipoExitXrayUUID string   `json:"nipo_exit_xray_uuid,omitempty"`
 }
 
 // XrayTunnelProtocol matches the backend Protocol type with tunnel-specific fields

@@ -50,7 +50,6 @@ func TestTunnelControllerApplyNativeRelayConfig(t *testing.T) {
 		tunnelDir:          tmpDir,
 		forwarderProcesses: make(map[int]*exec.Cmd),
 		relayDriver:        relayDrv,
-		lastTraffic:        make(map[int]trafficSnapshot),
 		logger:             log.WithField("tag", "tunnel-test"),
 	}
 

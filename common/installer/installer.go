@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -305,35 +304,4 @@ func ExtractFromTarGz(src string, targetFile string, dest string) error {
 	}
 
 	return fmt.Errorf("target file %s not found in %s", targetFile, src)
-}
-
-// InstallNipovpn downloads and installs NipoVPN from a .deb package
-func InstallNipovpn() error {
-	// Check if already installed
-	if _, err := os.Stat("/usr/bin/nipovpn"); err == nil {
-		log.Info("NipoVPN already installed at /usr/bin/nipovpn, skipping")
-		return nil
-	}
-	if _, err := os.Stat("/usr/local/bin/nipovpn"); err == nil {
-		log.Info("NipoVPN found at /usr/local/bin/nipovpn (old location), skipping")
-		return nil
-	}
-
-	const version = "1.1.57"
-	url := fmt.Sprintf("https://github.com/MortezaBashsiz/nipovpn/releases/download/v%s/nipovpn_%s_amd64.deb", version, version)
-	log.Infof("Downloading NipoVPN v%s from %s", version, url)
-
-	debPath := "/tmp/nipovpn.deb"
-	if err := DownloadFile(url, debPath); err != nil {
-		return fmt.Errorf("failed to download nipovpn .deb: %w", err)
-	}
-	defer os.Remove(debPath)
-
-	cmd := exec.Command("apt", "install", "-y", debPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to install nipovpn .deb: %s, output: %s", err, string(out))
-	}
-
-	log.Info("NipoVPN installed successfully from .deb package")
-	return nil
 }

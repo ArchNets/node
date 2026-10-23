@@ -85,6 +85,13 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		return
 	}
 	log.Infof("started %d nodes", serverconfig.Data.Total)
+
+	// Initialize and start unified native tunnel controller directly in the main server daemon
+	tunnelCtrl := node.NewTunnelController(p, c.ApiConfig.ServerId, c)
+	if err := tunnelCtrl.Start(); err != nil {
+		log.WithField("err", err).Warn("Tunnel controller failed to start, will retry on next poll")
+	}
+	defer tunnelCtrl.Close()
 	if watch {
 		if _, err := os.Stat(config); err == nil {
 			// On file change, just signal reload; do not run reload concurrently here
@@ -113,17 +120,20 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		case <-osSignals:
 			nodes.Close()
 			_ = xraycore.Close()
+			if tunnelCtrl != nil {
+				tunnelCtrl.Close()
+			}
 			return
 		case <-reloadCh:
 			log.Info("received reload signal, reloading configuration...")
-			if err := reload(config, &nodes, &xraycore); err != nil {
+			if err := reload(config, &nodes, &xraycore, &tunnelCtrl); err != nil {
 				log.WithField("err", err).Error("reload failed")
 			}
 		}
 	}
 }
 
-func reload(config string, nodes **node.Node, xcore **core.XrayCore) error {
+func reload(config string, nodes **node.Node, xcore **core.XrayCore, tunnelCtrl **node.TunnelController) error {
 	// Preserve old reload channel so new core continues to receive signals
 	var oldReloadCh chan struct{}
 
@@ -163,6 +173,17 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore) error {
 
 	*nodes = newNodes
 	*xcore = newCore
+
+	// Reload tunnel controller
+	if *tunnelCtrl != nil {
+		(*tunnelCtrl).Close()
+	}
+	newTunnelCtrl := node.NewTunnelController(p, newConf.ApiConfig.ServerId, newConf)
+	if err := newTunnelCtrl.Start(); err != nil {
+		log.WithField("err", err).Warn("Failed to restart tunnel controller on reload")
+	}
+	*tunnelCtrl = newTunnelCtrl
+
 	log.Infof("%d nodes reloaded successfully", serverconfig.Data.Total)
 	runtime.GC()
 	return nil
