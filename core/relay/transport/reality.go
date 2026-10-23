@@ -185,18 +185,6 @@ func InspectRealityOrSplice(conn net.Conn, sni, password, originAddr, allowedExi
 		return false, nil
 	}
 
-	if allowedExitIP != "" {
-		if host, _, splitErr := net.SplitHostPort(conn.RemoteAddr().String()); splitErr == nil {
-			if host != allowedExitIP && host != "127.0.0.1" && host != "::1" {
-				captured := make([]byte, 5+recLen)
-				copy(captured[0:5], hdr[:])
-				copy(captured[5:], body)
-				go SpliceToOrigin(conn, captured, originAddr)
-				return false, nil
-			}
-		}
-	}
-
 	if body[0] == 0x01 && len(body) >= 38 {
 		key, keyErr := DeriveRealityKey(password, sni)
 		if keyErr == nil && VerifyRealityToken(key, body[6:38], realityMagic) {
