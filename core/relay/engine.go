@@ -217,7 +217,7 @@ func (e *Engine) startEntry() error {
 	ln, err := net.Listen("tcp", carrierAddr)
 	if err != nil {
 		if transport.ReclaimPortIfOrphanedNode(e.cfg.CarrierPort) {
-			e.logger.WithField("port", e.cfg.CarrierPort).Warn("Terminated orphaned node process holding carrier port, retrying bind...")
+			e.logger.WithField("port", e.cfg.CarrierPort).Warn("[Relay] Terminated orphaned node process holding carrier port, retrying bind...")
 			time.Sleep(300 * time.Millisecond)
 			ln, err = net.Listen("tcp", carrierAddr)
 		}
@@ -228,7 +228,7 @@ func (e *Engine) startEntry() error {
 			"port": e.cfg.CarrierPort,
 			"addr": carrierAddr,
 			"err":  conflictErr,
-		}).Error("Relay carrier port bind failed. Another process is occupying this port!")
+		}).Error("[Relay] Relay carrier port bind failed. Another process is occupying this port!")
 		return conflictErr
 	}
 	e.mu.Lock()
@@ -239,7 +239,7 @@ func (e *Engine) startEntry() error {
 		"carrierPort": e.cfg.CarrierPort,
 		"sni":         e.cfg.SNI,
 		"transport":   e.cfg.Transport,
-	}).Info("Entry carrier listener started successfully")
+	}).Info("[Relay] Entry carrier listener started successfully")
 
 	e.wg.Add(1)
 	go e.entryAcceptLoop(ln)
@@ -341,7 +341,7 @@ func (e *Engine) pushIdleStream(stream net.Conn) {
 			e.logger.WithFields(log.Fields{
 				"carrierPort": e.cfg.CarrierPort,
 				"remote":      stream.RemoteAddr().String(),
-			}).Info("Entry reverse carrier pool active: authenticated reverse socket received")
+			}).Info("[Relay] Entry reverse carrier pool active: authenticated reverse socket received")
 		}
 	default:
 		select {
@@ -482,7 +482,7 @@ func (e *Engine) logDialFailure(err error) {
 				"carrierPort": e.cfg.CarrierPort,
 				"entryIP":     e.cfg.EntryServerIP,
 				"err":         err,
-			}).Warn("Exit node failed to connect to entry carrier port (check firewall or port conflict on entry)")
+			}).Warn("[Relay] Exit node failed to connect to entry carrier port (check firewall or port conflict on entry)")
 		}
 	}
 }
@@ -590,7 +590,7 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 		e.logger.WithFields(log.Fields{
 			"carrierPort": e.cfg.CarrierPort,
 			"sni":         e.cfg.SNI,
-		}).Info("Exit reverse carrier connected and warm connections ready in pool")
+		}).Info("[Relay] Exit reverse carrier connected and warm connections ready in pool")
 	}
 
 	_ = stream.SetReadDeadline(time.Now().Add(4 * time.Minute))

@@ -37,7 +37,8 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	log.SetFormatter(&log.TextFormatter{
 		DisableTimestamp: true,
 		DisableQuote:     true,
-		PadLevelText:     false,
+		PadLevelText:     true,
+		ForceColors:      true,
 	})
 	if err != nil {
 		log.WithField("err", err).Error("failed to read config file")

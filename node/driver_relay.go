@@ -176,7 +176,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		"sni":       sni,
 		"origin":    originIP,
 		"carrier":   carrierPort,
-	}).Info("RelayDriver: Native Go Relay Engine started")
+	}).Info("[Relay] Native Go Relay Engine started")
 	return nil
 }
 
@@ -186,7 +186,7 @@ func (d *RelayDriver) Stop(tunnelId int) error {
 	if eng, ok := d.engines[tunnelId]; ok && eng != nil {
 		_ = eng.Close()
 		delete(d.engines, tunnelId)
-		d.logger.WithField("tunnelId", tunnelId).Info("RelayDriver: Native Go Relay Engine stopped")
+		d.logger.WithField("tunnelId", tunnelId).Info("[Relay] Native Go Relay Engine stopped")
 	}
 	return nil
 }

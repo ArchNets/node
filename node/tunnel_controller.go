@@ -440,6 +440,11 @@ func (c *TunnelController) statusReport() error {
 		})
 		if err != nil {
 			c.logger.WithField("err", err).Warn("Tunnel: Report status failed")
+		} else {
+			c.logger.WithFields(log.Fields{
+				"count":  len(statuses),
+				"online": statuses[0].Online,
+			}).Info("Reported tunnel status to panel")
 		}
 	}
 
@@ -553,7 +558,18 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
+	c.stateMu.Lock()
+	c.tunnels = append([]panel.TunnelInfo(nil), data.Tunnels...)
+	c.stateMu.Unlock()
+
 	c.logger.WithField("tunnelCount", len(data.Tunnels)).Info("Tunnel config applied")
+
+	// Trigger immediate status report so backend reflects online state without waiting for periodic interval
+	go func() {
+		time.Sleep(1 * time.Second)
+		_ = c.statusReport()
+	}()
+
 	return nil
 }
 
