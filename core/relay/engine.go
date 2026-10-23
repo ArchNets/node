@@ -66,6 +66,7 @@ type Engine struct {
 	activeStreams sync.Map
 	alive         atomic.Bool
 	lastDialLog   atomic.Int64
+	carrierFwd    atomic.Int64
 	logger        *log.Entry
 }
 
@@ -249,8 +250,12 @@ func (e *Engine) startEntry() error {
 		proto := strings.ToLower(strings.TrimSpace(rule.Protocol))
 		for _, pair := range pairs {
 			lPort, tPort := pair[0], pair[1]
-			if lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp") {
-				e.logger.WithField("port", lPort).Warn("Skipping TCP forwarder on carrier port to avoid collision")
+			if lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both") {
+				e.carrierFwd.Store(int64(tPort))
+				e.logger.WithFields(log.Fields{
+					"carrierPort": lPort,
+					"targetPort":  tPort,
+				}).Info("[Relay] Sharing carrier port with user forwarder (single-port multiplexing)")
 				continue
 			}
 			if proto == "tcp" || proto == "tcp,udp" || proto == "both" {
@@ -294,17 +299,30 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		}
 		carrierConn = tlsConn
 	} else {
-		originAddr := e.cfg.OriginIP
-		if originAddr == "" && e.cfg.SNI != "" {
-			if resolved, err := telemetry.ResolveOriginIP(e.cfg.SNI, ""); err == nil {
-				originAddr = resolved
-			}
-		}
-		authenticated, err := transport.InspectRealityOrSplice(rawConn, e.cfg.SNI, e.cfg.Password, originAddr, e.cfg.ExitServerIP)
-		if err != nil || !authenticated {
+		targetFwd := e.carrierFwd.Load()
+		hasUserFwd := targetFwd > 0
+		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		if err != nil {
 			return
 		}
-		carrierConn = rawConn
+		switch action {
+		case transport.ActionReverseCarrier:
+			carrierConn = inspectedConn
+
+		case transport.ActionUserClient:
+			go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			return
+
+		case transport.ActionDPIProbe:
+			originAddr := e.cfg.OriginIP
+			if originAddr == "" && e.cfg.SNI != "" {
+				if resolved, err := telemetry.ResolveOriginIP(e.cfg.SNI, ""); err == nil {
+					originAddr = resolved
+				}
+			}
+			go transport.SpliceToOrigin(inspectedConn, originAddr)
+			return
+		}
 	}
 
 	var stream net.Conn

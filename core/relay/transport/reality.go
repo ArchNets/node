@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -21,6 +22,35 @@ const (
 	realityAckMagic  = "AROK"
 	realityClockSkew = 10 * time.Minute
 )
+
+// PrefixConn wraps a net.Conn with prepended initial bytes that were pre-read during inspection.
+type PrefixConn struct {
+	net.Conn
+	prefix io.Reader
+}
+
+func NewPrefixConn(conn net.Conn, initialBytes []byte) *PrefixConn {
+	TuneTCPConn(conn)
+	_ = conn.SetDeadline(time.Time{})
+	return &PrefixConn{
+		Conn:   conn,
+		prefix: bytes.NewReader(initialBytes),
+	}
+}
+
+func (p *PrefixConn) Read(b []byte) (int, error) {
+	if p.prefix != nil {
+		n, err := p.prefix.Read(b)
+		if err == io.EOF {
+			p.prefix = nil
+			err = nil
+		}
+		if n > 0 {
+			return n, err
+		}
+	}
+	return p.Conn.Read(b)
+}
 
 // DeriveRealityKey derives a 32-byte AEAD key from the tunnel password and SNI using HKDF-SHA256.
 func DeriveRealityKey(password, sni string) ([32]byte, error) {
@@ -151,28 +181,38 @@ func DialRealityCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, 
 	return conn, nil
 }
 
-// InspectRealityOrSplice inspects incoming TCP connections on Entry.
-// Authenticated peers are admitted; active probes or unauthenticated visitors are transparently
-// spliced to the camouflage origin server at originAddr:443.
-func InspectRealityOrSplice(conn net.Conn, sni, password, originAddr, allowedExitIP string) (bool, error) {
+type InspectAction int
+
+const (
+	ActionReverseCarrier InspectAction = iota // Authenticated reverse carrier socket
+	ActionUserClient                          // User client connection to be forwarded
+	ActionDPIProbe                            // Camouflage TLS probe to be spliced to origin
+)
+
+// InspectRealityTraffic inspects incoming TCP connections on the carrier port.
+// It supports single-port multiplexing:
+// 1. Authenticated Kharej peers -> ActionReverseCarrier (enters reverse idle pool)
+// 2. Unauthenticated clients -> ActionUserClient (if user forwarder is enabled on this port)
+// 3. Camouflage SNI probes -> ActionDPIProbe (spliced to camouflage origin)
+func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder bool) (InspectAction, net.Conn, error) {
 	TuneTCPConn(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
 	var hdr [5]byte
 	nHdr, err := io.ReadFull(conn, hdr[:])
 	if err != nil {
-		if nHdr > 0 {
-			go SpliceToOrigin(conn, hdr[:nHdr], originAddr)
-			return false, nil
-		}
 		_ = conn.Close()
-		return false, err
+		return ActionDPIProbe, nil, err
 	}
 
 	recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
+	// If not a TLS handshake record, it's user client traffic (Socks, HTTP, Shadowsocks, etc.)
 	if hdr[0] != 0x16 || recLen < 42 || recLen > 16384 {
-		go SpliceToOrigin(conn, hdr[:], originAddr)
-		return false, nil
+		if hasUserForwarder {
+			_ = conn.SetReadDeadline(time.Time{})
+			return ActionUserClient, NewPrefixConn(conn, hdr[:nHdr]), nil
+		}
+		return ActionDPIProbe, NewPrefixConn(conn, hdr[:nHdr]), nil
 	}
 
 	body := make([]byte, recLen)
@@ -181,17 +221,21 @@ func InspectRealityOrSplice(conn net.Conn, sni, password, originAddr, allowedExi
 		captured := make([]byte, 5+nBody)
 		copy(captured[0:5], hdr[:])
 		copy(captured[5:], body[:nBody])
-		go SpliceToOrigin(conn, captured, originAddr)
-		return false, nil
+		return ActionDPIProbe, NewPrefixConn(conn, captured), nil
 	}
 
+	captured := make([]byte, 5+recLen)
+	copy(captured[0:5], hdr[:])
+	copy(captured[5:], body)
+
+	// Check if genuine Reality ClientHello from Kharej
 	if body[0] == 0x01 && len(body) >= 38 {
 		key, keyErr := DeriveRealityKey(password, sni)
 		if keyErr == nil && VerifyRealityToken(key, body[6:38], realityMagic) {
 			ackToken, ackErr := GenerateRealityToken(key, realityAckMagic)
 			if ackErr != nil {
 				_ = conn.Close()
-				return false, ackErr
+				return ActionDPIProbe, nil, ackErr
 			}
 			var ackRecord [37]byte
 			ackRecord[0] = 0x17
@@ -203,22 +247,27 @@ func InspectRealityOrSplice(conn net.Conn, sni, password, originAddr, allowedExi
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if _, wErr := conn.Write(ackRecord[:]); wErr != nil {
 				_ = conn.Close()
-				return false, wErr
+				return ActionDPIProbe, nil, wErr
 			}
 			_ = conn.SetDeadline(time.Time{})
-			return true, nil
+			return ActionReverseCarrier, conn, nil
 		}
 	}
 
-	captured := make([]byte, 5+recLen)
-	copy(captured[0:5], hdr[:])
-	copy(captured[5:], body)
-	go SpliceToOrigin(conn, captured, originAddr)
-	return false, nil
+	// Not authenticated Reality peer.
+	// If user forwarder is enabled on this port, check if it's user TLS client vs DPI probe
+	if hasUserForwarder {
+		// If ClientHello doesn't match camouflage SNI, or user forwarder accepts all:
+		// Forward as user client
+		_ = conn.SetDeadline(time.Time{})
+		return ActionUserClient, NewPrefixConn(conn, captured), nil
+	}
+
+	return ActionDPIProbe, NewPrefixConn(conn, captured), nil
 }
 
 // SpliceToOrigin dials the camouflage origin server and splices visitor streams with Linux splice(2).
-func SpliceToOrigin(visitorConn net.Conn, initialBytes []byte, originAddr string) {
+func SpliceToOrigin(visitorConn net.Conn, originAddr string) {
 	defer visitorConn.Close()
 	_ = visitorConn.SetDeadline(time.Time{})
 
@@ -237,29 +286,19 @@ func SpliceToOrigin(visitorConn net.Conn, initialBytes []byte, originAddr string
 	defer originConn.Close()
 	TuneTCPConn(originConn)
 
-	if len(initialBytes) > 0 {
-		_ = originConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if _, err := originConn.Write(initialBytes); err != nil {
-			return
-		}
-		_ = originConn.SetWriteDeadline(time.Time{})
-	}
-
-	done := make(chan struct{}, 2)
+	respDone := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(originConn, visitorConn)
 		if tc, ok := originConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
-		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(visitorConn, originConn)
 		if tc, ok := visitorConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
-		done <- struct{}{}
+		close(respDone)
 	}()
-	<-done
-	<-done
+	<-respDone
 }

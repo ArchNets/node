@@ -211,7 +211,10 @@ func TestReverseRealityEndToEnd_TCP_UDP_And_Probe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial carrier port as probe: %v", err)
 	}
-	_, _ = probeConn.Write([]byte("GET / HTTP/1.1\r\nHost: mock.hospital.ir\r\n\r\n"))
+	_, _ = probeConn.Write([]byte("GET / HTTP/1.1\r\nHost: mock.hospital.ir\r\nConnection: close\r\n\r\n"))
+	if tc, ok := probeConn.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	}
 	probeReply, _ := io.ReadAll(probeConn)
 	_ = probeConn.Close()
 	if !bytes.HasPrefix(probeReply, []byte("ORIGIN-CAMOUFLAGE:GET / HTTP/1.1")) {
@@ -265,5 +268,102 @@ func TestReverseRealityEndToEnd_TCP_UDP_And_Probe(t *testing.T) {
 	sample, err := telemetry.RunBandwidthProbe(entryEngine.ClaimReverseStream, entryEngine.Stats, 300*time.Millisecond)
 	if err != nil || sample.UploadMbps <= 0 || sample.DownloadMbps <= 0 {
 		t.Fatalf("RunBandwidthProbe failed: %v", err)
+	}
+}
+
+func TestCarrierPortForwarderSharing(t *testing.T) {
+	targetTCPPort := getFreeTCPPort(t)
+	tcpTargetLn, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(targetTCPPort)))
+	if err != nil {
+		t.Fatalf("failed to start target tcp server: %v", err)
+	}
+	defer tcpTargetLn.Close()
+	go func() {
+		for {
+			c, err := tcpTargetLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	carrierAndUserPort := getFreeTCPPort(t)
+
+	entryEngine := NewEngine(Config{
+		TunnelID:           202,
+		Role:               "entry",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierAndUserPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "shared-port-secret",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders: []routing.ForwarderRule{
+			{
+				ID:         1,
+				Protocol:   "tcp",
+				ListenIP:   "127.0.0.1",
+				ListenPort: carrierAndUserPort, // Exactly the same port as carrier!
+				TargetIP:   "127.0.0.1",
+				TargetPort: targetTCPPort,
+			},
+		},
+	})
+	if err := entryEngine.Start(); err != nil {
+		t.Fatalf("failed to start entry engine on shared port: %v", err)
+	}
+	defer entryEngine.Close()
+
+	exitEngine := NewEngine(Config{
+		TunnelID:           202,
+		Role:               "exit",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierAndUserPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "shared-port-secret",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exitEngine.Start(); err != nil {
+		t.Fatalf("failed to start exit engine: %v", err)
+	}
+	defer exitEngine.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entryEngine.Stats.PoolIdleConnections.Load() >= 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if entryEngine.Stats.PoolIdleConnections.Load() < 1 {
+		t.Fatalf("expected warm idle pool connection on entry, got %d", entryEngine.Stats.PoolIdleConnections.Load())
+	}
+
+	// Dial into the shared carrier port as a user client!
+	client, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(carrierAndUserPort)), 3*time.Second)
+	if err != nil {
+		t.Fatalf("failed to dial shared carrier port as user: %v", err)
+	}
+	msg := []byte("User-Traffic-On-Carrier-Port-Shared!")
+	if _, err := client.Write(msg); err != nil {
+		t.Fatalf("failed to write user message: %v", err)
+	}
+	echo := make([]byte, len(msg))
+	if _, err := io.ReadFull(client, echo); err != nil {
+		t.Fatalf("failed to read echoed user message: %v", err)
+	}
+	_ = client.Close()
+	if !bytes.Equal(msg, echo) {
+		t.Fatalf("expected echoed %q, got %q", string(msg), string(echo))
 	}
 }
