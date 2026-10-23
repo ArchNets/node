@@ -325,7 +325,8 @@ type Protocol struct {
 
 	// OpenVPN-specific fields
 	OpenVPNSubnet   string `json:"openvpn_subnet"`
-	OpenVPNProto    string `json:"openvpn_proto"`     // Transport: "udp" or "tcp" (default: udp)
+	OpenVPNProto    string `json:"openvpn_proto"`     // Transport: "both", "udp", or "tcp" (default: both)
+	OpenVPNTCPPort  int    `json:"openvpn_tcp_port"`  // Secondary TCP port for dual mode (defaults to Port if 0)
 	OpenVPNTlsCrypt string `json:"openvpn_tls_crypt"` // tls-crypt static key content (from admin panel)
 }
 

@@ -2,8 +2,10 @@ package node
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -17,20 +19,20 @@ import (
 
 // OpenVPNController manages OpenVPN protocol nodes.
 type OpenVPNController struct {
-	tag         string
-	xrayTag     string // Xray inbound tag matching panel routing rules (e.g. "openvpn:28")
-	info        *panel.NodeInfo
-	apiClient   *panel.ClientV1
-	openvpnCore *vCore.OpenVPNCore
-	limiter     *limiter.Limiter
-	xrayCore    *vCore.XrayCore
+	tag          string
+	xrayTag      string // Xray inbound tag matching panel routing rules (e.g. "openvpn:28")
+	info         *panel.NodeInfo
+	apiClient    *panel.ClientV1
+	openvpnCores []*vCore.OpenVPNCore
+	limiter      *limiter.Limiter
+	xrayCore     *vCore.XrayCore
 
 	userList                []panel.UserInfo
 	userListMonitorPeriodic *task.Task
-	userReportPeriodic *task.Task
-	protocolIndex      int
-	isPrimaryReporter  bool
-	tproxyEnabled      bool
+	userReportPeriodic      *task.Task
+	protocolIndex           int
+	isPrimaryReporter       bool
+	tproxyEnabled           bool
 }
 
 func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *OpenVPNController {
@@ -91,66 +93,102 @@ func (c *OpenVPNController) Start() error {
 		certFile, keyFile = certutil.GetCertPaths(c.info.Protocol.SNI, c.info.Type, c.info.Id)
 	}
 
-	proto := c.info.Protocol.OpenVPNProto
+	proto := strings.ToLower(strings.TrimSpace(c.info.Protocol.OpenVPNProto))
 	if proto == "" {
-		proto = "udp"
+		proto = "both"
 	}
 
-	subnet := "10.9.0.0/24"
-	if c.info.Protocol.OpenVPNSubnet != "" { subnet = c.info.Protocol.OpenVPNSubnet }
-
-	workDir := filepath.Join("/etc/archnets/openvpn", c.tag)
-
-	openvpnCore, err := vCore.NewOpenVPNCore(
-		c.tag,
-		c.info.Protocol.Port,
-		proto,
-		subnet,
-		workDir,
-		certFile,
-		keyFile,
-		c.info.Protocol.OpenVPNTlsCrypt,
-	)
-	if err != nil {
-		return err
+	baseSubnet := "10.9.0.0/24"
+	if c.info.Protocol.OpenVPNSubnet != "" {
+		baseSubnet = c.info.Protocol.OpenVPNSubnet
 	}
-	c.openvpnCore = openvpnCore
 
-	c.openvpnCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
+	type instanceConfig struct {
+		proto  string
+		port   int
+		subnet string
+	}
+	var instances []instanceConfig
+	udpSubnet, tcpSubnet := deriveSubnets(baseSubnet)
+	tcpPort := c.info.Protocol.OpenVPNTCPPort
+	if tcpPort <= 0 {
+		tcpPort = c.info.Protocol.Port
+	}
 
-	// Route OpenVPN client traffic through Xray's routing engine via TPROXY.
-	// If inbound registration fails, deliberately fall back to plain
-	// MASQUERADE NAT (TProxyPort stays 0) instead of failing the node:
-	// installing TPROXY capture rules without a live inbound behind them
-	// would blackhole every client packet.
+	switch proto {
+	case "udp":
+		instances = append(instances, instanceConfig{proto: "udp", port: c.info.Protocol.Port, subnet: baseSubnet})
+	case "tcp":
+		instances = append(instances, instanceConfig{proto: "tcp", port: tcpPort, subnet: baseSubnet})
+	case "both":
+		fallthrough
+	default:
+		instances = append(instances,
+			instanceConfig{proto: "udp", port: c.info.Protocol.Port, subnet: udpSubnet},
+			instanceConfig{proto: "tcp", port: tcpPort, subnet: tcpSubnet},
+		)
+	}
+
+	// Route OpenVPN client traffic through Xray's routing engine via TPROXY if enabled.
+	var tproxyPort int
 	if c.info.Protocol.EnableTProxy {
-		if tproxyPort, err := addTProxyInbound(c.xrayCore, c.xrayTag, c.info.Protocol.TProxyPort); err != nil {
+		var err error
+		tproxyPort, err = addTProxyInbound(c.xrayCore, c.xrayTag, c.info.Protocol.TProxyPort)
+		if err != nil {
 			log.WithError(err).WithField("tag", c.xrayTag).Error(
 				"TPROXY setup failed — OpenVPN will use MASQUERADE only")
 		} else {
-			c.openvpnCore.SetTProxyConfig(
-				tproxyPort,
-				c.info.Protocol.TProxySubnet,
-				c.info.Protocol.TProxyBypassUDP,
-				c.info.Protocol.DropICMPUnreachable,
-			)
 			c.tproxyEnabled = true
 			log.WithFields(log.Fields{"tag": c.xrayTag, "tproxyPort": tproxyPort}).Info("OpenVPN TPROXY inbound registered")
 		}
 	}
 
-	c.openvpnCore.SetLimiter(c.limiter)
-	c.openvpnCore.AddUsers(users)
+	for _, inst := range instances {
+		instTag := fmt.Sprintf("%s-%s", c.tag, inst.proto)
+		workDir := filepath.Join("/etc/archnets/openvpn", instTag)
 
-	if err := c.openvpnCore.Start(); err != nil {
-		return err
+		openvpnCore, err := vCore.NewOpenVPNCore(
+			instTag,
+			inst.port,
+			inst.proto,
+			inst.subnet,
+			workDir,
+			certFile,
+			keyFile,
+			c.info.Protocol.OpenVPNTlsCrypt,
+		)
+		if err != nil {
+			c.cleanupCores()
+			return err
+		}
+
+		openvpnCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
+
+		if c.tproxyEnabled {
+			openvpnCore.SetTProxyConfig(
+				tproxyPort,
+				c.info.Protocol.TProxySubnet,
+				c.info.Protocol.TProxyBypassUDP,
+				c.info.Protocol.DropICMPUnreachable,
+			)
+		}
+
+		openvpnCore.SetLimiter(c.limiter)
+		openvpnCore.AddUsers(users)
+
+		if err := openvpnCore.Start(); err != nil {
+			c.cleanupCores()
+			return err
+		}
+		c.openvpnCores = append(c.openvpnCores, openvpnCore)
 	}
 
 	c.startTasks()
 
 	log.WithFields(log.Fields{
 		"tag":       c.tag,
-		"port":      c.info.Protocol.Port,
+		"proto":     proto,
+		"instances": len(instances),
 		"userCount": len(users),
 	}).Info("OpenVPN controller started")
 
@@ -173,13 +211,20 @@ func (c *OpenVPNController) Close() error {
 		}
 	}
 
-	if c.openvpnCore != nil {
-		c.openvpnCore.Stop()
-	}
+	c.cleanupCores()
 	limiter.DeleteLimiter(c.tag)
 
 	log.WithField("tag", c.tag).Info("OpenVPN controller closed")
 	return nil
+}
+
+func (c *OpenVPNController) cleanupCores() {
+	for _, core := range c.openvpnCores {
+		if core != nil {
+			core.Stop()
+		}
+	}
+	c.openvpnCores = nil
 }
 
 func (c *OpenVPNController) startTasks() {
@@ -220,11 +265,15 @@ func (c *OpenVPNController) userListMonitor() error {
 	deleted, added := diffUserList(c.userList, newUsers)
 
 	if len(deleted) > 0 {
-		c.openvpnCore.DelUsers(deleted)
+		for _, core := range c.openvpnCores {
+			core.DelUsers(deleted)
+		}
 		c.limiter.UpdateUser(c.tag, nil, deleted)
 	}
 	if len(added) > 0 {
-		c.openvpnCore.AddUsers(added)
+		for _, core := range c.openvpnCores {
+			core.AddUsers(added)
+		}
 		c.limiter.UpdateUser(c.tag, added, nil)
 	}
 
@@ -242,7 +291,20 @@ func (c *OpenVPNController) reportTask() error {
 		reportMin = c.info.TrafficReportThreshold
 	}
 
-	trafficMap := c.openvpnCore.GetTrafficAndReset()
+	trafficMap := make(map[int]*vCore.UserTraffic)
+	for _, core := range c.openvpnCores {
+		for uid, t := range core.GetTrafficAndReset() {
+			if existing, ok := trafficMap[uid]; ok {
+				existing.Upload += t.Upload
+				existing.Download += t.Download
+			} else {
+				trafficMap[uid] = &vCore.UserTraffic{
+					Upload:   t.Upload,
+					Download: t.Download,
+				}
+			}
+		}
+	}
 
 	var userTraffic []panel.UserTraffic
 	for uid, traffic := range trafficMap {
@@ -260,7 +322,16 @@ func (c *OpenVPNController) reportTask() error {
 		}
 	}
 
-	onlineUsers := c.openvpnCore.GetOnlineUsers()
+	var onlineUsers []panel.OnlineUser
+	seenOnline := make(map[int]bool)
+	for _, core := range c.openvpnCores {
+		for _, ou := range core.GetOnlineUsers() {
+			if !seenOnline[ou.UID] {
+				seenOnline[ou.UID] = true
+				onlineUsers = append(onlineUsers, ou)
+			}
+		}
+	}
 
 	var result []panel.OnlineUser
 	trafficUIDs := make(map[int]bool)
@@ -288,7 +359,7 @@ func (c *OpenVPNController) reportTask() error {
 		if err != nil {
 			log.Print(err)
 		}
-		if err := c.apiClient.ReportNodeStatus(&panel.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime}); err != nil {
+		if err := c.apiClient.ReportNodeStatus(&panel.NodeStatus{CPU: CPU, Mem: Mem, Disk: Disk, Uptime: Uptime, PingMs: c.apiClient.GetLastApiLatency()}); err != nil {
 			log.Print(err)
 		}
 	}
@@ -298,4 +369,22 @@ func (c *OpenVPNController) reportTask() error {
 
 func (c *OpenVPNController) getIndexedProtocolName() string {
 	return getIndexedProtocolName(c.info.Type, c.protocolIndex)
+}
+
+func deriveSubnets(baseSubnet string) (udpSubnet, tcpSubnet string) {
+	if baseSubnet == "" {
+		baseSubnet = "10.9.0.0/24"
+	}
+	ip, pool, err := net.ParseCIDR(baseSubnet)
+	if err != nil || ip.To4() == nil {
+		return "10.9.1.0/24", "10.9.2.0/24"
+	}
+	ipv4 := ip.To4()
+	udpSubnet = pool.String()
+	third := int(ipv4[2]) + 1
+	if third > 254 {
+		third = int(ipv4[2]) - 1
+	}
+	tcpSubnet = fmt.Sprintf("%d.%d.%d.0/24", ipv4[0], ipv4[1], third)
+	return udpSubnet, tcpSubnet
 }

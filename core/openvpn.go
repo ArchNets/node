@@ -104,7 +104,7 @@ func NewOpenVPNCore(tag string, port int, proto, subnet, workDir, certFile, keyF
 		CertFile:      certFile,
 		KeyFile:       keyFile,
 		TlsCryptKey:   tlsCryptKey,
-		InterfaceName: fmt.Sprintf("ovpn-%d", port),
+		InterfaceName: fmt.Sprintf("ovpn-%s-%d", proto, port),
 		users: &ovpnUserMap{
 			uuidToID: make(map[string]int),
 			idToUUID: make(map[int]string),
