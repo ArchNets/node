@@ -321,6 +321,25 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 		password = t.RelayConfig.Password
 	}
 
+	// Verify tunnel connectivity before running sweep
+	if c.relayDriver != nil {
+		activeEngine := c.relayDriver.GetEngine(t.Id)
+		if activeEngine == nil || activeEngine.Stats.PoolIdleConnections.Load() == 0 {
+			waitExit := time.Now().Add(10 * time.Second)
+			for time.Now().Before(waitExit) {
+				if activeEngine != nil && activeEngine.Stats.PoolIdleConnections.Load() > 0 {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+				activeEngine = c.relayDriver.GetEngine(t.Id)
+			}
+			if activeEngine == nil || activeEngine.Stats.PoolIdleConnections.Load() == 0 {
+				c.reportScanError(t.Id, "Cannot run benchmark sweep: Exit server (Germany) is not connected to tunnel carrier")
+				return
+			}
+		}
+	}
+
 	results := make([]panel.ScanResultItem, 0, total)
 
 	for idx, cand := range candidates {
@@ -353,6 +372,11 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			LastTested: cand.Index,
 			Phase:      scanMode,
 		})
+	}
+
+	if len(results) == 0 {
+		c.reportScanError(t.Id, "Benchmark sweep produced 0 valid results (Exit server disconnected during test)")
+		return
 	}
 
 	_ = c.apiClient.ReportScanResults(&panel.ScanResultsRequest{

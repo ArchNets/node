@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/archnets/node/core/relay/telemetry"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -87,6 +88,11 @@ func StartUDPListenerLoop(
 			if !exists {
 				stream, claimErr := claimStreamFn(3 * time.Second)
 				if claimErr != nil {
+					log.WithFields(log.Fields{
+						"targetPort": targetPort,
+						"client":     clientAddr.String(),
+						"err":        claimErr,
+					}).Warn("[Relay] Client UDP packet dropped: reverse pool is empty (waiting for Exit server to connect)")
 					continue
 				}
 				_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))

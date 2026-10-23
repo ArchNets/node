@@ -33,8 +33,7 @@ import (
 )
 
 const (
-	TunnelDir      = "/etc/archnets/tunnel"
-	NodepassBinary = "/usr/local/bin/nodepass"
+	TunnelDir = "/etc/archnets/tunnel"
 )
 
 const (
@@ -191,10 +190,6 @@ func (c *TunnelController) Uninstall() error {
 	if err := os.RemoveAll(c.tunnelDir); err != nil {
 		c.logger.WithField("err", err).Warn("Failed to remove tunnel directory")
 	}
-
-	// Remove system binaries (optional, keep them if others might use them?)
-	// User said "deleting everything too", so we remove them.
-	_ = os.Remove(NodepassBinary)
 
 	c.logger.Info("Tunnel components uninstalled")
 	return nil
@@ -574,65 +569,15 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 }
 
 func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) error {
-	var cmd *exec.Cmd
-
 	switch f.ForwarderType {
 	case "relay", "waterwall":
-		// Native Go relay engine handles its own forwarding rules internally, skip
-		c.logger.WithField("tunnelId", tunnelId).Debug("Skipping native relay forwarder (handled by native engine)")
+		// Relay engine handles forwarding rules internally
+		c.logger.WithField("tunnelId", tunnelId).Debug("Skipping relay forwarder (handled by relay engine)")
 		return nil
-
-	case "nodepass":
-		if _, err := os.Stat(NodepassBinary); os.IsNotExist(err) {
-			return fmt.Errorf("nodepass binary not found at %s", NodepassBinary)
-		}
-		// nodepass client://0.0.0.0:listen_port/target_ip:target_port
-		target := fmt.Sprintf("client://0.0.0.0:%d/%s:%d", f.ListenPort, f.TargetIP, f.TargetPort)
-		cmd = exec.Command(NodepassBinary, target)
 
 	default:
 		return fmt.Errorf("unknown forwarder type: %s", f.ForwarderType)
 	}
-
-	// Redirect output to forwarder log file
-	if c.forwarderLogFile != nil {
-		cmd.Stdout = c.forwarderLogFile
-		cmd.Stderr = c.forwarderLogFile
-	}
-
-	setProcessGroup(cmd)
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	// Use composite key for multiple forwarders per tunnel
-	key := tunnelId*10000 + f.ListenPort
-	c.forwarderMu.Lock()
-	c.forwarderProcesses[key] = cmd
-	c.forwarderMu.Unlock()
-
-	// Monitor process in background
-	c.forwarderWg.Add(1)
-	go func() {
-		defer c.forwarderWg.Done()
-		_ = cmd.Wait()
-		c.forwarderMu.Lock()
-		if c.forwarderProcesses[key] == cmd {
-			delete(c.forwarderProcesses, key)
-		}
-		c.forwarderMu.Unlock()
-	}()
-
-	c.logger.WithFields(log.Fields{
-		"tunnelId":   tunnelId,
-		"type":       f.ForwarderType,
-		"port":       f.ListenPort,
-		"targetIP":   f.TargetIP,
-		"targetPort": f.TargetPort,
-	}).Info("Forwarder started")
-
-	return nil
 }
 
 func (c *TunnelController) startXrayInstance(t panel.TunnelInfo) error {

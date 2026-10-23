@@ -10,6 +10,7 @@ import (
 
 	"github.com/archnets/node/core/relay/routing"
 	"github.com/archnets/node/core/relay/telemetry"
+	"github.com/archnets/node/core/relay/transport"
 )
 
 func getFreeTCPPort(t *testing.T) int {
@@ -365,5 +366,63 @@ func TestCarrierPortForwarderSharing(t *testing.T) {
 	_ = client.Close()
 	if !bytes.Equal(msg, echo) {
 		t.Fatalf("expected echoed %q, got %q", string(msg), string(echo))
+	}
+}
+
+func TestHalfDuplexCloseWritePreservation(t *testing.T) {
+	// Setup mock upload listener and download listener
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upLn.Close()
+
+	downLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer downLn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		// Server accepts upload connection, reads all until EOF, then replies on download connection
+		upSrv, _ := upLn.Accept()
+		defer upSrv.Close()
+		buf, _ := io.ReadAll(upSrv)
+
+		downSrv, _ := downLn.Accept()
+		defer downSrv.Close()
+		_, _ = downSrv.Write(append([]byte("REPLY:"), buf...))
+		close(done)
+	}()
+
+	upCli, err := net.Dial("tcp", upLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	downCli, err := net.Dial("tcp", downLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hd := transport.NewHalfDuplexConn(downCli, upCli)
+	defer hd.Close()
+
+	// Write payload and close write half!
+	_, _ = hd.Write([]byte("HELLO-HALFDUPLEX"))
+	if err := hd.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite failed: %v", err)
+	}
+
+	<-done
+
+	// Read reply on the download socket - MUST NOT be prematurely closed!
+	replyBuf := make([]byte, 64)
+	n, err := hd.Read(replyBuf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read failed after CloseWrite: %v", err)
+	}
+	if string(replyBuf[:n]) != "REPLY:HELLO-HALFDUPLEX" {
+		t.Fatalf("unexpected reply: %s", string(replyBuf[:n]))
 	}
 }

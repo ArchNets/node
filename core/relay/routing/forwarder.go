@@ -7,6 +7,7 @@ import (
 
 	"github.com/archnets/node/core/relay/telemetry"
 	"github.com/archnets/node/core/relay/transport"
+	log "github.com/sirupsen/logrus"
 )
 
 type halfCloser interface {
@@ -28,9 +29,19 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 
 	stream, err := claimStreamFn(4 * time.Second)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"targetPort": targetPort,
+			"client":     clientConn.RemoteAddr().String(),
+			"err":        err,
+		}).Warn("[Relay] Client TCP connection dropped: reverse pool is empty (waiting for Exit server to connect)")
 		return
 	}
 	defer stream.Close()
+
+	log.WithFields(log.Fields{
+		"targetPort": targetPort,
+		"client":     clientConn.RemoteAddr().String(),
+	}).Info("[Relay] Splicing client connection to Exit target port")
 
 	_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
 	if err := WriteRoutingHeader(stream, RouteProtoTCP, targetPort); err != nil {
@@ -80,10 +91,18 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 	targetAddr := net.JoinHostPort(targetIP, strconv.Itoa(int(targetPort)))
 	targetConn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"targetAddr": targetAddr,
+			"err":        err,
+		}).Warn("[Relay] Exit failed to connect to local target service (is service listening on target port?)")
 		return
 	}
 	defer targetConn.Close()
 	transport.TuneTCPConn(targetConn)
+
+	log.WithFields(log.Fields{
+		"targetAddr": targetAddr,
+	}).Info("[Relay] Exit successfully connected to local target service")
 
 	if stats != nil {
 		stats.ActiveConnections.Add(1)

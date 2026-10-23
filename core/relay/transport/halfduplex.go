@@ -51,6 +51,34 @@ func (c *HalfDuplexConn) WriteTo(w io.Writer) (int64, error) {
 	return io.Copy(w, c.readConn)
 }
 
+func (c *HalfDuplexConn) CloseWrite() error {
+	if tc, ok := c.writeConn.(*net.TCPConn); ok {
+		return tc.CloseWrite()
+	}
+	type closer interface{ CloseWrite() error }
+	if hc, ok := c.writeConn.(closer); ok {
+		return hc.CloseWrite()
+	}
+	if c.writeConn != nil {
+		return c.writeConn.Close()
+	}
+	return nil
+}
+
+func (c *HalfDuplexConn) CloseRead() error {
+	if tc, ok := c.readConn.(*net.TCPConn); ok {
+		return tc.CloseRead()
+	}
+	type closer interface{ CloseRead() error }
+	if hc, ok := c.readConn.(closer); ok {
+		return hc.CloseRead()
+	}
+	if c.readConn != nil {
+		return c.readConn.Close()
+	}
+	return nil
+}
+
 func (c *HalfDuplexConn) Close() error {
 	var err1, err2 error
 	c.closeOnce.Do(func() {

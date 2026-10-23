@@ -52,6 +52,17 @@ func (p *PrefixConn) Read(b []byte) (int, error) {
 	return p.Conn.Read(b)
 }
 
+func (p *PrefixConn) CloseWrite() error {
+	if tc, ok := p.Conn.(*net.TCPConn); ok {
+		return tc.CloseWrite()
+	}
+	type closer interface{ CloseWrite() error }
+	if hc, ok := p.Conn.(closer); ok {
+		return hc.CloseWrite()
+	}
+	return p.Conn.Close()
+}
+
 // DeriveRealityKey derives a 32-byte AEAD key from the tunnel password and SNI using HKDF-SHA256.
 func DeriveRealityKey(password, sni string) ([32]byte, error) {
 	var key [32]byte

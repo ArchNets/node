@@ -15,53 +15,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// getLatestNodepassVersion fetches the latest version tag from GitHub API
-func getLatestNodepassVersion() (string, error) {
-	resp, err := http.Get("https://api.github.com/repos/NodePassProject/nodepass/releases/latest")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
-	}
-
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", err
-	}
-
-	// Remove 'v' prefix if present
-	version := strings.TrimPrefix(release.TagName, "v")
-	return version, nil
-}
-
-// InstallNodepass downloads and installs the latest Nodepass to /usr/local/bin
-func InstallNodepass() error {
-	dest := "/usr/local/bin/nodepass"
-	log.Infof("Installing Nodepass to %s", dest)
-
-	version, err := getLatestNodepassVersion()
-	if err != nil {
-		log.Warnf("Failed to fetch latest nodepass version, using fallback: %v", err)
-		version = "1.15.0"
-	}
-
-	nodepassURL := fmt.Sprintf("https://github.com/NodePassProject/nodepass/releases/download/v%s/nodepass_%s_linux_amd64.tar.gz", version, version)
-	log.Infof("Downloading NodePass v%s", version)
-
-	tarGzPath := dest + ".tar.gz"
-	if err := DownloadFile(nodepassURL, tarGzPath); err != nil {
-		return err
-	}
-	defer os.Remove(tarGzPath)
-
-	return ExtractFromTarGz(tarGzPath, "nodepass", dest)
-}
-
 // CopyFile copies a file from src to dst
 func CopyFile(src, dst string) error {
 	in, err := os.Open(src)

@@ -28,9 +28,6 @@ func StopProcess(pid int) error {
 	return process.Kill()
 }
 
-// KillOrphanedForwarders kills any leftover forwarder processes
+// KillOrphanedForwarders is a no-op on Windows
 func KillOrphanedForwarders() {
- for _, name := range []string{"nodepass"} {
-  _ = exec.Command("taskkill", "/F", "/IM", name+".exe").Run()
- }
 }
