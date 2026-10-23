@@ -13,21 +13,15 @@ cur_dir=$(pwd)
 # check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
-elif cat /etc/issue | grep -Eqi "alpine"; then
+elif grep -Eqi "alpine" /etc/issue 2>/dev/null || grep -Eqi "alpine" /etc/os-release 2>/dev/null; then
     release="alpine"
-elif cat /etc/issue | grep -Eqi "debian"; then
+elif grep -Eqi "debian" /etc/issue 2>/dev/null || grep -Eqi "debian" /etc/os-release 2>/dev/null; then
     release="debian"
-elif cat /etc/issue | grep -Eqi "ubuntu"; then
+elif grep -Eqi "ubuntu" /etc/issue 2>/dev/null || grep -Eqi "ubuntu" /etc/os-release 2>/dev/null; then
     release="ubuntu"
-elif cat /etc/issue | grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux"; then
+elif grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux" /etc/issue 2>/dev/null || grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux" /etc/os-release 2>/dev/null; then
     release="centos"
-elif cat /proc/version | grep -Eqi "debian"; then
-    release="debian"
-elif cat /proc/version | grep -Eqi "ubuntu"; then
-    release="ubuntu"
-elif cat /proc/version | grep -Eqi "centos|red hat|redhat|rocky|alma|oracle linux"; then
-    release="centos"
-elif cat /proc/version | grep -Eqi "arch"; then
+elif grep -Eqi "arch|cachyos|manjaro" /etc/os-release 2>/dev/null || grep -Eqi "arch" /proc/version 2>/dev/null; then
     release="arch"
 else
     echo -e "${red}System version not detected. Please contact the script author!${plain}\n" && exit 1
@@ -609,20 +603,13 @@ tunnel_log() {
                 [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f" | python3 -m json.tool 2>/dev/null || cat "$f"
                 echo ""
             done
-            ;;
-        *)
-            echo -e "${red}Please enter a valid number [1-3]${plain}"
-            ;;
-    esac
-}
-            done
             for f in /etc/archnets/tunnel/sni_spoofing_*.ini; do
                 [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f"
                 echo ""
             done
             ;;
         *)
-            echo -e "${red}Invalid choice${plain}"
+            echo -e "${red}Please enter a valid number [1-3]${plain}"
             ;;
     esac
 
