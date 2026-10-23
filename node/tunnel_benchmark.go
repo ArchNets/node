@@ -106,6 +106,53 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 			})
 		}
 
+	case "matrix":
+		var snis []telemetry.SNIPreset
+		if cmd != nil && len(cmd.CustomSNIs) > 0 {
+			for _, custom := range cmd.CustomSNIs {
+				clean := strings.TrimSpace(custom)
+				if clean != "" {
+					orig, _ := telemetry.ResolveOriginIP(clean, "")
+					snis = append(snis, telemetry.SNIPreset{
+						SNI:      clean,
+						Label:    clean,
+						OriginIP: orig,
+						Category: "custom",
+					})
+				}
+			}
+		}
+		if len(snis) == 0 {
+			snis = telemetry.GetActiveSNIPresets()
+		}
+
+		idx := 1
+		for _, preset := range snis {
+			// Combination A: Anti-DPI Combo (HalfDuplex + Fisher)
+			candidates = append(candidates, BenchmarkCandidate{
+				Index:         idx,
+				SNI:           preset.SNI,
+				OriginIP:      preset.OriginIP,
+				Transport:     "reverse-reality",
+				MethodLabel:   "Reverse Reality + HalfDuplex + Fisher",
+				UseHalfDuplex: true,
+				UseFisher:     true,
+			})
+			idx++
+
+			// Combination B: Base Full-Duplex (Without HalfDuplex or Fisher)
+			candidates = append(candidates, BenchmarkCandidate{
+				Index:         idx,
+				SNI:           preset.SNI,
+				OriginIP:      preset.OriginIP,
+				Transport:     "reverse-reality",
+				MethodLabel:   "Reverse Reality (Full-Duplex)",
+				UseHalfDuplex: false,
+				UseFisher:     false,
+			})
+			idx++
+		}
+
 	default:
 		var snis []telemetry.SNIPreset
 		if cmd != nil && len(cmd.CustomSNIs) > 0 {

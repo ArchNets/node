@@ -256,9 +256,7 @@ func (e *Engine) startEntry() error {
 					"carrierPort": lPort,
 					"targetPort":  tPort,
 				}).Info("[Relay] Sharing carrier port with user forwarder (single-port multiplexing)")
-				continue
-			}
-			if proto == "tcp" || proto == "tcp,udp" || proto == "both" {
+			} else if proto == "tcp" || proto == "tcp,udp" || proto == "both" {
 				if err := e.startTCPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
 					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start TCP forwarder listener")
 				}
