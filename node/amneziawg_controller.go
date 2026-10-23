@@ -333,6 +333,7 @@ func (c *AmneziaWGController) reportTask() error {
 			Mem:    Mem,
 			Disk:   Disk,
 			Uptime: Uptime,
+			PingMs: c.apiClient.GetLastApiLatency(),
 		})
 		if err != nil {
 			log.Print(err)

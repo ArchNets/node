@@ -193,7 +193,7 @@ func TestPingTarget(t *testing.T) {
 	}
 
 	// Test with empty IP
-	latency, online := tc.pingTarget("")
+	latency, online := tc.pingTarget("", 0)
 	if online {
 		t.Error("pingTarget with empty IP should be offline")
 	}
@@ -202,7 +202,7 @@ func TestPingTarget(t *testing.T) {
 	}
 
 	// Test with loopback (should be online on most systems)
-	latency, online = tc.pingTarget("127.0.0.1")
+	latency, online = tc.pingTarget("127.0.0.1", 0)
 	// Note: In some CI/test environments, ping might be restricted.
 	// We'll just log if it fails but not necessarily fail the test if it's
 	// clearly an environment issue.

@@ -1,0 +1,11 @@
+Log:
+  Level: info
+  Output: ""
+  Access: none
+
+Api:
+  ApiHost: "https://panel.archnets.com"
+  ServerID: 0
+  SecretKey: "change-me"
+  Timeout: 30
+  PerProtocolUserList: true

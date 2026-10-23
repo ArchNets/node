@@ -1,0 +1,4 @@
+# ArchNet Node KataBump Dependencies
+# The launcher is self-contained using Python stdlib,
+# but requirements.txt is required by KataBump to initialize the Python environment.
+python-dotenv>=1.0.0

@@ -23,7 +23,8 @@ type ClientV1 struct {
 	userEtags map[string]string
 	userMu    sync.RWMutex
 	userLists map[string]*UserListBody
-	AliveMap  *AliveMap
+	AliveMap      *AliveMap
+	lastLatencyMs int
 }
 
 type ClientV2 struct {

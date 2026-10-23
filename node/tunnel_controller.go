@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -408,12 +409,21 @@ func (c *TunnelController) configMonitor() error {
 	return nil
 }
 
-// pingTarget pings a target IP and returns latency and online status
-func (c *TunnelController) pingTarget(ip string) (int, bool) {
+// pingTarget checks connectivity and latency to a target IP or host using TCP or ICMP ping fallback
+func (c *TunnelController) pingTarget(ip string, port int) (int, bool) {
 	if ip == "" {
 		return 0, false
 	}
-	// Run: ping -c 1 -W 1 <ip>
+	// Prefer TCP dial if port is provided
+	if port > 0 {
+		start := time.Now()
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
+			return int(time.Since(start).Milliseconds()), true
+		}
+	}
+	// Fallback to ICMP ping
 	cmd := exec.Command("ping", "-c", "1", "-W", "1", ip)
 	start := time.Now()
 	err := cmd.Run()
@@ -433,7 +443,12 @@ func (c *TunnelController) statusReport() error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	for _, t := range tunnels {
-		latency, online := c.pingTarget(t.RemoteIP)
+		probePort := t.ExitXrayPort
+		probeIP := t.RemoteIP
+		if probeIP == "" {
+			probeIP = t.ExitServerIP
+		}
+		latency, online := c.pingTarget(probeIP, probePort)
 
 		// Read TUN device traffic
 		var deltaUpload, deltaDownload int64
@@ -475,6 +490,14 @@ func (c *TunnelController) statusReport() error {
 
 			if instance != nil {
 				online = true
+				if latency <= 0 && probeIP != "" && probePort > 0 {
+					start := time.Now()
+					conn, err := net.DialTimeout("tcp", net.JoinHostPort(probeIP, strconv.Itoa(probePort)), 2*time.Second)
+					if err == nil {
+						latency = int(time.Since(start).Milliseconds())
+						_ = conn.Close()
+					}
+				}
 				// Note: Currently Xray tunnels don't have their configs individually read back here for stats
 				// because they are natively loaded.
 				f := instance.GetFeature(xraystats.ManagerType())
@@ -546,6 +569,10 @@ func (c *TunnelController) statusReport() error {
 					}).Debug("Failed to read TUN traffic")
 				}
 			}
+		}
+
+		if deltaUpload > 0 || deltaDownload > 0 {
+			online = true
 		}
 
 		statuses = append(statuses, panel.TunnelStatus{

@@ -9,3 +9,15 @@ build_assets/*
 install-mirror.sh
 node-mirror.sh
 docs/*
+
+# Deployment archives and binaries
+*.zip
+*.tar.gz
+*.dat
+deploy/**/dist/
+deploy/**/.env
+deploy/**/node
+deploy/**/cloudflared
+__pycache__/
+*.pyc
+

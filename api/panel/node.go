@@ -23,6 +23,7 @@ type ServerPushStatusRequest struct {
 	Mem       float64 `json:"mem"`
 	Disk      float64 `json:"disk"`
 	UpdatedAt int64   `json:"updated_at"`
+	PingMs    int     `json:"ping_ms,omitempty"`
 }
 
 type NodeStatus struct {
@@ -30,6 +31,11 @@ type NodeStatus struct {
 	Mem    float64
 	Disk   float64
 	Uptime uint64
+	PingMs int
+}
+
+func (c *ClientV1) GetLastApiLatency() int {
+	return c.lastLatencyMs
 }
 
 func (c *ClientV1) ReportNodeStatus(nodeStatus *NodeStatus) (err error) {
@@ -39,7 +45,9 @@ func (c *ClientV1) ReportNodeStatus(nodeStatus *NodeStatus) (err error) {
 		Mem:       nodeStatus.Mem,
 		Disk:      nodeStatus.Disk,
 		UpdatedAt: time.Now().UnixMilli(),
+		PingMs:    nodeStatus.PingMs,
 	}
+	start := time.Now()
 	r, err := c.Client.R().SetBody(status).ForceContentType("application/json").Post(p)
 	if err != nil {
 		return fmt.Errorf("failed to access %s: %v", path.Join(c.APIHost+p), err.Error())
@@ -47,6 +55,7 @@ func (c *ClientV1) ReportNodeStatus(nodeStatus *NodeStatus) (err error) {
 	if r.StatusCode() >= 400 {
 		return fmt.Errorf("failed to access %s: status %d, body: %s", path.Join(c.APIHost+p), r.StatusCode(), string(r.Body()))
 	}
+	c.lastLatencyMs = int(time.Since(start).Milliseconds())
 	return nil
 }
 

@@ -250,6 +250,7 @@ func (c *IPsecController) reportTask() error {
 			Mem:    Mem,
 			Disk:   Disk,
 			Uptime: Uptime,
+			PingMs: c.apiClient.GetLastApiLatency(),
 		})
 	}
 

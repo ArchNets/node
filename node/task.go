@@ -231,6 +231,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 				Mem:    Mem,
 				Disk:   Disk,
 				Uptime: Uptime,
+				PingMs: c.apiClient.GetLastApiLatency(),
 			})
 		if err != nil {
 			log.Print(err)
