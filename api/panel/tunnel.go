@@ -14,12 +14,26 @@ type TunnelConfigResponse struct {
 
 // TunnelData contains the tunnel configuration from the backend
 type TunnelData struct {
-	CoreConfig *CoreConfig  `json:"core_config"`
-	Tunnels    []TunnelInfo `json:"tunnels"`
-	Total      int64        `json:"total"`
+	CoreConfig *CoreConfig       `json:"core_config"`
+	Tunnels    []TunnelInfo      `json:"tunnels"`
+	SNIOrigins []TunnelSNIOrigin `json:"sni_origins,omitempty"`
+	Total      int64             `json:"total"`
 }
 
-// CoreConfig contains WaterWall core.json settings
+// TunnelSNIOrigin represents an admin-managed camouflage SNI origin domain and IP
+type TunnelSNIOrigin struct {
+	Id        int64  `json:"id"`
+	SNI       string `json:"sni"`
+	Label     string `json:"label"`
+	OriginIP  string `json:"origin_ip"`
+	Category  string `json:"category"`
+	Enabled   bool   `json:"enabled"`
+	Sort      int    `json:"sort"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// CoreConfig contains per-server tunnel core settings
 type CoreConfig struct {
 	MTU        int    `json:"mtu"`
 	LogLevel   string `json:"log_level"`
@@ -27,16 +41,34 @@ type CoreConfig struct {
 	RamProfile string `json:"ram_profile"`
 }
 
+// RelayTunnelConfig configures the Native Go Relay Engine (reverse-reality / tls-reverse)
+type RelayTunnelConfig struct {
+	Transport          string   `json:"transport"`            // "reverse-reality", "tls-reverse"
+	CarrierPort        int      `json:"carrier_port"`         // Default: 443
+	SNI                string   `json:"sni"`                  // Default: "shariati.tums.ac.ir"
+	OriginIP           string   `json:"origin_ip,omitempty"`  // Auto-resolved from KnownIranOriginIPs if empty
+	Password           string   `json:"password"`             // Shared secret
+	UseHalfDuplex      bool     `json:"use_halfduplex"`       // Default: true
+	UseFisher          bool     `json:"use_fisher"`           // Default: true
+	FisherConnections  int      `json:"fisher_connections"`   // Default: 3
+	MinHeldConnections int      `json:"min_held_connections"` // Default: 8
+	FloatingIPs        []string `json:"floating_ips,omitempty"`
+	EnableProbe        bool     `json:"enable_probe"`       // Default: true
+	ProbeIntervalMin   int      `json:"probe_interval_min"` // Default: 30
+}
+
 // TunnelInfo represents a single tunnel configuration
 type TunnelInfo struct {
-	Id                int                 `json:"id"`
-	Name              string              `json:"name"`
-	Role              string              `json:"role"`      // "entry" or "exit"
-	Method            string              `json:"method"`    // "waterwall" or "xray" (NEW)
-	RemoteIP          string              `json:"remote_ip"` // Remote tunnel IP for health checks
+	Id                int                      `json:"id"`
+	Name              string                   `json:"name"`
+	Role              string                   `json:"role"`      // "entry" or "exit"
+	Method            string                   `json:"method"`    // "reverse-reality", "tls-reverse", "xray", "xray-reverse", "xray-stealth", "nipovpn"
+	LocalIP           string                   `json:"local_ip"`  // Local server IP
+	RemoteIP          string                   `json:"remote_ip"` // Remote server IP
+	Config            string                   `json:"config,omitempty"`
+	RelayConfig       *RelayTunnelConfig       `json:"relay_config,omitempty"`
 	XrayConfig        *XrayTunnelProtocol      `json:"xray_config,omitempty"`
 	XrayReverseConfig *XrayReverseTunnelConfig `json:"xray_reverse_config,omitempty"`
-	WaterwallConfig   string                   `json:"waterwall_config,omitempty"`
 	NipovpnConfig     *NipovpnConfig           `json:"nipovpn_config,omitempty"`
 	ExitServerIP      string                   `json:"exit_server_ip,omitempty"`
 	ExitXrayPort      int                      `json:"exit_xray_port,omitempty"`
@@ -88,8 +120,8 @@ type NipovpnConfig struct {
 	AgentPort        int      `json:"agent_port"`
 	ServerPort       int      `json:"server_port"`
 	TlsEnable        bool     `json:"tls_enable"`
-	TlsCertPath      string   `json:"tls_cert_path"` // Backwards compatibility
-	TlsKeyPath       string   `json:"tls_key_path"`  // Backwards compatibility
+	TlsCertPath      string   `json:"tls_cert_path"`
+	TlsKeyPath       string   `json:"tls_key_path"`
 	TunnelMode       string   `json:"tunnel_mode"`
 	Timeout          int      `json:"timeout"`
 	PullTimeout      int      `json:"pull_timeout"`
@@ -102,25 +134,22 @@ type NipovpnConfig struct {
 	TlsCaFile        string   `json:"tls_ca_file"`
 	HttpVersion      string   `json:"http_version"`
 	UserAgent        string   `json:"user_agent"`
-	Protocol         string   `json:"protocol"` // "socks5" or "http" (default: "http")
+	Protocol         string   `json:"protocol"`
 	NipoExitXrayPort int      `json:"nipo_exit_xray_port,omitempty"`
 	NipoExitXrayUUID string   `json:"nipo_exit_xray_uuid,omitempty"`
 }
 
 // XrayTunnelProtocol matches the backend Protocol type with tunnel-specific fields
 type XrayTunnelProtocol struct {
-	// Tunnel-specific
-	UUID    string `json:"uuid"`
-	Address string `json:"address"` // Clean IP or CDN domain
-
-	// Protocol fields
-	Type              string `json:"type"` // vless, vmess, trojan, shadowsocks
+	UUID              string `json:"uuid"`
+	Address           string `json:"address"`
+	Type              string `json:"type"`
 	Port              uint16 `json:"port"`
-	Security          string `json:"security"` // none, tls, reality
+	Security          string `json:"security"`
 	SNI               string `json:"sni,omitempty"`
 	Fingerprint       string `json:"fingerprint,omitempty"`
 	AllowInsecure     bool   `json:"allow_insecure,omitempty"`
-	Transport         string `json:"transport,omitempty"` // tcp, ws, grpc, xhttp
+	Transport         string `json:"transport,omitempty"`
 	Host              string `json:"host,omitempty"`
 	Path              string `json:"path,omitempty"`
 	ServiceName       string `json:"service_name,omitempty"`
@@ -142,7 +171,7 @@ type XrayTunnelProtocol struct {
 	RealityShortId    string `json:"reality_short_id,omitempty"`
 }
 
-// Forwarder represents a port forwarder configuration (gost/nodepass)
+// Forwarder represents a port forwarder configuration
 type Forwarder struct {
 	Id            int64  `json:"id"`
 	Protocol      string `json:"protocol"` // "tcp" or "udp"
@@ -150,42 +179,62 @@ type Forwarder struct {
 	ListenIP      string `json:"listen_ip"`
 	TargetIP      string `json:"target_ip"`
 	TargetPort    int    `json:"target_port"`
-	ForwarderType string `json:"forwarder_type"` // "gost", "nodepass", "paqet"
-	Config        string `json:"config"`         // Partial Paqet config
+	PortRange     string `json:"port_range,omitempty"`
+	ForwarderType string `json:"forwarder_type"` // "relay", "waterwall", "gost", "nodepass", "paqet", "xray"
+	Config        string `json:"config"`
 }
 
-// ScanCommand is sent by the backend when a ProtoSwap scan is requested
+// ScanCommand is sent by the backend when an SNI/Method benchmark sweep or instant probe is requested
 type ScanCommand struct {
-	Protocol    string `json:"protocol"` // tcp, udp, both
-	TcpTestPort int    `json:"tcp_test_port"`
-	UdpTestPort int    `json:"udp_test_port"`
-	StartTime   int64  `json:"start_time"` // Unix timestamp for sync
-
-	Signal      string `json:"signal,omitempty"`       // cancel, pause (empty = run)
-	ResumeFrom  int    `json:"resume_from,omitempty"`  // protocol to resume from
-	ResumePhase string `json:"resume_phase,omitempty"` // tcp or udp
+	ScanMode    string   `json:"scan_mode,omitempty"`   // "hospital", "sni", "methods"
+	CustomSNIs  []string `json:"custom_snis,omitempty"` // Optional custom SNI list
+	ProbeNow    bool     `json:"probe_now,omitempty"`   // Trigger immediate bandwidth probe
+	Protocol    string   `json:"protocol"`              // Legacy / transport filter
+	TcpTestPort int      `json:"tcp_test_port"`
+	UdpTestPort int      `json:"udp_test_port"`
+	StartTime   int64    `json:"start_time"`
+	Signal      string   `json:"signal,omitempty"` // cancel, pause (empty = run)
+	ResumeFrom  int      `json:"resume_from,omitempty"`
+	ResumePhase string   `json:"resume_phase,omitempty"`
 }
 
-// ScanResultItem represents a single protocol test result
+// ScanResultItem represents a single SNI or method benchmark result
 type ScanResultItem struct {
-	ProtocolNumber int    `json:"protocol_number"`
-	Type           string `json:"type"` // tcp or udp
-	LatencyMs      int    `json:"latency_ms"`
-	UploadSpeed    int64  `json:"upload_speed"`
-	DownloadSpeed  int64  `json:"download_speed"`
-	PacketLoss     int    `json:"packet_loss"`
-	Jitter         int    `json:"jitter"`
+	ProtocolNumber int     `json:"protocol_number"`
+	Type           string  `json:"type"`
+	SNI            string  `json:"sni,omitempty"`
+	MethodLabel    string  `json:"method_label,omitempty"`
+	UseHalfDuplex  bool    `json:"use_halfduplex,omitempty"`
+	UseFisher      bool    `json:"use_fisher,omitempty"`
+	LatencyMs      int     `json:"latency_ms"`
+	UploadSpeed    int64   `json:"upload_speed"`
+	DownloadSpeed  int64   `json:"download_speed"`
+	PacketLoss     int     `json:"packet_loss"`
+	Jitter         int     `json:"jitter"`
+	Score          float64 `json:"score,omitempty"`
 }
 
 // ScanResultsRequest is the request body for reporting scan results
 type ScanResultsRequest struct {
 	TunnelId   int              `json:"tunnel_id"`
 	Status     string           `json:"status"` // running, completed, failed, cancelled, paused
+	ScanMode   string           `json:"scan_mode,omitempty"`
 	Error      string           `json:"error,omitempty"`
 	Progress   int              `json:"progress"`
 	Results    []ScanResultItem `json:"results"`
-	LastTested int              `json:"last_tested,omitempty"` // last protocol tested
-	Phase      string           `json:"phase,omitempty"`       // tcp or udp
+	LastTested int              `json:"last_tested,omitempty"`
+	Phase      string           `json:"phase,omitempty"`
+}
+
+// BandwidthSamplePayload represents a bandwidth probe sample reported by the Entry node
+type BandwidthSamplePayload struct {
+	Timestamp    int64   `json:"timestamp"`
+	UploadMbps   float64 `json:"upload_mbps"`
+	DownloadMbps float64 `json:"download_mbps"`
+	RttMs        int     `json:"rtt_ms"`
+	JitterMs     int     `json:"jitter_ms,omitempty"`
+	PacketLoss   int     `json:"packet_loss"`
+	Status       string  `json:"status"` // "OPTIMAL", "DEGRADED", "THROTTLED"
 }
 
 // TunnelStatusRequest is the request body for POST /v2/server/:server_id/tunnel/status
@@ -195,11 +244,17 @@ type TunnelStatusRequest struct {
 
 // TunnelStatus represents the status of a single tunnel
 type TunnelStatus struct {
-	TunnelId      int   `json:"tunnel_id"`
-	Online        bool  `json:"online"`
-	LatencyMs     int   `json:"latency_ms"`
-	TotalUpload   int64 `json:"total_upload"`
-	TotalDownload int64 `json:"total_download"`
+	TunnelId              int                     `json:"tunnel_id"`
+	Online                bool                    `json:"online"`
+	LatencyMs             int                     `json:"latency_ms"`
+	TotalUpload           int64                   `json:"total_upload"`
+	TotalDownload         int64                   `json:"total_download"`
+	CurrentUploadBps      int64                   `json:"current_upload_bps,omitempty"`
+	CurrentDownloadBps    int64                   `json:"current_download_bps,omitempty"`
+	LastProbeUploadMbps   float64                 `json:"last_probe_upload_mbps,omitempty"`
+	LastProbeDownloadMbps float64                 `json:"last_probe_download_mbps,omitempty"`
+	ProbeStatus           string                  `json:"probe_status,omitempty"`
+	ProbeSample           *BandwidthSamplePayload `json:"probe_sample,omitempty"`
 }
 
 // GetTunnelConfig fetches the tunnel configuration from the backend
@@ -246,7 +301,7 @@ func (c *ClientV2) ReportTunnelStatus(status *TunnelStatusRequest) error {
 	return nil
 }
 
-// ReportScanResults reports ProtoSwap scan results to the backend
+// ReportScanResults reports benchmark scan results to the backend
 func (c *ClientV2) ReportScanResults(req *ScanResultsRequest) error {
 	path := fmt.Sprintf("/v2/server/%d/tunnel/scan/results", c.ServerId)
 	r, err := c.Client.

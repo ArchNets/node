@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -25,6 +24,7 @@ import (
 	"github.com/archnets/node/common/task"
 	"github.com/archnets/node/conf"
 	nodeCore "github.com/archnets/node/core"
+	"github.com/archnets/node/core/relay/telemetry"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
@@ -35,23 +35,15 @@ import (
 )
 
 const (
-	TunnelDir       = "/etc/archnets/tunnel"
-	GostBinary      = "/usr/local/bin/gost"
-	NodepassBinary  = "/usr/local/bin/nodepass"
-	CoreConfigFile  = "core.json"
-	TunnelConfigFmt = "tunnel_%d.json"
-)
-
-var (
-	PaqetBinary     = "/usr/local/bin/paqet"
-	WaterwallBinary = "/etc/archnets/tunnel/Waterwall"
+	TunnelDir      = "/etc/archnets/tunnel"
+	GostBinary     = "/usr/local/bin/gost"
+	NodepassBinary = "/usr/local/bin/nodepass"
 )
 
 const (
 	ConfigPollSeconds = 60
 	StatusPushSeconds = 30
 	ControllerLogFile = "controller.log"
-	WaterwallLogFile  = "waterwall.log"
 	ForwarderLogFile  = "forwarder.log"
 )
 
@@ -72,15 +64,13 @@ func ensureLogDir(path string) {
 	}
 }
 
-// TunnelController manages WaterWall tunnel nodes
+// TunnelController manages tunnel nodes and native Go relay engines
 type TunnelController struct {
 	tag                   string
 	apiClient             *panel.ClientV2
 	serverId              int
 	nodeConfig            *conf.Conf
 	tunnelDir             string
-	waterwallProcess      *exec.Cmd
-	waterwallMu           sync.Mutex        // Protects waterwallProcess lifecycle (start/stop/reload)
 	applyMu               sync.Mutex        // Serializes complete configuration transactions
 	stateMu               sync.Mutex        // Protects tunnels and traffic-monitoring maps
 	forwarderProcesses    map[int]*exec.Cmd // tunnel_id -> forwarder process
@@ -90,13 +80,15 @@ type TunnelController struct {
 	configMonitorPeriodic *task.Task
 	statusReportPeriodic  *task.Task
 	logger                *log.Entry
-	waterwallLogFile      *os.File
 	forwarderLogFile      *os.File
 	lastConfigHash        string
-	waterwallWg           sync.WaitGroup
-	// Traffic monitoring
-	lastTraffic       map[int]trafficSnapshot // tunnel_id -> last traffic snapshot
-	tunnelDeviceNames map[int]string          // tunnel_id -> TUN device name
+
+	// Pluggable Tunnel Drivers
+	relayDriver *RelayDriver
+
+	// Traffic monitoring for userspace proxies (e.g. NipoVPN)
+	lastTraffic map[int]trafficSnapshot
+
 	// Xray instances
 	xrayInstances map[int]*core.Instance
 	xrayMu        sync.Mutex
@@ -112,16 +104,23 @@ type TunnelController struct {
 // NewTunnelController creates a new tunnel controller
 func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *conf.Conf) *TunnelController {
 	tag := generateTunnelTag(serverId)
+	relayDrv := NewRelayDriver(log.WithField("tag", tag))
+	RegisterTunnelDriver("reverse-reality", relayDrv)
+	RegisterTunnelDriver("tls-reverse", relayDrv)
+	RegisterTunnelDriver("relay", relayDrv)
+	RegisterTunnelDriver("waterwall", relayDrv)
+	RegisterTunnelDriver("", relayDrv)
+
 	return &TunnelController{
-		tag:                tag,
-		apiClient:          apiClient,
-		serverId:           serverId,
-		nodeConfig:         nodeConfig,
-		tunnelDir:          TunnelDir,
-		forwarderProcesses: make(map[int]*exec.Cmd),
-		logger:             log.WithField("tag", tag), // Initialize with default logger
-		lastTraffic:        make(map[int]trafficSnapshot),
-		tunnelDeviceNames:    make(map[int]string),
+		tag:                  tag,
+		apiClient:            apiClient,
+		serverId:             serverId,
+		nodeConfig:           nodeConfig,
+		tunnelDir:            TunnelDir,
+		forwarderProcesses:   make(map[int]*exec.Cmd),
+		logger:               log.WithField("tag", tag),
+		relayDriver:          relayDrv,
+		lastTraffic:          make(map[int]trafficSnapshot),
 		xrayInstances:        make(map[int]*core.Instance),
 		nipovpnManagers:      make(map[int]*nodeCore.NipovpnManager),
 		sniSpoofingProcesses: make(map[int]*exec.Cmd),
@@ -159,13 +158,6 @@ func (c *TunnelController) Start() error {
 		controllerLogger.SetOutput(controllerLogFile)
 		controllerLogger.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 		c.logger = controllerLogger.WithField("tag", c.tag)
-	}
-
-	// Open waterwall log file
-	waterwallLogPath := filepath.Join(c.tunnelDir, "log", WaterwallLogFile)
-	c.waterwallLogFile, err = os.OpenFile(waterwallLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		c.logger.WithField("err", err).Warn("Failed to open waterwall log file")
 	}
 
 	// Open forwarder log file
@@ -212,14 +204,6 @@ func (c *TunnelController) Start() error {
 
 // CheckAndInstallBinaries checks for missing binaries and installs them
 func (c *TunnelController) CheckAndInstallBinaries() error {
-	// Check Waterwall
-	if _, err := os.Stat(WaterwallBinary); os.IsNotExist(err) {
-		c.logger.Info("WaterWall binary missing, attempting auto-installation...")
-		if err := installer.InstallWaterwall(c.tunnelDir); err != nil {
-			return fmt.Errorf("failed to install WaterWall: %v", err)
-		}
-	}
-
 	// Check Gost
 	if _, err := os.Stat(GostBinary); os.IsNotExist(err) {
 		c.logger.Info("Gost binary missing, attempting auto-installation...")
@@ -233,14 +217,6 @@ func (c *TunnelController) CheckAndInstallBinaries() error {
 		c.logger.Info("NodePass binary missing, attempting auto-installation...")
 		if err := installer.InstallNodepass(); err != nil {
 			c.logger.WithField("err", err).Warn("NodePass auto-installation failed")
-		}
-	}
-
-	// Check Paqet
-	if _, err := os.Stat(PaqetBinary); os.IsNotExist(err) {
-		c.logger.Info("Paqet binary missing, attempting auto-installation...")
-		if err := installer.InstallPaqet(); err != nil {
-			c.logger.WithField("err", err).Warn("Paqet auto-installation failed")
 		}
 	}
 
@@ -279,7 +255,6 @@ func (c *TunnelController) Uninstall() error {
 	// User said "deleting everything too", so we remove them.
 	_ = os.Remove(GostBinary)
 	_ = os.Remove(NodepassBinary)
-	_ = os.Remove(PaqetBinary)
 
 	c.logger.Info("Tunnel components uninstalled")
 	return nil
@@ -295,8 +270,12 @@ func (c *TunnelController) Close() error {
 		c.statusReportPeriodic.Close()
 	}
 
-	// Stop WaterWall
-	c.stopWaterwall()
+	// Stop all registered drivers
+	driversMu.RLock()
+	for _, drv := range drivers {
+		drv.StopAll()
+	}
+	driversMu.RUnlock()
 
 	// Stop all forwarders
 	c.stopAllForwarders()
@@ -311,9 +290,6 @@ func (c *TunnelController) Close() error {
 	c.stopAllSniSpoofingProcesses()
 
 	// Close log files
-	if c.waterwallLogFile != nil {
-		c.waterwallLogFile.Close()
-	}
 	if c.forwarderLogFile != nil {
 		c.forwarderLogFile.Close()
 	}
@@ -442,6 +418,7 @@ func (c *TunnelController) statusReport() error {
 	statuses := make([]panel.TunnelStatus, 0, len(tunnels))
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
+
 	for _, t := range tunnels {
 		probePort := t.ExitXrayPort
 		probeIP := t.RemoteIP
@@ -450,7 +427,15 @@ func (c *TunnelController) statusReport() error {
 		}
 		latency, online := c.pingTarget(probeIP, probePort)
 
-		// Read TUN device traffic
+		// Check if handled by registered pluggable driver
+		driver := GetTunnelDriver(t.Method)
+		if driver != nil {
+			if st, handled := driver.CollectStats(t, latency, online); handled {
+				statuses = append(statuses, st)
+				continue
+			}
+		}
+
 		var deltaUpload, deltaDownload int64
 
 		if t.Method == "nipovpn" {
@@ -463,7 +448,6 @@ func (c *TunnelController) statusReport() error {
 				if online && pid > 0 {
 					rchar, wchar, err := readProcessIO(pid)
 					if err == nil {
-						// Divide by 2 because in user-space proxies, data is read and written twice (Client <-> Proxy <-> Remote)
 						rxBytes := rchar / 2
 						txBytes := wchar / 2
 						if last, exists := c.lastTraffic[t.Id]; exists {
@@ -483,7 +467,6 @@ func (c *TunnelController) statusReport() error {
 				}
 			}
 		} else if t.Method == "xray" || t.Method == "xray-reverse" || t.Method == "xray-stealth" {
-			// Pull Xray stats directly from memory
 			c.xrayMu.Lock()
 			instance := c.xrayInstances[t.Id]
 			c.xrayMu.Unlock()
@@ -498,21 +481,9 @@ func (c *TunnelController) statusReport() error {
 						_ = conn.Close()
 					}
 				}
-				// Note: Currently Xray tunnels don't have their configs individually read back here for stats
-				// because they are natively loaded.
 				f := instance.GetFeature(xraystats.ManagerType())
 				if f != nil {
-					// Iterate through all counters dynamically rather than looking up by JSON struct
 					statsManager := f.(xraystats.Manager)
-
-					// Go through all up and down link traffic
-					// We don't have exactly which inbounds are ours right now,
-					// but there is typically only one inbound per tunnel node
-
-					// However, we can't easily iterate all counters in xraystats.Manager without reflection or an internal API.
-					// Xray stores these as sync.Map, but doesn't expose a Keys() method.
-					// Instead of reading traffic dynamically, Xray currently provides `proxy` or `inbound-0` as defaults.
-					// We'll hardcode checking the standard expected tags for tunnels:
 					possibleTags := []string{"proxy", "inbound-0", "dokodemo-0", "dokodemo-1", "dokodemo-2"}
 					if t.Method == "xray-stealth" {
 						if t.Role == "entry" {
@@ -526,7 +497,6 @@ func (c *TunnelController) statusReport() error {
 						upName := fmt.Sprintf("inbound>>>%s>>>traffic>>>uplink", tag)
 
 						if cDown := statsManager.GetCounter(downName); cDown != nil {
-							// For tunnels, downloaded from user = Upload into tunnel
 							val := cDown.Value()
 							if val > 0 {
 								deltaUpload += val
@@ -534,7 +504,6 @@ func (c *TunnelController) statusReport() error {
 							}
 						}
 						if cUp := statsManager.GetCounter(upName); cUp != nil {
-							// Uploaded to user = Download from tunnel
 							val := cUp.Value()
 							if val > 0 {
 								deltaDownload += val
@@ -542,31 +511,6 @@ func (c *TunnelController) statusReport() error {
 							}
 						}
 					}
-				}
-			}
-		} else {
-			if deviceName, ok := c.tunnelDeviceNames[t.Id]; ok && deviceName != "" {
-				rxBytes, txBytes, err := readTUNTraffic(deviceName)
-				if err == nil {
-					if last, exists := c.lastTraffic[t.Id]; exists {
-						// Compute delta (handle counter reset)
-						if rxBytes >= last.rxBytes {
-							deltaDownload = rxBytes - last.rxBytes
-						} else {
-							deltaDownload = rxBytes // Counter reset
-						}
-						if txBytes >= last.txBytes {
-							deltaUpload = txBytes - last.txBytes
-						} else {
-							deltaUpload = txBytes // Counter reset
-						}
-					}
-					c.lastTraffic[t.Id] = trafficSnapshot{rxBytes: rxBytes, txBytes: txBytes}
-				} else {
-					c.logger.WithFields(log.Fields{
-						"device": deviceName,
-						"err":    err,
-					}).Debug("Failed to read TUN traffic")
 				}
 			}
 		}
@@ -599,79 +543,65 @@ func (c *TunnelController) statusReport() error {
 func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
-	// Stop existing processes
-	c.stopWaterwall()
+
+	// Update dynamic SNI origins pushed from backend
+	if len(data.SNIOrigins) > 0 {
+		presets := make([]telemetry.SNIPreset, 0, len(data.SNIOrigins))
+		for _, o := range data.SNIOrigins {
+			if o.Enabled {
+				presets = append(presets, telemetry.SNIPreset{
+					SNI:      o.SNI,
+					Label:    o.Label,
+					OriginIP: o.OriginIP,
+					Category: o.Category,
+				})
+			}
+		}
+		telemetry.SetDynamicSNIOrigins(presets)
+	}
+
+	// Stop existing processes and drivers
+	driversMu.RLock()
+	for _, drv := range drivers {
+		drv.StopAll()
+	}
+	driversMu.RUnlock()
+
 	c.stopAllForwarders()
 	c.stopAllXrayInstances()
 	c.stopAllNipovpnManagers()
+	c.stopAllSniSpoofingProcesses()
 
-	var waterwallTunnels []panel.TunnelInfo
+	var unhandledTunnels []panel.TunnelInfo
 	var xrayTunnels []panel.TunnelInfo
 	var nipovpnTunnels []panel.TunnelInfo
 	var xrayReverseTunnels []panel.TunnelInfo
 	var xrayStealthTunnels []panel.TunnelInfo
 
-	// Generate and write core.json
 	for _, t := range data.Tunnels {
-		if t.Method == "waterwall" || t.Method == "" {
-			waterwallTunnels = append(waterwallTunnels, t)
-		} else if t.Method == "xray" {
+		// If handled by a registered driver, start it
+		if drv := GetTunnelDriver(t.Method); drv != nil {
+			if err := drv.Start(t); err != nil {
+				c.logger.WithFields(log.Fields{
+					"tunnelId": t.Id,
+					"method":   t.Method,
+					"err":      err,
+				}).Warn("Failed to start tunnel via driver")
+			}
+			continue
+		}
+
+		switch t.Method {
+		case "xray":
 			xrayTunnels = append(xrayTunnels, t)
-		} else if t.Method == "nipovpn" {
-			nipovpnTunnels = append(nipovpnTunnels, t)
-		} else if t.Method == "xray-reverse" {
+		case "xray-reverse":
 			xrayReverseTunnels = append(xrayReverseTunnels, t)
-		} else if t.Method == "xray-stealth" {
+		case "xray-stealth":
 			xrayStealthTunnels = append(xrayStealthTunnels, t)
-		}
-	}
-
-	if len(waterwallTunnels) > 0 {
-		tunnelFiles := make([]string, 0, len(waterwallTunnels))
-		for _, t := range waterwallTunnels {
-			filename := fmt.Sprintf(TunnelConfigFmt, t.Id)
-			tunnelFiles = append(tunnelFiles, filename)
-		}
-
-		coreJSON := c.generateCoreJSON(data.CoreConfig, tunnelFiles)
-		corePath := filepath.Join(c.tunnelDir, CoreConfigFile)
-		if err := os.WriteFile(corePath, coreJSON, 0644); err != nil {
-			return fmt.Errorf("failed to write core.json: %v", err)
-		}
-	}
-
-	// Write each tunnel config
-	for _, t := range data.Tunnels {
-		filename := fmt.Sprintf(TunnelConfigFmt, t.Id)
-		tunnelPath := filepath.Join(c.tunnelDir, filename)
-		if t.Method == "waterwall" || t.Method == "" {
-			if err := os.WriteFile(tunnelPath, []byte(t.WaterwallConfig), 0644); err != nil {
-				return fmt.Errorf("failed to write %s: %v", filename, err)
-			}
-		}
-	}
-
-	c.stateMu.Lock()
-	c.tunnels = append([]panel.TunnelInfo(nil), data.Tunnels...)
-	c.tunnelDeviceNames = make(map[int]string)
-	c.lastTraffic = make(map[int]trafficSnapshot)
-
-	// Extract device names from tunnel configs for traffic monitoring
-	for _, t := range data.Tunnels {
-		if t.Method == "waterwall" || t.Method == "" {
-			deviceName := extractDeviceNameFromConfig(t.WaterwallConfig)
-			if deviceName != "" {
-				c.tunnelDeviceNames[t.Id] = deviceName
-			}
-		}
-	}
-
-	c.stateMu.Unlock()
-
-	// Start WaterWall if we have waterwall tunnels
-	if len(waterwallTunnels) > 0 {
-		if err := c.startWaterwall(); err != nil {
-			return fmt.Errorf("failed to start WaterWall: %v", err)
+		case "nipovpn":
+			nipovpnTunnels = append(nipovpnTunnels, t)
+		default:
+			unhandledTunnels = append(unhandledTunnels, t)
 		}
 	}
 
@@ -737,11 +667,10 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		}
 	}
 
-	// Start forwarders
+	// Start external forwarders (gost, nodepass, paqet) only for non-relay tunnels
 	for _, t := range data.Tunnels {
-		if t.Method == "xray" || t.Method == "nipovpn" || t.Method == "xray-reverse" || t.Method == "xray-stealth" {
-			// Skip starting Gost/Paqet/Nodepass/Waterwall wrapper
-			// NipoVPN and Xray cores handle their own forwarding
+		if t.Method == "xray" || t.Method == "nipovpn" || t.Method == "xray-reverse" || t.Method == "xray-stealth" ||
+			t.Method == "reverse-reality" || t.Method == "tls-reverse" || t.Method == "waterwall" || t.Method == "" {
 			continue
 		}
 		for _, f := range t.Forwarders {
@@ -756,109 +685,16 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	}
 
 	c.logger.WithField("tunnelCount", len(data.Tunnels)).Info("Tunnel config applied")
-
 	return nil
-}
-
-func (c *TunnelController) generateCoreJSON(cfg *panel.CoreConfig, tunnelFiles []string) []byte {
-	if cfg == nil {
-		cfg = &panel.CoreConfig{
-			MTU:        1450,
-			LogLevel:   "FATAL",
-			Workers:    0,
-			RamProfile: "server",
-		}
-	}
-
-	filesJSON, _ := json.Marshal(tunnelFiles)
-
-	coreConfig := fmt.Sprintf(`{
-    "log": {
-        "path": "log/",
-        "core": {"loglevel": "%s", "file": "core.log", "console": true},
-        "network": {"loglevel": "%s", "file": "network.log", "console": true},
-        "dns": {"loglevel": "%s", "file": "dns.log", "console": false},
-        "internal": {"loglevel": "%s", "file": "internal.log", "console": true}
-    },
-    "dns": {},
-    "misc": {"workers": %d, "mtu": %d, "ram-profile": "%s", "libs-path": "libs/"},
-    "configs": %s
-}`, cfg.LogLevel, cfg.LogLevel, cfg.LogLevel, cfg.LogLevel,
-		cfg.Workers, cfg.MTU, cfg.RamProfile, string(filesJSON))
-
-	return []byte(coreConfig)
-}
-
-func (c *TunnelController) startWaterwall() error {
-	c.waterwallMu.Lock()
-	defer c.waterwallMu.Unlock()
-	return c.startWaterwallLocked()
-}
-
-// startWaterwallLocked starts WaterWall — caller must hold waterwallMu
-func (c *TunnelController) startWaterwallLocked() error {
-	if _, err := os.Stat(WaterwallBinary); os.IsNotExist(err) {
-		return fmt.Errorf("WaterWall binary not found at %s", WaterwallBinary)
-	}
-
-	cmd := exec.Command(WaterwallBinary)
-	cmd.Dir = c.tunnelDir
-	// Redirect output to waterwall log file
-	if c.waterwallLogFile != nil {
-		cmd.Stdout = c.waterwallLogFile
-		cmd.Stderr = c.waterwallLogFile
-	}
-	// Set process group for proper cleanup
-	setProcessGroup(cmd)
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start WaterWall: %v", err)
-	}
-
-	c.waterwallProcess = cmd
-	c.waterwallWg.Add(1)
-
-	// Monitor process in background
-	go func() {
-		defer c.waterwallWg.Done()
-		err := cmd.Wait()
-		if err != nil {
-			c.logger.WithField("err", err).Warn("WaterWall process exited")
-		}
-	}()
-
-	c.logger.Info("WaterWall started")
-	return nil
-}
-
-func (c *TunnelController) stopWaterwall() {
-	c.waterwallMu.Lock()
-	defer c.waterwallMu.Unlock()
-	c.stopWaterwallLocked()
-}
-
-// stopWaterwallLocked stops WaterWall — caller must hold waterwallMu
-func (c *TunnelController) stopWaterwallLocked() {
-	if c.waterwallProcess != nil && c.waterwallProcess.Process != nil {
-		c.logger.Info("Stopping WaterWall...")
-		// Kill process group
-		killProcessGroup(c.waterwallProcess)
-
-		// Wait for process to exit and cleanup
-		c.waterwallWg.Wait()
-
-		c.waterwallProcess = nil
-		c.logger.Info("WaterWall stopped")
-	}
 }
 
 func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) error {
 	var cmd *exec.Cmd
 
 	switch f.ForwarderType {
-	case "waterwall":
-		// WaterWall handles its own forwarding via tunnel configs, skip
-		c.logger.WithField("tunnelId", tunnelId).Debug("Skipping waterwall forwarder (handled by WaterWall binary)")
+	case "relay", "waterwall":
+		// Native Go relay engine handles its own forwarding rules internally, skip
+		c.logger.WithField("tunnelId", tunnelId).Debug("Skipping native relay forwarder (handled by native engine)")
 		return nil
 
 	case "gost":
@@ -877,75 +713,6 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		target := fmt.Sprintf("client://0.0.0.0:%d/%s:%d", f.ListenPort, f.TargetIP, f.TargetPort)
 		cmd = exec.Command(NodepassBinary, target)
 
-	case "paqet":
-		if _, err := os.Stat(PaqetBinary); os.IsNotExist(err) {
-			return fmt.Errorf("paqet binary not found at %s", PaqetBinary)
-		}
-
-		// Detect network details
-		iface, err := GetDefaultInterface()
-		if err != nil {
-			return fmt.Errorf("failed to detect default interface: %v", err)
-		}
-
-		localIP, err := GetLocalIP(iface)
-		if err != nil {
-			return fmt.Errorf("failed to detect local IP: %v", err)
-		}
-
-		gatewayMAC, err := GetGatewayMAC()
-		if err != nil {
-			return fmt.Errorf("failed to detect gateway MAC: %v", err)
-		}
-
-		// Start Paqet
-		transportPort := c.extractPaqetPort(f.Config)
-		role := c.extractPaqetRole(f.Config)
-
-		// Determine bind port for network block
-		// Client (Entry): 0 (ephemeral)
-		// Server (Exit): transportPort
-		bindPort := 0
-		if role == "server" {
-			bindPort = transportPort
-		}
-
-		// Setup firewall rules first (always on transport port)
-		c.setupPaqetFirewall(transportPort)
-
-		// Build TCP flags section based on role
-		tcpFlags := `    local_flag: ["PA"]`
-		if role == "client" {
-			tcpFlags = `    local_flag: ["PA"]
-    remote_flag: ["PA"]`
-		}
-
-		networkBlock := fmt.Sprintf(`
-network:
-  interface: "%s"
-  ipv4:
-    addr: "%s:%d"
-    router_mac: "%s"
-  tcp:
-%s
-    pcap:
-      sockbuf: 8388608
-`, iface, localIP, bindPort, gatewayMAC, tcpFlags)
-
-		// Merge config
-		fullConfig := f.Config + "\n" + networkBlock
-
-		// Write config file
-		configFilename := fmt.Sprintf("paqet_%d.yaml", f.ListenPort)
-		configPath := filepath.Join(c.tunnelDir, configFilename)
-		if err := os.WriteFile(configPath, []byte(fullConfig), 0644); err != nil {
-			c.teardownPaqetFirewall(transportPort)
-			return fmt.Errorf("failed to write paqet config: %v", err)
-		}
-
-		// paqet run -c config_file
-		cmd = exec.Command(PaqetBinary, "run", "-c", configPath)
-
 	default:
 		return fmt.Errorf("unknown forwarder type: %s", f.ForwarderType)
 	}
@@ -959,9 +726,6 @@ network:
 	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
-		if f.ForwarderType == "paqet" {
-			c.teardownPaqetFirewall(c.extractPaqetPort(f.Config))
-		}
 		return err
 	}
 
@@ -1559,147 +1323,8 @@ func (c *TunnelController) stopAllForwarders() {
 
 	// Wait for all forwarder goroutines to confirm processes are dead
 	c.forwarderWg.Wait()
-	// For Paqet specifically, we need to teardown the firewall rules for the transport port.
-	// Since the transport port is inside the config file, we scan the tunnel directory for paqet configs.
-	files, _ := filepath.Glob(filepath.Join(c.tunnelDir, "paqet_*.yaml"))
-	for _, f := range files {
-		content, err := os.ReadFile(f)
-		if err == nil {
-			transportPort := c.extractPaqetPort(string(content))
-			if transportPort > 0 {
-				c.teardownPaqetFirewall(transportPort)
-			}
-		}
-	}
 
 	c.logger.Info("All forwarders stopped")
-}
-
-func (c *TunnelController) setupPaqetFirewall(port int) {
-	if port <= 0 {
-		return
-	}
-	c.logger.WithField("port", port).Info("Setting up Paqet firewall rules (NOTRACK/RST-DROP)")
-
-	rules := [][]string{
-		{"-w", "5", "-t", "raw", "-A", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-w", "5", "-t", "raw", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-w", "5", "-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
-		{"-w", "5", "-t", "filter", "-A", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
-		{"-w", "5", "-t", "filter", "-A", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
-	}
-
-	for _, rule := range rules {
-		checkRule := make([]string, len(rule))
-		copy(checkRule, rule)
-		for i, v := range checkRule {
-			if v == "-A" {
-				checkRule[i] = "-C"
-			}
-		}
-
-		if err := exec.Command("iptables", checkRule...).Run(); err != nil {
-			if err := exec.Command("iptables", rule...).Run(); err != nil {
-				c.logger.WithFields(log.Fields{
-					"rule": rule,
-					"err":  err,
-				}).Warn("Failed to add iptables rule")
-			}
-		}
-	}
-}
-
-func (c *TunnelController) teardownPaqetFirewall(port int) {
-	if port <= 0 {
-		return
-	}
-	c.logger.WithField("port", port).Info("Tearing down Paqet firewall rules")
-
-	rules := [][]string{
-		{"-w", "5", "-t", "raw", "-D", "PREROUTING", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-w", "5", "-t", "raw", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "NOTRACK"},
-		{"-w", "5", "-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "--tcp-flags", "RST", "RST", "-j", "DROP"},
-		{"-w", "5", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", strconv.Itoa(port), "-j", "ACCEPT"},
-		{"-w", "5", "-t", "filter", "-D", "OUTPUT", "-p", "tcp", "--sport", strconv.Itoa(port), "-j", "ACCEPT"},
-	}
-
-	for _, rule := range rules {
-		_ = exec.Command("iptables", rule...).Run()
-	}
-}
-
-// extractPaqetPort parses the partial YAML to find the transport port
-func (c *TunnelController) extractPaqetPort(config string) int {
-	// Simple line-by-line search to avoid importing a full YAML parser
-	// Works for both listen: addr: ":29000" and server: addr: "IP:29000"
-	lines := strings.Split(config, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, "addr:") {
-			parts := strings.Split(trimmed, ":")
-			if len(parts) >= 2 {
-				portStr := strings.Trim(parts[len(parts)-1], `"' `)
-				if port, err := strconv.Atoi(portStr); err == nil {
-					return port
-				}
-			}
-		}
-	}
-	return 0
-}
-
-// extractPaqetRole parses the partial YAML to find the role
-func (c *TunnelController) extractPaqetRole(config string) string {
-	lines := strings.Split(config, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "role:") {
-			parts := strings.Split(trimmed, ":")
-			if len(parts) >= 2 {
-				val := strings.TrimSpace(parts[1])
-				return strings.Trim(val, `"'`)
-			}
-		}
-	}
-	return ""
-}
-
-// readTUNTraffic reads RX and TX bytes from sysfs for a network interface
-func readTUNTraffic(deviceName string) (rxBytes, txBytes int64, err error) {
-	rxPath := fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", deviceName)
-	txPath := fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", deviceName)
-
-	rxData, err := os.ReadFile(rxPath)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read rx_bytes: %w", err)
-	}
-	txData, err := os.ReadFile(txPath)
-	if err != nil {
-		return 0, 0, fmt.Errorf("read tx_bytes: %w", err)
-	}
-
-	rxBytes, err = strconv.ParseInt(strings.TrimSpace(string(rxData)), 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse rx_bytes: %w", err)
-	}
-	txBytes, err = strconv.ParseInt(strings.TrimSpace(string(txData)), 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse tx_bytes: %w", err)
-	}
-
-	return rxBytes, txBytes, nil
-}
-
-// extractDeviceNameFromConfig extracts the TUN device name from WaterWall config JSON
-// It looks for the "device-name" field in a TunDevice node
-var deviceNameRegex = regexp.MustCompile(`"device-name"\s*:\s*"([^"]+)"`)
-
-func extractDeviceNameFromConfig(configJSON string) string {
-	matches := deviceNameRegex.FindStringSubmatch(configJSON)
-	if len(matches) >= 2 {
-		return matches[1]
-	}
-	return ""
 }
 
 func (c *TunnelController) stopAllNipovpnManagers() {

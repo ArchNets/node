@@ -165,15 +165,34 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		if len(shortIds) == 0 && v.RealityShortID != "" {
 			shortIds = []string{v.RealityShortID}
 		}
+		serverNames := v.RealityServerNames
+		if len(serverNames) == 0 && v.SNI != "" {
+			serverNames = []string{v.SNI}
+		}
 		in.StreamSetting.REALITYSettings = &coreConf.REALITYConfig{
-			Dest:         d,
-			Xver:         uint64(0),
-			Show:         false,
-			ServerNames:  []string{v.SNI},
-			PrivateKey:   v.RealityPrivateKey,
-			MinClientVer: "0.0.1",
-			ShortIds:     shortIds,
-			SpiderX:      v.RealitySpiderX,
+			MasterKeyLog:  v.RealityMasterKeyLog,
+			Dest:          d,
+			Xver:          v.RealityXver,
+			Show:          v.RealityShow,
+			ServerNames:   serverNames,
+			PrivateKey:    v.RealityPrivateKey,
+			MinClientVer:  v.RealityMinClientVer,
+			MaxClientVer:  v.RealityMaxClientVer,
+			MaxTimeDiff:   v.RealityMaxTimeDiff,
+			ShortIds:      shortIds,
+			Mldsa65Seed:   v.RealityMldsa65Seed,
+			Mldsa65Verify: v.RealityMldsa65Verify,
+			SpiderX:       v.RealitySpiderX,
+			LimitFallbackUpload: coreConf.LimitFallback{
+				AfterBytes:       v.RealityLimitFallbackUpload.AfterBytes,
+				BytesPerSec:      v.RealityLimitFallbackUpload.BytesPerSec,
+				BurstBytesPerSec: v.RealityLimitFallbackUpload.BurstBytesPerSec,
+			},
+			LimitFallbackDownload: coreConf.LimitFallback{
+				AfterBytes:       v.RealityLimitFallbackDownload.AfterBytes,
+				BytesPerSec:      v.RealityLimitFallbackDownload.BytesPerSec,
+				BurstBytesPerSec: v.RealityLimitFallbackDownload.BurstBytesPerSec,
+			},
 		}
 	default:
 		break

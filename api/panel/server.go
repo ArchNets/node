@@ -188,24 +188,41 @@ type Sockopt struct {
 	CustomSockopt        string `json:"custom_sockopt"`
 }
 
+type RealityLimitFallback struct {
+	AfterBytes       uint64 `json:"after_bytes"`
+	BytesPerSec      uint64 `json:"bytes_per_sec"`
+	BurstBytesPerSec uint64 `json:"burst_bytes_per_sec"`
+}
+
 type Protocol struct {
-	Type                    string            `json:"type"`
-	Port                    int               `json:"port"`
-	ListenIP                string            `json:"listen_ip"` // Listen IP (default: 0.0.0.0, use 127.0.0.1 for reverse proxy)
-	Enable                  bool              `json:"enable"`
-	Security                string            `json:"security"`
-	SNI                     string            `json:"sni"`
-	AllowInsecure           bool              `json:"allow_insecure"`
-	Fingerprint             string            `json:"fingerprint"`
-	Alpn                    []string          `json:"alpn"`
-	RealityServerAddr       string            `json:"reality_server_addr"`
-	RealityServerPort       int               `json:"reality_server_port"`
-	RealityPrivateKey       string            `json:"reality_private_key"`
-	RealityPublicKey        string            `json:"reality_public_key"`
-	RealityShortID          string            `json:"reality_short_id"`
-	RealityShortIds         []string          `json:"reality_short_ids"`
-	RealitySpiderX          string            `json:"reality_spider_x"`
-	Transport               string `json:"transport"`
+	Type                         string               `json:"type"`
+	Port                         int                  `json:"port"`
+	ListenIP                     string               `json:"listen_ip"` // Listen IP (default: 0.0.0.0, use 127.0.0.1 for reverse proxy)
+	Enable                       bool                 `json:"enable"`
+	Security                     string               `json:"security"`
+	SNI                          string               `json:"sni"`
+	AllowInsecure                bool                 `json:"allow_insecure"`
+	Fingerprint                  string               `json:"fingerprint"`
+	Alpn                         []string             `json:"alpn"`
+	RealityServerAddr            string               `json:"reality_server_addr"`
+	RealityServerPort            int                  `json:"reality_server_port"`
+	RealityPrivateKey            string               `json:"reality_private_key"`
+	RealityPublicKey             string               `json:"reality_public_key"`
+	RealityShortID               string               `json:"reality_short_id"`
+	RealityShortIds              []string             `json:"reality_short_ids"`
+	RealitySpiderX               string               `json:"reality_spider_x"`
+	RealityShow                  bool                 `json:"reality_show"`
+	RealityXver                  uint64               `json:"reality_xver"`
+	RealityServerNames           []string             `json:"reality_server_names"`
+	RealityMinClientVer          string               `json:"reality_min_client_ver"`
+	RealityMaxClientVer          string               `json:"reality_max_client_ver"`
+	RealityMaxTimeDiff           uint64               `json:"reality_max_time_diff"`
+	RealityMldsa65Seed           string               `json:"reality_mldsa65_seed"`
+	RealityMldsa65Verify         string               `json:"reality_mldsa65_verify"`
+	RealityMasterKeyLog          string               `json:"reality_master_key_log"`
+	RealityLimitFallbackUpload   RealityLimitFallback `json:"reality_limit_fallback_upload"`
+	RealityLimitFallbackDownload RealityLimitFallback `json:"reality_limit_fallback_download"`
+	Transport                    string               `json:"transport"`
 	Host                    string `json:"host"`
 	Path                    string `json:"path"`
 	ServiceName             string `json:"service_name"`
