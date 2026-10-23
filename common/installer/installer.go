@@ -15,11 +15,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Binary URLs
-const (
-	GostInstallURL = "https://github.com/go-gost/gost/releases/latest/download/gost-linux-amd64.gz"
-)
-
 // getLatestNodepassVersion fetches the latest version tag from GitHub API
 func getLatestNodepassVersion() (string, error) {
 	resp, err := http.Get("https://api.github.com/repos/NodePassProject/nodepass/releases/latest")
@@ -44,24 +39,6 @@ func getLatestNodepassVersion() (string, error) {
 	return version, nil
 }
 
-// InstallGost downloads and installs Gost to /usr/local/bin
-func InstallGost() error {
-	dest := "/usr/local/bin/gost"
-	log.Infof("Installing Gost to %s", dest)
-
-	gzPath := dest + ".gz"
-	if err := DownloadFile(GostInstallURL, gzPath); err != nil {
-		return err
-	}
-	defer os.Remove(gzPath)
-
-	if err := Ungzip(gzPath, dest); err != nil {
-		return err
-	}
-
-	return os.Chmod(dest, 0755)
-}
-
 // InstallNodepass downloads and installs the latest Nodepass to /usr/local/bin
 func InstallNodepass() error {
 	dest := "/usr/local/bin/nodepass"
@@ -83,22 +60,6 @@ func InstallNodepass() error {
 	defer os.Remove(tarGzPath)
 
 	return ExtractFromTarGz(tarGzPath, "nodepass", dest)
-}
-
-// InstallSniSpoofing downloads and installs SNI-Spoofing to /usr/local/bin
-func InstallSniSpoofing() error {
-	dest := "/usr/local/bin/sni-spoofing"
-	log.Infof("Installing SNI-Spoofing to %s", dest)
-
-	// Since we only install sni-spoofing on the Iran side, we use the specific mirror
-	downloadURL := "https://storage.archnets.com/linux/mirror/sni/sni-spoofing-linux-amd64"
-	log.Infof("Downloading SNI-Spoofing from mirror: %s", downloadURL)
-
-	if err := DownloadFile(downloadURL, dest); err != nil {
-		return err
-	}
-
-	return os.Chmod(dest, 0755)
 }
 
 // CopyFile copies a file from src to dst

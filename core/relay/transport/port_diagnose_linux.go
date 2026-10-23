@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // ProcessHolder describes a process holding a local network port.
@@ -112,4 +113,23 @@ func FormatPortConflictError(port int, bindErr error) error {
 			port, holder.Comm, holder.PID, holder.Cmdline, bindErr)
 	}
 	return fmt.Errorf("port %d already in use (bind refused): %w", port, bindErr)
+}
+
+// ReclaimPortIfOrphanedNode checks if the process holding port is an orphaned node process
+// and terminates it to reclaim the port. Returns true if an orphaned node was terminated.
+func ReclaimPortIfOrphanedNode(port int) bool {
+	holder, err := DiagnosePortOccupant(port)
+	if err != nil || holder == nil {
+		return false
+	}
+	if holder.PID <= 1 || holder.PID == os.Getpid() {
+		return false
+	}
+	comm := strings.ToLower(holder.Comm)
+	cmdline := strings.ToLower(holder.Cmdline)
+	if comm == "node" || strings.Contains(cmdline, "/node ") || strings.HasSuffix(cmdline, "/node") || strings.Contains(cmdline, "node tunnel") {
+		_ = syscall.Kill(holder.PID, syscall.SIGKILL)
+		return true
+	}
+	return false
 }

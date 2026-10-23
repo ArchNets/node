@@ -20,7 +20,6 @@ import (
 	"github.com/archnets/node/api/panel"
 	certutil "github.com/archnets/node/common/cert"
 	"github.com/archnets/node/common/file"
-	"github.com/archnets/node/common/installer"
 	"github.com/archnets/node/common/task"
 	"github.com/archnets/node/conf"
 	"github.com/archnets/node/core/relay/telemetry"
@@ -35,7 +34,6 @@ import (
 
 const (
 	TunnelDir      = "/etc/archnets/tunnel"
-	GostBinary     = "/usr/local/bin/gost"
 	NodepassBinary = "/usr/local/bin/nodepass"
 )
 
@@ -88,10 +86,6 @@ type TunnelController struct {
 	// Xray instances
 	xrayInstances map[int]*core.Instance
 	xrayMu        sync.Mutex
-	// SNI-Spoofing
-	sniSpoofingProcesses map[int]*exec.Cmd
-	sniSpoofingMu        sync.Mutex
-	sniSpoofingWg        sync.WaitGroup
 }
 
 // NewTunnelController creates a new tunnel controller
@@ -114,7 +108,6 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		logger:               log.WithField("tag", tag),
 		relayDriver:          relayDrv,
 		xrayInstances:        make(map[int]*core.Instance),
-		sniSpoofingProcesses: make(map[int]*exec.Cmd),
 	}
 }
 
@@ -184,30 +177,6 @@ func (c *TunnelController) Start() error {
 
 // CheckAndInstallBinaries checks for missing binaries and installs them
 func (c *TunnelController) CheckAndInstallBinaries() error {
-	// Check Gost
-	if _, err := os.Stat(GostBinary); os.IsNotExist(err) {
-		c.logger.Info("Gost binary missing, attempting auto-installation...")
-		if err := installer.InstallGost(); err != nil {
-			c.logger.WithField("err", err).Warn("Gost auto-installation failed")
-		}
-	}
-
-	// Check Nodepass
-	if _, err := os.Stat(NodepassBinary); os.IsNotExist(err) {
-		c.logger.Info("NodePass binary missing, attempting auto-installation...")
-		if err := installer.InstallNodepass(); err != nil {
-			c.logger.WithField("err", err).Warn("NodePass auto-installation failed")
-		}
-	}
-
-	// Check SNI-Spoofing
-	if _, err := os.Stat("/usr/local/bin/sni-spoofing"); os.IsNotExist(err) {
-		c.logger.Info("SNI-Spoofing binary missing, attempting auto-installation...")
-		if err := installer.InstallSniSpoofing(); err != nil {
-			c.logger.WithField("err", err).Warn("SNI-Spoofing auto-installation failed")
-		}
-	}
-
 	return nil
 }
 
@@ -225,7 +194,6 @@ func (c *TunnelController) Uninstall() error {
 
 	// Remove system binaries (optional, keep them if others might use them?)
 	// User said "deleting everything too", so we remove them.
-	_ = os.Remove(GostBinary)
 	_ = os.Remove(NodepassBinary)
 
 	c.logger.Info("Tunnel components uninstalled")
@@ -254,9 +222,6 @@ func (c *TunnelController) Close() error {
 
 	// Stop all Xray instances
 	c.stopAllXrayInstances()
-
-	// Stop all SNI-Spoofing processes
-	c.stopAllSniSpoofingProcesses()
 
 	// Close log files
 	if c.forwarderLogFile != nil {
@@ -510,7 +475,6 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 
 	c.stopAllForwarders()
 	c.stopAllXrayInstances()
-	c.stopAllSniSpoofingProcesses()
 
 	var unhandledTunnels []panel.TunnelInfo
 	var xrayTunnels []panel.TunnelInfo
@@ -601,14 +565,6 @@ func (c *TunnelController) startForwarder(tunnelId int, f *panel.Forwarder) erro
 		// Native Go relay engine handles its own forwarding rules internally, skip
 		c.logger.WithField("tunnelId", tunnelId).Debug("Skipping native relay forwarder (handled by native engine)")
 		return nil
-
-	case "gost":
-		if _, err := os.Stat(GostBinary); os.IsNotExist(err) {
-			return fmt.Errorf("gost binary not found at %s", GostBinary)
-		}
-		// gost -L tcp://:listen_port/target_ip:target_port
-		listener := fmt.Sprintf("%s://:%d/%s:%d", f.Protocol, f.ListenPort, f.TargetIP, f.TargetPort)
-		cmd = exec.Command(GostBinary, "-L", listener)
 
 	case "nodepass":
 		if _, err := os.Stat(NodepassBinary); os.IsNotExist(err) {
@@ -1237,50 +1193,12 @@ func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
 		return fmt.Errorf("xray_config is missing for xray-stealth tunnel")
 	}
 
-	// For entry role, we have sni_spoofing_config and need to start the sidecar
-	if t.Role == "entry" && t.SniSpoofingConfig != nil {
-		if err := c.startSniSpoofingProcess(t); err != nil {
-			return fmt.Errorf("failed to start sni-spoofing: %v", err)
-		}
-		time.Sleep(500 * time.Millisecond) // Wait for it to bind
-	}
-
 	logLevel := c.nodeConfig.LogConfig.Level
 	if logLevel == "" {
 		logLevel = "warning"
 	}
 
-	rawJSON := c.buildXrayJSON(t, t.XrayConfig, logLevel)
-
-	// For stealth entry, point the outbound address and port to the SNI spoofing sidecar
-	var xrayJSON string
-	if t.Role == "entry" && t.SniSpoofingConfig != nil {
-		var obj map[string]interface{}
-		if err := json.Unmarshal([]byte(rawJSON), &obj); err == nil {
-			if outbounds, ok := obj["outbounds"].([]interface{}); ok {
-				for _, ob := range outbounds {
-					if outb, ok := ob.(map[string]interface{}); ok {
-						if outb["protocol"] == t.XrayConfig.Type {
-							if settings, ok := outb["settings"].(map[string]interface{}); ok {
-								if vnext, ok := settings["vnext"].([]interface{}); ok && len(vnext) > 0 {
-									if target, ok := vnext[0].(map[string]interface{}); ok {
-										target["address"] = "127.0.0.1"
-										target["port"] = t.SniSpoofingConfig.ListenPort
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			b, _ := json.Marshal(obj)
-			xrayJSON = string(b)
-		} else {
-			xrayJSON = rawJSON
-		}
-	} else {
-		xrayJSON = rawJSON
-	}
+	xrayJSON := c.buildXrayJSON(t, t.XrayConfig, logLevel)
 
 	// Write Xray config to disk
 	configPath := filepath.Join(c.tunnelDir, fmt.Sprintf("xray_stealth_%d.json", t.Id))
@@ -1333,85 +1251,4 @@ func (c *TunnelController) startXrayStealthInstance(t panel.TunnelInfo) error {
 
 	c.logger.WithField("tunnelId", t.Id).Info("Xray-stealth tunnel instance started natively in Go")
 	return nil
-}
-
-func (c *TunnelController) startSniSpoofingProcess(t panel.TunnelInfo) error {
-	cfg := t.SniSpoofingConfig
-	
-	iniContent := fmt.Sprintf(`listen = 127.0.0.1:%d
-connect = %s:%d
-fake-sni = %s
-utls = %s
-fake-repeat = %d
-fake-delay = %s
-ack-timeout = %s
-injector = %s
-enable-fragment = %t
-fragment-delay = %s
-sni-chunk = %d
-`,
-		cfg.ListenPort, cfg.ConnectIP, cfg.ConnectPort, cfg.FakeSNI,
-		cfg.UTLS, cfg.FakeRepeat, cfg.FakeDelay, cfg.AckTimeout,
-		cfg.Injector, cfg.EnableFragment, cfg.FragmentDelay, cfg.SniChunk)
-
-	iniPath := filepath.Join(c.tunnelDir, fmt.Sprintf("sni_spoofing_%d.ini", t.Id))
-	if err := os.WriteFile(iniPath, []byte(iniContent), 0644); err != nil {
-		return fmt.Errorf("failed to write sni_spoofing ini: %v", err)
-	}
-
-	// Kill existing process if it's already running (e.g. during config update)
-	c.sniSpoofingMu.Lock()
-	if oldCmd, exists := c.sniSpoofingProcesses[t.Id]; exists {
-		killProcessGroup(oldCmd)
-	}
-	c.sniSpoofingMu.Unlock()
-
-	cmd := exec.Command("/usr/local/bin/sni-spoofing", "-config", iniPath)
-	
-	// Pipe logs directly to the beautiful logrus logger instead of raw forwarder.log
-	spoofLogger := c.logger.WithFields(log.Fields{
-		"tunnelId": t.Id,
-		"tag":      "sni-spoofing",
-	})
-	cmd.Stdout = spoofLogger.WriterLevel(log.InfoLevel)
-	cmd.Stderr = spoofLogger.WriterLevel(log.ErrorLevel)
-
-	setProcessGroup(cmd)
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	c.sniSpoofingMu.Lock()
-	c.sniSpoofingProcesses[t.Id] = cmd
-	c.sniSpoofingMu.Unlock()
-
-	c.sniSpoofingWg.Add(1)
-	go func() {
-		defer c.sniSpoofingWg.Done()
-		_ = cmd.Wait()
-		c.sniSpoofingMu.Lock()
-		if c.sniSpoofingProcesses[t.Id] == cmd {
-			delete(c.sniSpoofingProcesses, t.Id)
-		}
-		c.sniSpoofingMu.Unlock()
-	}()
-
-	c.logger.WithField("tunnelId", t.Id).Info("SNI-Spoofing process started")
-	return nil
-}
-
-func (c *TunnelController) stopAllSniSpoofingProcesses() {
-	c.sniSpoofingMu.Lock()
-	for _, cmd := range c.sniSpoofingProcesses {
-		killProcessGroup(cmd)
-	}
-	c.sniSpoofingProcesses = make(map[int]*exec.Cmd)
-	c.sniSpoofingMu.Unlock()
-	
-	// Also brutally kill any orphaned sni-spoofing processes that might have survived a node crash
-	exec.Command("pkill", "-f", "sni-spoofing").Run()
-
-	c.sniSpoofingWg.Wait()
-	c.logger.Info("All SNI-Spoofing processes stopped")
 }

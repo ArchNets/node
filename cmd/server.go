@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/archnets/node/api/panel"
@@ -85,6 +87,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		return
 	}
 	log.Infof("started %d nodes", serverconfig.Data.Total)
+
+	// Clean up legacy standalone tunnel process if lingering from older scripts
+	cleanupLegacyTunnelProcess()
 
 	// Initialize and start unified native tunnel controller directly in the main server daemon
 	tunnelCtrl := node.NewTunnelController(p, c.ApiConfig.ServerId, c)
@@ -187,4 +192,18 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore, tunnelCtrl 
 	log.Infof("%d nodes reloaded successfully", serverconfig.Data.Total)
 	runtime.GC()
 	return nil
+}
+
+func cleanupLegacyTunnelProcess() {
+	pidPath := "/var/run/archnets-tunnel.pid"
+	if pidBytes, err := os.ReadFile(pidPath); err == nil {
+		cleanStr := strings.TrimSpace(string(pidBytes))
+		if pid, err := strconv.Atoi(cleanStr); err == nil && pid > 1 && pid != os.Getpid() {
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Kill()
+				log.WithField("pid", pid).Info("Terminated legacy standalone tunnel process from PID file")
+			}
+		}
+		_ = os.Remove(pidPath)
+	}
 }

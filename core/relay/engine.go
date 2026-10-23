@@ -216,6 +216,13 @@ func (e *Engine) startEntry() error {
 	carrierAddr := net.JoinHostPort(listenIP, strconv.Itoa(e.cfg.CarrierPort))
 	ln, err := net.Listen("tcp", carrierAddr)
 	if err != nil {
+		if transport.ReclaimPortIfOrphanedNode(e.cfg.CarrierPort) {
+			e.logger.WithField("port", e.cfg.CarrierPort).Warn("Terminated orphaned node process holding carrier port, retrying bind...")
+			time.Sleep(300 * time.Millisecond)
+			ln, err = net.Listen("tcp", carrierAddr)
+		}
+	}
+	if err != nil {
 		conflictErr := transport.FormatPortConflictError(e.cfg.CarrierPort, err)
 		e.logger.WithFields(log.Fields{
 			"port": e.cfg.CarrierPort,
@@ -380,6 +387,13 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 	}
 	addr := net.JoinHostPort(listenIP, strconv.Itoa(listenPort))
 	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		if transport.ReclaimPortIfOrphanedNode(listenPort) {
+			e.logger.WithField("port", listenPort).Warn("Terminated orphaned node process holding forwarder port, retrying bind...")
+			time.Sleep(300 * time.Millisecond)
+			ln, err = net.Listen("tcp", addr)
+		}
+	}
 	if err != nil {
 		conflictErr := transport.FormatPortConflictError(listenPort, err)
 		e.logger.WithFields(log.Fields{

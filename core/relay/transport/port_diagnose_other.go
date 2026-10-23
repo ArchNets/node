@@ -17,3 +17,7 @@ func DiagnosePortOccupant(port int) (*ProcessHolder, error) {
 func FormatPortConflictError(port int, bindErr error) error {
 	return fmt.Errorf("port %d already in use: %w", port, bindErr)
 }
+
+func ReclaimPortIfOrphanedNode(port int) bool {
+	return false
+}
