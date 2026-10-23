@@ -65,6 +65,7 @@ type Engine struct {
 	idleWaiters   atomic.Int64
 	activeStreams sync.Map
 	alive         atomic.Bool
+	lastDialLog   atomic.Int64
 	logger        *log.Entry
 }
 
@@ -215,11 +216,23 @@ func (e *Engine) startEntry() error {
 	carrierAddr := net.JoinHostPort(listenIP, strconv.Itoa(e.cfg.CarrierPort))
 	ln, err := net.Listen("tcp", carrierAddr)
 	if err != nil {
-		return fmt.Errorf("listen carrier %s: %w", carrierAddr, err)
+		conflictErr := transport.FormatPortConflictError(e.cfg.CarrierPort, err)
+		e.logger.WithFields(log.Fields{
+			"port": e.cfg.CarrierPort,
+			"addr": carrierAddr,
+			"err":  conflictErr,
+		}).Error("Relay carrier port bind failed. Another process is occupying this port!")
+		return conflictErr
 	}
 	e.mu.Lock()
 	e.carrierLn = ln
 	e.mu.Unlock()
+
+	e.logger.WithFields(log.Fields{
+		"carrierPort": e.cfg.CarrierPort,
+		"sni":         e.cfg.SNI,
+		"transport":   e.cfg.Transport,
+	}).Info("Entry carrier listener started successfully")
 
 	e.wg.Add(1)
 	go e.entryAcceptLoop(ln)
@@ -316,7 +329,13 @@ func (e *Engine) pushIdleStream(stream net.Conn) {
 
 	select {
 	case e.idlePool <- item:
-		e.Stats.PoolIdleConnections.Add(1)
+		idleCount := e.Stats.PoolIdleConnections.Add(1)
+		if idleCount == 1 {
+			e.logger.WithFields(log.Fields{
+				"carrierPort": e.cfg.CarrierPort,
+				"remote":      stream.RemoteAddr().String(),
+			}).Info("Entry reverse carrier pool active: authenticated reverse socket received")
+		}
 	default:
 		select {
 		case old := <-e.idlePool:
@@ -362,7 +381,13 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 	addr := net.JoinHostPort(listenIP, strconv.Itoa(listenPort))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("tcp forwarder listen %s: %w", addr, err)
+		conflictErr := transport.FormatPortConflictError(listenPort, err)
+		e.logger.WithFields(log.Fields{
+			"port": listenPort,
+			"addr": addr,
+			"err":  conflictErr,
+		}).Error("TCP forwarder bind failed. Port is already in use!")
+		return conflictErr
 	}
 
 	e.mu.Lock()
@@ -399,7 +424,13 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 	}
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return fmt.Errorf("udp forwarder listen %v: %w", udpAddr, err)
+		conflictErr := transport.FormatPortConflictError(listenPort, err)
+		e.logger.WithFields(log.Fields{
+			"port": listenPort,
+			"addr": udpAddr.String(),
+			"err":  conflictErr,
+		}).Error("UDP forwarder bind failed. Port is already in use!")
+		return conflictErr
 	}
 
 	e.mu.Lock()
@@ -428,6 +459,20 @@ func (e *Engine) triggerReplenish() {
 	}
 }
 
+func (e *Engine) logDialFailure(err error) {
+	now := time.Now().Unix()
+	last := e.lastDialLog.Load()
+	if now-last >= 10 {
+		if e.lastDialLog.CompareAndSwap(last, now) {
+			e.logger.WithFields(log.Fields{
+				"carrierPort": e.cfg.CarrierPort,
+				"entryIP":     e.cfg.EntryServerIP,
+				"err":         err,
+			}).Warn("Exit node failed to connect to entry carrier port (check firewall or port conflict on entry)")
+		}
+	}
+}
+
 func (e *Engine) exitPoolLoop() {
 	defer e.wg.Done()
 	ticker := time.NewTicker(1 * time.Second)
@@ -441,6 +486,7 @@ func (e *Engine) exitPoolLoop() {
 			defer dialingCount.Add(-1)
 			stream, err := e.dialCarrierStream()
 			if err != nil {
+				e.logDialFailure(err)
 				return
 			}
 			select {
@@ -525,7 +571,13 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 	defer e.activeStreams.Delete(stream)
 
 	e.idleWaiters.Add(1)
-	e.Stats.PoolIdleConnections.Add(1)
+	idleCount := e.Stats.PoolIdleConnections.Add(1)
+	if idleCount == 1 {
+		e.logger.WithFields(log.Fields{
+			"carrierPort": e.cfg.CarrierPort,
+			"sni":         e.cfg.SNI,
+		}).Info("Exit reverse carrier connected and warm connections ready in pool")
+	}
 
 	_ = stream.SetReadDeadline(time.Now().Add(4 * time.Minute))
 	proto, targetPort, err := routing.ReadRoutingHeader(stream)

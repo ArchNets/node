@@ -409,9 +409,9 @@ show_enable_status() {
 show_tunnel_status() {
     check_status
     if [[ $? == 0 ]]; then
-        echo -e "Tunnel: ${green}running${plain} (native Go engine in archnets core)"
+        echo -e "Tunnel: ${green}running${plain}"
     else
-        echo -e "Tunnel: ${yellow}not running${plain} (archnets service is stopped)"
+        echo -e "Tunnel: ${yellow}not running${plain}"
     fi
 }
 
@@ -507,117 +507,6 @@ open_ports() {
     echo -e "${green}Successfully opened firewall ports!${plain}"
 }
 
-# Tunnel management functions
-tunnel_install() {
-    echo -e "${green}Tunnel engine is native pure Go inside archnets core. Checking forwarder binaries...${plain}"
-    /usr/local/archnets/node tunnel install
-    if [[ $? == 0 ]]; then
-        echo -e "${green}Tunnel components verified successfully${plain}"
-    else
-        echo -e "${red}Failed to verify tunnel components${plain}"
-    fi
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
-
-tunnel_start() {
-    echo -e "${green}Starting archnets service (runs native tunnel engine automatically)...${plain}"
-    systemctl restart archnets
-    sleep 2
-    check_status
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
-
-tunnel_stop() {
-    echo -e "${green}Stopping archnets service...${plain}"
-    systemctl stop archnets
-    killall -9 gost 2>/dev/null
-    killall -9 nodepass 2>/dev/null
-    killall -9 sni-spoofing 2>/dev/null
-    if [[ $? == 0 ]]; then
-        echo -e "${green}Service stopped successfully${plain}"
-    else
-        echo -e "${red}Failed to stop service${plain}"
-    fi
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
-
-tunnel_restart() {
-    echo -e "${green}Restarting archnets service (native relay)...${plain}"
-    systemctl restart archnets
-    sleep 2
-    check_status
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
-
-tunnel_uninstall() {
-    confirm "Are you sure you want to uninstall tunnel components?" "n"
-    if [[ $? != 0 ]]; then
-        if [[ $# == 0 ]]; then
-            show_menu
-        fi
-        return 0
-    fi
-    echo -e "${green}Uninstalling tunnel components...${plain}"
-    /usr/local/archnets/node tunnel uninstall
-    if [[ $? == 0 ]]; then
-        echo -e "${green}Tunnel components uninstalled successfully${plain}"
-    else
-        echo -e "${red}Failed to uninstall tunnel components${plain}"
-    fi
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
-
-
-tunnel_log() {
-    echo -e "${green}Select log to view:${plain}"
-    echo -e "  1. Live Service & Relay Logs (journalctl)"
-    echo -e "  2. Forwarder Logs (Gost/NodePass/SNI-Spoofing)"
-    echo -e "  3. Xray Stealth Configs (Written JSON)"
-    echo && read -rp "Please choose [1-3] (default 1): " log_choice
-    [[ -z "$log_choice" ]] && log_choice=1
-
-    case "$log_choice" in
-        1) 
-            echo -e "${green}Viewing live service & relay logs (Ctrl+C to exit)...${plain}"
-            journalctl -u archnets -n 100 -f
-            ;;
-        2)
-            echo -e "${green}Viewing Forwarder logs (Ctrl+C to exit)...${plain}"
-            tail -f /etc/archnets/tunnel/log/forwarder.log
-            ;;
-        3)
-            echo -e "${green}Xray Stealth generated configs:${plain}"
-            ls -la /etc/archnets/tunnel/xray_stealth_*.json /etc/archnets/tunnel/sni_spoofing_*.ini 2>/dev/null
-            echo ""
-            for f in /etc/archnets/tunnel/xray_stealth_*.json; do
-                [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f" | python3 -m json.tool 2>/dev/null || cat "$f"
-                echo ""
-            done
-            for f in /etc/archnets/tunnel/sni_spoofing_*.ini; do
-                [ -f "$f" ] && echo -e "${yellow}--- $f ---${plain}" && cat "$f"
-                echo ""
-            done
-            ;;
-        *)
-            echo -e "${red}Please enter a valid number [1-3]${plain}"
-            ;;
-    esac
-
-    if [[ $# == 0 ]]; then
-        before_show_menu
-    fi
-}
-
 show_usage() {
     echo "archnets management script usage:"
     echo "------------------------------------------"
@@ -635,13 +524,6 @@ show_usage() {
     echo "node install        - Install archnets"
     echo "node uninstall      - Uninstall archnets"
     echo "node version        - Show archnets version"
-    echo "------------------------------------------"
-    echo "node tunnel-install - Install tunnel components"
-    echo "node tunnel-start   - Start tunnel nodes"
-    echo "node tunnel-stop    - Stop tunnel processes"
-    echo "node tunnel-restart - Restart tunnel nodes"
-    echo "node tunnel-remove  - Uninstall tunnel components"
-    echo "node tunnel-log     - View tunnel logs"
     echo "------------------------------------------"
 }
 
@@ -669,17 +551,10 @@ show_menu() {
   ${green}13.${plain} Generate archnets config file
   ${green}14.${plain} Open all VPS network ports
 ————————————————
-  ${green}16.${plain} Install tunnel
-  ${green}17.${plain} Start tunnel
-  ${green}18.${plain} Stop tunnel
-  ${green}19.${plain} Restart tunnel
-  ${green}20.${plain} Uninstall tunnel
-  ${green}21.${plain} View tunnel logs
-————————————————
   ${green}15.${plain} Exit
  "
     show_status
-    echo && read -rp "Please choose [0-21]: " num
+    echo && read -rp "Please choose [0-15]: " num
 
     case "${num}" in
         0) config ;;
@@ -698,13 +573,7 @@ show_menu() {
         13) generate_config_file ;;
         14) open_ports ;;
         15) exit ;;
-        16) check_install && tunnel_install ;;
-        17) check_install && tunnel_start ;;
-        18) check_install && tunnel_stop ;;
-        19) check_install && tunnel_restart ;;
-        20) check_install && tunnel_uninstall ;;
-        21) check_install && tunnel_log ;;
-        *) echo -e "${red}Please enter a valid number [0-21]${plain}" ;;
+        *) echo -e "${red}Please enter a valid number [0-15]${plain}" ;;
     esac
 }
 
@@ -724,12 +593,12 @@ if [[ $# > 0 ]]; then
         "uninstall") check_install 0 && uninstall 0 ;;
         "version") check_install 0 && show_archnets_version 0 ;;
         "update_shell") update_shell ;;
-        "tunnel-install") check_install 0 && tunnel_install 0 ;;
-        "tunnel-start") check_install 0 && tunnel_start 0 ;;
-        "tunnel-stop") check_install 0 && tunnel_stop 0 ;;
-        "tunnel-restart") check_install 0 && tunnel_restart 0 ;;
-        "tunnel-remove") check_install 0 && tunnel_uninstall 0 ;;
-        "tunnel-log") check_install 0 && tunnel_log 0 ;;
+        "tunnel-install") check_install 0 && echo -e "${green}Tunnel engine is native Go inside archnets core.${plain}" ;;
+        "tunnel-start") check_install 0 && start 0 ;;
+        "tunnel-stop") check_install 0 && stop 0 ;;
+        "tunnel-restart") check_install 0 && restart 0 ;;
+        "tunnel-remove") check_install 0 && echo -e "${yellow}Tunnel engine is integrated in archnets core.${plain}" ;;
+        "tunnel-log") check_install 0 && show_log 0 ;;
         *) show_usage
     esac
 else

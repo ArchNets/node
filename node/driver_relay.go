@@ -15,6 +15,7 @@ import (
 type RelayDriver struct {
 	mu             sync.Mutex
 	engines        map[int]*relay.Engine
+	lastErrors     map[int]string
 	pendingSamples map[int]*panel.BandwidthSamplePayload
 	samplesMu      sync.Mutex
 	logger         *log.Entry
@@ -23,6 +24,7 @@ type RelayDriver struct {
 func NewRelayDriver(logger *log.Entry) *RelayDriver {
 	return &RelayDriver{
 		engines:        make(map[int]*relay.Engine),
+		lastErrors:     make(map[int]string),
 		pendingSamples: make(map[int]*panel.BandwidthSamplePayload),
 		logger:         logger,
 	}
@@ -161,9 +163,11 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 
 	eng := relay.NewEngine(cfg)
 	if err := eng.Start(); err != nil {
+		d.lastErrors[t.Id] = err.Error()
 		return err
 	}
 
+	delete(d.lastErrors, t.Id)
 	d.engines[t.Id] = eng
 	d.logger.WithFields(log.Fields{
 		"tunnelId":  t.Id,
@@ -202,13 +206,25 @@ func (d *RelayDriver) StopAll() {
 func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnline bool) (panel.TunnelStatus, bool) {
 	d.mu.Lock()
 	eng := d.engines[t.Id]
+	lastErr := d.lastErrors[t.Id]
 	d.mu.Unlock()
 
 	if eng == nil {
-		return panel.TunnelStatus{TunnelId: t.Id}, false
+		probeStatus := "THROTTLED"
+		if lastErr != "" {
+			probeStatus = "ERROR: " + lastErr
+		}
+		return panel.TunnelStatus{
+			TunnelId:    t.Id,
+			Online:      false,
+			ProbeStatus: probeStatus,
+		}, true
 	}
 
 	online := eng.IsAlive()
+	if t.Role == "exit" {
+		online = eng.IsAlive() && (eng.Stats.PoolIdleConnections.Load() > 0 || eng.Stats.ActiveConnections.Load() > 0)
+	}
 	deltaUpload, deltaDownload := eng.Stats.SnapshotDelta()
 	curUpBps := eng.Stats.CurrentUploadBps.Load()
 	curDownBps := eng.Stats.CurrentDownloadBps.Load()
