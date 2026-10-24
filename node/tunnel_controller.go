@@ -354,6 +354,15 @@ func (c *TunnelController) statusReport() error {
 	defer c.stateMu.Unlock()
 
 	for _, t := range tunnels {
+		if t.Method == "unconfigured" {
+			statuses = append(statuses, panel.TunnelStatus{
+				TunnelId:    t.Id,
+				Online:      false,
+				ProbeStatus: "READY",
+			})
+			continue
+		}
+
 		probePort := t.ExitXrayPort
 		probeIP := t.RemoteIP
 		if probeIP == "" {
@@ -507,6 +516,11 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	var xrayStealthTunnels []panel.TunnelInfo
 
 	for _, t := range data.Tunnels {
+		if t.Method == "unconfigured" {
+			c.logger.WithField("tunnelId", t.Id).Info("Tunnel is unconfigured (ready to connect); waiting for configuration")
+			continue
+		}
+
 		// If handled by a registered driver, start it
 		if drv := GetTunnelDriver(t.Method); drv != nil {
 			if err := drv.Start(t); err != nil {
