@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/archnets/node/core/relay/protocol"
+	"github.com/archnets/node/core/relay/transport"
 )
 
 const (
@@ -46,13 +47,14 @@ var probeHighEntropyChunk = func() []byte {
 
 // BandwidthSample represents a point-in-time bandwidth and health measurement over stream 0xFF.
 type BandwidthSample struct {
-	Timestamp    int64   `json:"timestamp"`
-	UploadMbps   float64 `json:"upload_mbps"`
-	DownloadMbps float64 `json:"download_mbps"`
-	RttMs        int     `json:"rtt_ms"`
-	JitterMs     int     `json:"jitter_ms"`
-	PacketLoss   int     `json:"packet_loss"`
-	Status       string  `json:"status"` // "OPTIMAL", "DEGRADED", "THROTTLED"
+	Timestamp      int64   `json:"timestamp"`
+	UploadMbps     float64 `json:"upload_mbps"`
+	DownloadMbps   float64 `json:"download_mbps"`
+	RttMs          int     `json:"rtt_ms"`
+	JitterMs       int     `json:"jitter_ms"`
+	PacketLoss     int     `json:"packet_loss"`
+	Status         string  `json:"status"` // "OPTIMAL", "DEGRADED", "THROTTLED"
+	RecommendedMTU int     `json:"recommended_mtu,omitempty"`
 }
 
 func ClassifyProbeStatus(uploadMbps, downloadMbps float64, rttMs, packetLoss int) string {
@@ -158,6 +160,24 @@ func HandleExitProbeStream(stream net.Conn, stats *Stats) {
 		if stats != nil {
 			stats.AddDownload(totalSent)
 		}
+
+	case cmdPrefix == "MTUPRB:":
+		buf := make([]byte, 2048)
+		targetMTU := readDurationLine(stream)
+		if targetMTU < 576 || targetMTU > 1500 {
+			return
+		}
+		payloadLen := targetMTU - 40
+		transport.ConfigureDontFragmentProbe(stream, targetMTU)
+		_ = stream.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := io.ReadFull(stream, buf[:payloadLen]); err != nil {
+			return
+		}
+		_ = stream.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if _, err := stream.Write(probeHighEntropyChunk[:payloadLen]); err != nil {
+			return
+		}
+		_, _ = stream.Write([]byte("MTUOK000"))
 	}
 }
 
@@ -239,6 +259,8 @@ func RunBandwidthProbe(claimStreamFn func(timeout time.Duration) (net.Conn, erro
 		return nil, fmt.Errorf("download probe failed: %w", err)
 	}
 
+	bestMTU := DiscoverOptimalPathMTU(claimStreamFn)
+
 	uploadMbps := math.Round((float64(uploadBps)*8.0/1_000_000.0)*100) / 100
 	downloadMbps := math.Round((float64(downloadBps)*8.0/1_000_000.0)*100) / 100
 	status := ClassifyProbeStatus(uploadMbps, downloadMbps, rttMs, packetLoss)
@@ -251,15 +273,102 @@ func RunBandwidthProbe(claimStreamFn func(timeout time.Duration) (net.Conn, erro
 	}
 
 	sample := &BandwidthSample{
-		Timestamp:    time.Now().Unix(),
-		UploadMbps:   uploadMbps,
-		DownloadMbps: downloadMbps,
-		RttMs:        rttMs,
-		JitterMs:     jitterMs,
-		PacketLoss:   packetLoss,
-		Status:       status,
+		Timestamp:      time.Now().Unix(),
+		UploadMbps:     uploadMbps,
+		DownloadMbps:   downloadMbps,
+		RttMs:          rttMs,
+		JitterMs:       jitterMs,
+		PacketLoss:     packetLoss,
+		Status:         status,
+		RecommendedMTU: bestMTU,
 	}
 	return sample, nil
+}
+
+// DiscoverOptimalPathMTU finds the highest unfragmented Path MTU (with IP_PMTUDISC_DO DF=1)
+// between the Entry and Exit servers using kernel TCP_INFO inspection and binary search over stream 0xFF.
+func DiscoverOptimalPathMTU(claimStreamFn func(timeout time.Duration) (net.Conn, error)) int {
+	ceiling := 1500
+	floor := 1280
+
+	probeSize := func(testMTU int) (bool, int) {
+		stream, err := claimStreamFn(2 * time.Second)
+		if err != nil {
+			return false, 0
+		}
+		defer stream.Close()
+
+		kernelPMTU, _ := transport.InspectKernelPMTU(stream)
+		transport.ConfigureDontFragmentProbe(stream, testMTU)
+
+		_ = stream.SetDeadline(time.Now().Add(1800 * time.Millisecond))
+		if err := protocol.WriteRoutingHeader(stream, protocol.RouteProtoProbe, 0); err != nil {
+			return false, kernelPMTU
+		}
+		cmd := fmt.Appendf(nil, "MTUPRB:%d\n", testMTU)
+		if _, err := stream.Write(cmd); err != nil {
+			return false, kernelPMTU
+		}
+		payloadLen := testMTU - 40
+		if _, err := stream.Write(probeHighEntropyChunk[:payloadLen]); err != nil {
+			return false, kernelPMTU
+		}
+		reply := make([]byte, payloadLen+8)
+		if _, err := io.ReadFull(stream, reply); err != nil {
+			return false, kernelPMTU
+		}
+		if string(reply[payloadLen:]) != "MTUOK000" {
+			return false, kernelPMTU
+		}
+		postPMTU, _ := transport.InspectKernelPMTU(stream)
+		if postPMTU >= 576 && postPMTU < testMTU {
+			return false, postPMTU
+		}
+		return true, postPMTU
+	}
+
+	// 1. Try ceiling (1500) first — on a clean path this succeeds in 1 round-trip
+	ok, kPMTU := probeSize(ceiling)
+	if kPMTU >= 576 && kPMTU < ceiling {
+		ceiling = kPMTU
+	}
+	if ok && ceiling == 1500 {
+		return 1500
+	}
+
+	// 2. If kernel PMTU already narrowed the ceiling, verify that exact size
+	if ceiling < 1500 && ceiling >= floor {
+		if okK, _ := probeSize(ceiling); okK {
+			return ceiling
+		}
+	}
+
+	// 3. Binary search between floor (1280) and ceiling-8 in 8-byte steps
+	best := 1400
+	if okFloor, _ := probeSize(floor); okFloor {
+		best = floor
+	} else {
+		return 1400
+	}
+
+	lo, hi := floor+8, ceiling-8
+	for lo <= hi {
+		mid := ((lo + hi) / 2) &^ 7 // align to 8-byte boundary
+		if mid < lo {
+			mid = lo
+		}
+		okMid, discovered := probeSize(mid)
+		if discovered >= 576 && discovered < hi {
+			hi = discovered
+		}
+		if okMid {
+			best = mid
+			lo = mid + 8
+		} else {
+			hi = mid - 8
+		}
+	}
+	return best
 }
 
 func measurePingSeries(claimStreamFn func(timeout time.Duration) (net.Conn, error), count int) (avgRttMs, jitterMs, lossPct int) {
@@ -341,13 +450,7 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 		}
 	}()
 
-	// Coalesce 3-byte routing header + UPLOAD command into a single write
-	cmdStr := fmt.Sprintf("UPLOAD:%d\n", durSec)
-	initPkt := make([]byte, 3+len(cmdStr))
-	initPkt[0] = protocol.RouteProtoProbe
-	initPkt[1] = 0
-	initPkt[2] = 0
-	copy(initPkt[3:], cmdStr)
+	cmdBytes := fmt.Appendf(nil, "UPLOAD:%d\n", durSec)
 
 	var totalBytes atomic.Int64
 	var wg sync.WaitGroup
@@ -359,7 +462,10 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 		go func(s net.Conn) {
 			defer wg.Done()
 			_ = s.SetDeadline(time.Now().Add(duration + 5*time.Second))
-			if _, err := s.Write(initPkt); err != nil {
+			if err := protocol.WriteRoutingHeader(s, protocol.RouteProtoProbe, 0); err != nil {
+				return
+			}
+			if _, err := s.Write(cmdBytes); err != nil {
 				return
 			}
 			var sent int64
@@ -408,13 +514,7 @@ func measureDownloadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, e
 		}
 	}()
 
-	// Coalesce 3-byte routing header + DNLOAD command into a single write
-	cmdStr := fmt.Sprintf("DNLOAD:%d\n", durSec)
-	initPkt := make([]byte, 3+len(cmdStr))
-	initPkt[0] = protocol.RouteProtoProbe
-	initPkt[1] = 0
-	initPkt[2] = 0
-	copy(initPkt[3:], cmdStr)
+	cmdBytes := fmt.Appendf(nil, "DNLOAD:%d\n", durSec)
 
 	var totalBytes atomic.Int64
 	var firstByteOnce sync.Once
@@ -426,7 +526,10 @@ func measureDownloadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, e
 		go func(s net.Conn) {
 			defer wg.Done()
 			_ = s.SetDeadline(time.Now().Add(duration + 5*time.Second))
-			if _, err := s.Write(initPkt); err != nil {
+			if err := protocol.WriteRoutingHeader(s, protocol.RouteProtoProbe, 0); err != nil {
+				return
+			}
+			if _, err := s.Write(cmdBytes); err != nil {
 				return
 			}
 

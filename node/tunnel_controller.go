@@ -23,6 +23,7 @@ import (
 	"github.com/archnets/node/common/task"
 	"github.com/archnets/node/conf"
 	"github.com/archnets/node/core/relay/telemetry"
+	"github.com/archnets/node/core/relay/transport"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
@@ -449,6 +450,11 @@ func (c *TunnelController) statusReport() error {
 func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
+
+	// Apply per-server CoreConfig (MTU / TCP MSS clamping)
+	if data.CoreConfig != nil {
+		transport.SetConfiguredMTU(data.CoreConfig.MTU)
+	}
 
 	// Update dynamic SNI origins pushed from backend
 	if len(data.SNIOrigins) > 0 {

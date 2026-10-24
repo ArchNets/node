@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"net"
 	"time"
 )
@@ -13,6 +14,25 @@ func TuneTCPConn(c net.Conn) {
 		_ = tc.SetKeepAlivePeriod(15 * time.Second)
 		setPlatformTCPTune(tc)
 	}
+}
+
+// ListenTCP binds a TCP listener with pre-handshake TCP_MAXSEG (MSS clamping) and BBR applied before listen(2).
+// Setting TCP_MAXSEG before listen(2) guarantees the kernel advertises the clamped MSS in every SYN-ACK.
+func ListenTCP(ctx context.Context, addr string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: socketPreHandshakeControl,
+	}
+	return lc.Listen(ctx, "tcp", addr)
+}
+
+// DialTCPContext dials a TCP connection with pre-handshake TCP_MAXSEG (MSS clamping) and BBR applied before connect(2).
+// Setting TCP_MAXSEG before connect(2) guarantees the kernel advertises the clamped MSS in the outgoing SYN packet.
+func DialTCPContext(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	d := net.Dialer{
+		Timeout: timeout,
+		Control: socketPreHandshakeControl,
+	}
+	return d.DialContext(ctx, "tcp", addr)
 }
 
 // CarrierDialer represents a function that connects a raw TCP connection to a carrier endpoint.

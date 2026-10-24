@@ -71,7 +71,7 @@ var tunnelStartCmd = &cobra.Command{
 		}
 
 		// Write PID file
-		if err := os.WriteFile(TunnelPidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+		if err := os.WriteFile(TunnelPidFile, fmt.Appendf(nil, "%d", os.Getpid()), 0644); err != nil {
 			log.Warnf("Failed to write PID file: %v", err)
 		}
 		defer os.Remove(TunnelPidFile)
@@ -146,7 +146,7 @@ var tunnelRestartCmd = &cobra.Command{
 		}
 
 		// Write PID file
-		if err := os.WriteFile(TunnelPidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+		if err := os.WriteFile(TunnelPidFile, fmt.Appendf(nil, "%d", os.Getpid()), 0644); err != nil {
 			log.Warnf("Failed to write PID file: %v", err)
 		}
 		defer os.Remove(TunnelPidFile)

@@ -37,6 +37,9 @@ type Config struct {
 	FloatingIPs        []string
 	EnableProbe        bool
 	ProbeIntervalMin   int
+	CertMode           string
+	CertFile           string
+	KeyFile            string
 	Forwarders         []routing.ForwarderRule
 	Logger             *log.Entry
 	OnProbeSample      func(tunnelID int, sample *telemetry.BandwidthSample)
@@ -203,9 +206,9 @@ func (e *Engine) startEntry() error {
 	}
 
 	if e.cfg.Transport == "tls-reverse" {
-		tlsCfg, err := transport.GenerateSelfSignedTLSConfig(e.cfg.SNI)
+		tlsCfg, err := transport.BuildRelayTLSConfig(e.cfg.SNI, e.cfg.CertMode, e.cfg.CertFile, e.cfg.KeyFile)
 		if err != nil {
-			return fmt.Errorf("generate self-signed tls config: %w", err)
+			return fmt.Errorf("build relay tls config: %w", err)
 		}
 		e.tlsServerCfg = tlsCfg
 	}
@@ -215,12 +218,12 @@ func (e *Engine) startEntry() error {
 	}
 
 	carrierAddr := net.JoinHostPort(listenIP, strconv.Itoa(e.cfg.CarrierPort))
-	ln, err := net.Listen("tcp", carrierAddr)
+	ln, err := transport.ListenTCP(e.ctx, carrierAddr)
 	if err != nil {
 		if transport.ReclaimPortIfOrphanedNode(e.cfg.CarrierPort) {
 			e.logger.WithField("port", e.cfg.CarrierPort).Warn("[Relay] Terminated orphaned node process holding carrier port, retrying bind...")
 			time.Sleep(300 * time.Millisecond)
-			ln, err = net.Listen("tcp", carrierAddr)
+			ln, err = transport.ListenTCP(e.ctx, carrierAddr)
 		}
 	}
 	if err != nil {
@@ -388,7 +391,7 @@ func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 			return nil, fmt.Errorf("timeout waiting for reverse pool connection")
 		case item := <-e.idlePool:
 			e.Stats.PoolIdleConnections.Add(-1)
-			if time.Since(item.createdAt) > 3*time.Minute {
+			if time.Since(item.createdAt) > 3*time.Minute || !transport.IsStreamAlive(item.conn) {
 				_ = item.conn.Close()
 				continue
 			}
@@ -402,12 +405,12 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 		listenIP = "0.0.0.0"
 	}
 	addr := net.JoinHostPort(listenIP, strconv.Itoa(listenPort))
-	ln, err := net.Listen("tcp", addr)
+	ln, err := transport.ListenTCP(e.ctx, addr)
 	if err != nil {
 		if transport.ReclaimPortIfOrphanedNode(listenPort) {
 			e.logger.WithField("port", listenPort).Warn("Terminated orphaned node process holding forwarder port, retrying bind...")
 			time.Sleep(300 * time.Millisecond)
-			ln, err = net.Listen("tcp", addr)
+			ln, err = transport.ListenTCP(e.ctx, addr)
 		}
 	}
 	if err != nil {
@@ -560,24 +563,23 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 		return nil, fmt.Errorf("no entry server IP configured")
 	}
 
-	dialOne := func(ctx context.Context, idx int) (net.Conn, error) {
-		ip := candidates[idx%len(candidates)]
-		addr := net.JoinHostPort(ip, strconv.Itoa(e.cfg.CarrierPort))
-		rawDial := func() (net.Conn, error) {
-			d := net.Dialer{Timeout: 4 * time.Second}
-			return d.DialContext(ctx, "tcp", addr)
+	rawDial := func() (net.Conn, error) {
+		dialTCP := func(ctx context.Context, idx int) (net.Conn, error) {
+			ip := candidates[idx%len(candidates)]
+			addr := net.JoinHostPort(ip, strconv.Itoa(e.cfg.CarrierPort))
+			return transport.DialTCPContext(ctx, addr, 4*time.Second)
 		}
-		if e.cfg.Transport == "tls-reverse" {
-			return transport.DialTLSReverseCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
+		if e.cfg.UseFisher && e.cfg.FisherConnections > 1 {
+			fisher := transport.NewFisherDialer(e.cfg.FisherConnections)
+			return fisher.DialContext(e.ctx, dialTCP)
 		}
-		return transport.DialRealityCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
+		return dialTCP(e.ctx, 0)
 	}
 
-	if e.cfg.UseFisher && e.cfg.FisherConnections > 1 {
-		fisher := transport.NewFisherDialer(e.cfg.FisherConnections)
-		return fisher.DialContext(e.ctx, dialOne)
+	if e.cfg.Transport == "tls-reverse" {
+		return transport.DialTLSReverseCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
 	}
-	return dialOne(e.ctx, 0)
+	return transport.DialRealityCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
 }
 
 func (e *Engine) targetEntryIPs() []string {

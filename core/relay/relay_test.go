@@ -426,3 +426,62 @@ func TestHalfDuplexCloseWritePreservation(t *testing.T) {
 		t.Fatalf("unexpected reply: %s", string(replyBuf[:n]))
 	}
 }
+
+func TestPreHandshakeTCPMaxSegAndPathMTUDiscovery(t *testing.T) {
+	transport.SetConfiguredMTU(1380)
+	defer transport.SetConfiguredMTU(0)
+
+	if got := transport.GetConfiguredMTU(); got != 1380 {
+		t.Fatalf("expected configured MTU 1380, got %d", got)
+	}
+
+	carrierPort := getFreeTCPPort(t)
+	entryEngine := NewEngine(Config{
+		TunnelID:           303,
+		Role:               "entry",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "cafebazaar.ir",
+		Password:           "mtu-test-secret",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := entryEngine.Start(); err != nil {
+		t.Fatalf("failed to start entry engine: %v", err)
+	}
+	defer entryEngine.Close()
+
+	exitEngine := NewEngine(Config{
+		TunnelID:           303,
+		Role:               "exit",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "cafebazaar.ir",
+		Password:           "mtu-test-secret",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exitEngine.Start(); err != nil {
+		t.Fatalf("failed to start exit engine: %v", err)
+	}
+	defer exitEngine.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entryEngine.Stats.PoolIdleConnections.Load() >= 2 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	bestMTU := telemetry.DiscoverOptimalPathMTU(entryEngine.ClaimReverseStream)
+	if bestMTU < 1280 || bestMTU > 1500 {
+		t.Fatalf("expected discovered Path MTU between 1280 and 1500, got %d", bestMTU)
+	}
+	t.Logf("Successfully discovered Optimal Path MTU: %d B (TCP MSS: %d B)", bestMTU, bestMTU-40)
+}

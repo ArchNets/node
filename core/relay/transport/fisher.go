@@ -9,7 +9,7 @@ import (
 
 const (
 	DefaultFisherCount   = 3
-	DefaultFisherStagger = 15 * time.Millisecond
+	DefaultFisherStagger = 40 * time.Millisecond
 )
 
 // FisherDialer spawns multiple staggered parallel connection attempts and keeps the first socket

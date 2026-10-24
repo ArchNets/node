@@ -6,14 +6,52 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
-var kernelTuneOnce sync.Once
+var (
+	kernelTuneOnce sync.Once
+	configuredMTU  atomic.Int32
+)
+
+// SetConfiguredMTU sets the per-server tunnel MTU (used to clamp TCP_MAXSEG when < 1500).
+func SetConfiguredMTU(mtu int) {
+	if mtu >= 576 && mtu <= 9000 {
+		configuredMTU.Store(int32(mtu))
+	} else {
+		configuredMTU.Store(0)
+	}
+}
+
+// GetConfiguredMTU returns the currently configured server tunnel MTU (or 1500 if unset).
+func GetConfiguredMTU() int {
+	v := int(configuredMTU.Load())
+	if v <= 0 {
+		return 1500
+	}
+	return v
+}
+
+// socketPreHandshakeControl runs on the raw socket FD BEFORE bind()/listen()/connect().
+// Setting TCP_MAXSEG here ensures the Linux kernel advertises the clamped MSS in SYN and SYN-ACK packets.
+func socketPreHandshakeControl(network, address string, c syscall.RawConn) error {
+	ensureLinuxKernelTCPTuning()
+	mtu := int(configuredMTU.Load())
+	_ = c.Control(func(fd uintptr) {
+		_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
+		if mtu >= 576 && mtu < 1500 {
+			mss := mtu - 40
+			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG, mss)
+		}
+	})
+	return nil
+}
 
 // ensureLinuxKernelTCPTuning applies best-effort high-BDP sysctl parameters when running with root privileges.
-// Matches WaterWall's 16 MiB buffer ceilings and disables slow-start-after-idle for pooled reverse connections.
+// Matches WaterWall's 16 MiB buffer ceilings, enables RFC 4821 tcp_mtu_probing, and disables slow-start-after-idle.
 func ensureLinuxKernelTCPTuning() {
 	kernelTuneOnce.Do(func() {
 		sysctls := map[string]string{
@@ -23,6 +61,7 @@ func ensureLinuxKernelTCPTuning() {
 			"/proc/sys/net/ipv4/tcp_wmem":                  "4096 262144 16777216",
 			"/proc/sys/net/ipv4/tcp_slow_start_after_idle": "0",
 			"/proc/sys/net/ipv4/tcp_window_scaling":        "1",
+			"/proc/sys/net/ipv4/tcp_mtu_probing":           "1",
 		}
 		for path, val := range sysctls {
 			_ = os.WriteFile(path, []byte(val+"\n"), 0644)
@@ -32,12 +71,137 @@ func ensureLinuxKernelTCPTuning() {
 
 func setPlatformTCPTune(tc *net.TCPConn) {
 	ensureLinuxKernelTCPTuning()
+	mtu := int(configuredMTU.Load())
 	if raw, err := tc.SyscallConn(); err == nil {
 		_ = raw.Control(func(fd uintptr) {
 			// Request BBR congestion control on Linux
 			_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
 			// Enable TCP_QUICKACK to accelerate slow-start window growth over high-RTT links
 			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
+			// Apply TCP_MAXSEG (MSS clamping = MTU - 40) when a custom sub-1500 MTU is configured
+			if mtu >= 576 && mtu < 1500 {
+				mss := mtu - 40
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG, mss)
+			}
 		})
 	}
+}
+
+// ConfigureDontFragmentProbe sets IP_PMTUDISC_DO (DF=1, forbid fragmentation) and clamps TCP_MAXSEG
+// on the underlying TCP socket(s) of c so Path MTU probes strictly test unfragmented delivery.
+func ConfigureDontFragmentProbe(c net.Conn, testMTU int) {
+	applyTo := func(tc *net.TCPConn) {
+		if tc == nil {
+			return
+		}
+		if raw, err := tc.SyscallConn(); err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PMTUDISC, unix.IP_PMTUDISC_DO)
+				if testMTU >= 576 && testMTU <= 1500 {
+					_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG, testMTU-40)
+				}
+			})
+		}
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		applyTo(tc)
+		return
+	}
+	if hd, ok := c.(*HalfDuplexConn); ok {
+		applyTo(hd.ReadTCPConn())
+		applyTo(hd.WriteTCPConn())
+	}
+}
+
+// InspectKernelPMTU queries the Linux kernel's TCP_INFO structure on the socket to read
+// the discovered Path MTU (tcpi_pmtu) and active Send MSS (tcpi_snd_mss).
+func InspectKernelPMTU(c net.Conn) (pmtu int, sndMSS int) {
+	inspectOne := func(tc *net.TCPConn) (int, int) {
+		if tc == nil {
+			return 0, 0
+		}
+		raw, err := tc.SyscallConn()
+		if err != nil {
+			return 0, 0
+		}
+		var p, m int
+		_ = raw.Control(func(fd uintptr) {
+			if info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO); err == nil && info != nil {
+				p = int(info.Pmtu)
+				m = int(info.Snd_mss)
+				// On loopback (pmtu=65535) or when MSS clamping is active on the route/socket,
+				// derive the effective MTU from Snd_mss if it is clamped below standard 1500-byte Ethernet MSS (1448 with timestamps).
+				if m > 0 && m < 1448 {
+					clampedMTU := m + 52 // 20B IP + 20B TCP + 12B TCP timestamps
+					if clampedMTU > 1500 {
+						clampedMTU = 1500
+					}
+					if p > 1500 || clampedMTU < p {
+						p = clampedMTU
+					}
+				} else if p > 1500 {
+					p = 1500
+				}
+			}
+		})
+		return p, m
+	}
+
+	if tc, ok := c.(*net.TCPConn); ok {
+		return inspectOne(tc)
+	}
+	if hd, ok := c.(*HalfDuplexConn); ok {
+		p1, m1 := inspectOne(hd.WriteTCPConn())
+		p2, m2 := inspectOne(hd.ReadTCPConn())
+		if p2 > 0 && (p1 == 0 || p2 < p1) {
+			p1 = p2
+		}
+		if m2 > 0 && (m1 == 0 || m2 < m1) {
+			m1 = m2
+		}
+		return p1, m1
+	}
+	return 0, 0
+}
+
+func isTCPConnAlive(tc *net.TCPConn) bool {
+	if tc == nil {
+		return false
+	}
+	raw, err := tc.SyscallConn()
+	if err != nil {
+		return false
+	}
+	alive := true
+	_ = raw.Control(func(fd uintptr) {
+		var buf [1]byte
+		n, _, recvErr := unix.Recvfrom(int(fd), buf[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
+		if n == 0 && recvErr == nil {
+			alive = false
+		} else if recvErr != nil && recvErr != unix.EAGAIN && recvErr != unix.EWOULDBLOCK && recvErr != unix.EINTR {
+			alive = false
+		}
+	})
+	return alive
+}
+
+// IsStreamAlive performs a zero-cost non-blocking check (MSG_PEEK | MSG_DONTWAIT)
+// to verify that a pooled reverse connection has not received FIN (EOF) or RST from the peer.
+func IsStreamAlive(c net.Conn) bool {
+	if c == nil {
+		return false
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		return isTCPConnAlive(tc)
+	}
+	if hd, ok := c.(*HalfDuplexConn); ok {
+		if rTC := hd.ReadTCPConn(); rTC != nil && !isTCPConnAlive(rTC) {
+			return false
+		}
+		if wTC := hd.WriteTCPConn(); wTC != nil && !isTCPConnAlive(wTC) {
+			return false
+		}
+		return true
+	}
+	return true
 }

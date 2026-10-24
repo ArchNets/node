@@ -55,6 +55,11 @@ type RelayTunnelConfig struct {
 	FloatingIPs        []string `json:"floating_ips,omitempty"`
 	EnableProbe        bool     `json:"enable_probe"`       // Default: true
 	ProbeIntervalMin   int      `json:"probe_interval_min"` // Default: 30
+	CertMode           string   `json:"cert_mode,omitempty"`
+	CertFile           string   `json:"cert_file,omitempty"`
+	KeyFile            string   `json:"key_file,omitempty"`
+	CertDNSProvider    string   `json:"cert_dns_provider,omitempty"`
+	CertDNSEnv         string   `json:"cert_dns_env,omitempty"`
 }
 
 // TunnelInfo represents a single tunnel configuration
@@ -200,13 +205,14 @@ type ScanResultsRequest struct {
 
 // BandwidthSamplePayload represents a bandwidth probe sample reported by the Entry node
 type BandwidthSamplePayload struct {
-	Timestamp    int64   `json:"timestamp"`
-	UploadMbps   float64 `json:"upload_mbps"`
-	DownloadMbps float64 `json:"download_mbps"`
-	RttMs        int     `json:"rtt_ms"`
-	JitterMs     int     `json:"jitter_ms,omitempty"`
-	PacketLoss   int     `json:"packet_loss"`
-	Status       string  `json:"status"` // "OPTIMAL", "DEGRADED", "THROTTLED"
+	Timestamp      int64   `json:"timestamp"`
+	UploadMbps     float64 `json:"upload_mbps"`
+	DownloadMbps   float64 `json:"download_mbps"`
+	RttMs          int     `json:"rtt_ms"`
+	JitterMs       int     `json:"jitter_ms,omitempty"`
+	PacketLoss     int     `json:"packet_loss"`
+	Status         string  `json:"status"` // "OPTIMAL", "DEGRADED", "THROTTLED"
+	RecommendedMTU int     `json:"recommended_mtu,omitempty"`
 }
 
 // TunnelStatusRequest is the request body for POST /v2/server/:server_id/tunnel/status

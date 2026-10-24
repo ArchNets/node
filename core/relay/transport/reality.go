@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -17,11 +18,117 @@ import (
 )
 
 const (
-	realityHKDFSalt  = "archnet-reverse-reality-v1"
-	realityMagic     = "ARRL"
-	realityAckMagic  = "AROK"
-	realityClockSkew = 10 * time.Minute
+	realityHKDFSalt       = "archnet-reverse-reality-v1"
+	realityMagic          = "ARRL"
+	realityAckMagic       = "AROK"
+	realityClockSkew      = 10 * time.Minute
+	maxTLS13RecordPayload = 16384
 )
+
+// RealityRecordConn wraps a post-handshake carrier connection in RFC 8446 TLS 1.3
+// ApplicationData (0x17 0x03 0x03 <len>) record framing using zero-copy writev(2)
+// scatter-gather writes and direct-to-caller reads.
+// This matches WaterWall's RealityClient/RealityServer post-takeover wire framing so
+// stateful DPI record-boundary trackers never see raw unframed bytes on the wire.
+type RealityRecordConn struct {
+	net.Conn
+	readMu  sync.Mutex
+	writeMu sync.Mutex
+	rem     int
+}
+
+func NewRealityRecordConn(c net.Conn) *RealityRecordConn {
+	return &RealityRecordConn{Conn: c}
+}
+
+func (c *RealityRecordConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+
+	for c.rem == 0 {
+		var hdr [5]byte
+		if _, err := io.ReadFull(c.Conn, hdr[:]); err != nil {
+			return 0, err
+		}
+		if hdr[0] != 0x17 && hdr[0] != 0x16 && hdr[0] != 0x14 {
+			return 0, fmt.Errorf("invalid reality tls record type: 0x%02x", hdr[0])
+		}
+		recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
+		if recLen <= 0 || recLen > 32768 {
+			return 0, fmt.Errorf("invalid reality tls record length: %d", recLen)
+		}
+		c.rem = recLen
+	}
+
+	toRead := len(p)
+	if toRead > c.rem {
+		toRead = c.rem
+	}
+	n, err := c.Conn.Read(p[:toRead])
+	c.rem -= n
+	return n, err
+}
+
+func (c *RealityRecordConn) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	total := 0
+	for len(p) > 0 {
+		chunk := p
+		if len(chunk) > maxTLS13RecordPayload {
+			chunk = p[:maxTLS13RecordPayload]
+		}
+		var hdr [5]byte
+		hdr[0] = 0x17
+		hdr[1] = 0x03
+		hdr[2] = 0x03
+		binary.BigEndian.PutUint16(hdr[3:5], uint16(len(chunk)))
+
+		bufs := net.Buffers{hdr[:], chunk}
+		n, err := bufs.WriteTo(c.Conn)
+		if n > 5 {
+			written := int(n - 5)
+			if written > len(chunk) {
+				written = len(chunk)
+			}
+			total += written
+			p = p[written:]
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func (c *RealityRecordConn) CloseWrite() error {
+	if tc, ok := c.Conn.(*net.TCPConn); ok {
+		return tc.CloseWrite()
+	}
+	type closer interface{ CloseWrite() error }
+	if hc, ok := c.Conn.(closer); ok {
+		return hc.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+func (c *RealityRecordConn) CloseRead() error {
+	if tc, ok := c.Conn.(*net.TCPConn); ok {
+		return tc.CloseRead()
+	}
+	type closer interface{ CloseRead() error }
+	if hc, ok := c.Conn.(closer); ok {
+		return hc.CloseRead()
+	}
+	return c.Conn.Close()
+}
 
 // PrefixConn wraps a net.Conn with prepended initial bytes that were pre-read during inspection.
 type PrefixConn struct {
@@ -183,10 +290,14 @@ func buildTLS13ServerFlight(clientHelloBody []byte, ackToken [32]byte) []byte {
 	shBodyLen := 2 + 32 + 1 + len(sessionID) + 2 + 1 + 2 + extLen
 	shRecordLen := 4 + shBodyLen
 
-	// Encrypted handshake record body: 32B ackToken + 96B high-entropy encrypted extensions/cert/finished simulation
-	const appBodyLen = 128
-	var appPadding [appBodyLen - 32]byte
-	_, _ = rand.Read(appPadding[:])
+	// Encrypted handshake record body: 32B ackToken + randomized realistic TLS 1.3
+	// EncryptedExtensions/Certificate/CertificateVerify/Finished size (1024..1280 bytes),
+	// fitting inside a single TCP MSS alongside ServerHello + ChangeCipherSpec.
+	var jitterByte [1]byte
+	_, _ = rand.Read(jitterByte[:])
+	appBodyLen := 1024 + int(jitterByte[0]) // 1024..1279 bytes
+	appPadding := make([]byte, appBodyLen-32)
+	_, _ = rand.Read(appPadding)
 
 	totalLen := (5 + shRecordLen) + 6 + (5 + appBodyLen)
 	flight := make([]byte, 0, totalLen)
@@ -222,7 +333,7 @@ func buildTLS13ServerFlight(clientHelloBody []byte, ackToken [32]byte) []byte {
 		byte(appBodyLen>>8), byte(appBodyLen),
 	)
 	flight = append(flight, ackToken[:]...)
-	flight = append(flight, appPadding[:]...)
+	flight = append(flight, appPadding...)
 
 	return flight
 }

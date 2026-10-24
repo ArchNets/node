@@ -37,13 +37,14 @@ func (d *RelayDriver) QueueProbeSample(tunnelID int, sample *telemetry.Bandwidth
 	d.samplesMu.Lock()
 	defer d.samplesMu.Unlock()
 	d.pendingSamples[tunnelID] = &panel.BandwidthSamplePayload{
-		Timestamp:    sample.Timestamp,
-		UploadMbps:   sample.UploadMbps,
-		DownloadMbps: sample.DownloadMbps,
-		RttMs:        sample.RttMs,
-		JitterMs:     sample.JitterMs,
-		PacketLoss:   sample.PacketLoss,
-		Status:       sample.Status,
+		Timestamp:      sample.Timestamp,
+		UploadMbps:     sample.UploadMbps,
+		DownloadMbps:   sample.DownloadMbps,
+		RttMs:          sample.RttMs,
+		JitterMs:       sample.JitterMs,
+		PacketLoss:     sample.PacketLoss,
+		Status:         sample.Status,
+		RecommendedMTU: sample.RecommendedMTU,
 	}
 }
 
@@ -82,6 +83,11 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	var floatingIPs []string
 	enableProbe := true
 	probeInterval := 30
+	certMode := ""
+	certFile := ""
+	keyFile := ""
+	certDNSProvider := ""
+	certDNSEnv := ""
 
 	rc := t.RelayConfig
 	if rc == nil && t.Config != "" {
@@ -120,8 +126,35 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		if rc.ProbeIntervalMin > 0 {
 			probeInterval = rc.ProbeIntervalMin
 		}
+		certMode = rc.CertMode
+		certFile = rc.CertFile
+		keyFile = rc.KeyFile
+		certDNSProvider = rc.CertDNSProvider
+		certDNSEnv = rc.CertDNSEnv
 	} else if t.Method == "tls-reverse" {
 		transport = "tls-reverse"
+	}
+
+	// Reuse the node's unified certificate manager (EnsureNodeCertificate in node/cert.go)
+	if t.Role == "entry" && transport == "tls-reverse" && sni != "" {
+		nodeInfo := &panel.NodeInfo{
+			Id:   t.Id,
+			Type: "relay",
+			Protocol: &panel.Protocol{
+				SNI:             sni,
+				CertMode:        certMode,
+				CertFile:        certFile,
+				KeyFile:         keyFile,
+				CertDNSProvider: certDNSProvider,
+				CertDNSEnv:      certDNSEnv,
+			},
+		}
+		if resolvedCert, resolvedKey, err := EnsureNodeCertificate(nodeInfo, "relay"); err != nil {
+			d.logger.WithFields(log.Fields{"sni": sni, "certMode": certMode, "err": err}).Warn("[Relay] Certificate provisioning warning")
+		} else if resolvedCert != "" && resolvedKey != "" {
+			certFile = resolvedCert
+			keyFile = resolvedKey
+		}
 	}
 
 	if originIP == "" && sni != "" {
@@ -156,6 +189,9 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		FloatingIPs:        floatingIPs,
 		EnableProbe:        enableProbe,
 		ProbeIntervalMin:   probeInterval,
+		CertMode:           certMode,
+		CertFile:           certFile,
+		KeyFile:            keyFile,
 		Forwarders:         forwarderRules,
 		Logger:             d.logger,
 		OnProbeSample:      d.QueueProbeSample,

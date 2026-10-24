@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/archnets/node/api/panel"
 	certutil "github.com/archnets/node/common/cert"
 	"github.com/archnets/node/common/file"
 	log "github.com/sirupsen/logrus"
@@ -32,73 +33,106 @@ func (c *Controller) renewCertTask() error {
 }
 
 func (c *Controller) requestCert() error {
-	certFile, keyFile := certutil.GetCertPaths(c.info.Protocol.SNI, c.info.Type, c.info.Id)
+	_, _, err := EnsureNodeCertificate(c.info, c.tag)
+	return err
+}
 
-	switch c.info.Protocol.CertMode {
+// findExistingDomainCert checks if a certificate for the same SNI domain has already been
+// provisioned in /etc/archnets/ by another protocol or tunnel on this server.
+func findExistingDomainCert(sni string) (string, string, bool) {
+	if sni == "" {
+		return "", "", false
+	}
+	prefix := filepath.Join(certutil.CertDir, certutil.SanitizeDomain(sni)+"-*.crt")
+	matches, err := filepath.Glob(prefix)
+	if err != nil || len(matches) == 0 {
+		return "", "", false
+	}
+	for _, crt := range matches {
+		key := crt[:len(crt)-4] + ".key"
+		if file.IsExist(crt) && file.IsExist(key) {
+			return crt, key, true
+		}
+	}
+	return "", "", false
+}
+
+// EnsureNodeCertificate provisions, writes, or validates the TLS certificate and key
+// for any server protocol or relay tunnel according to info.Protocol.CertMode.
+// It returns the resolved filesystem paths (certFile, keyFile).
+func EnsureNodeCertificate(info *panel.NodeInfo, tag string) (string, string, error) {
+	if info == nil || info.Protocol == nil {
+		return "", "", nil
+	}
+	certFile, keyFile := certutil.GetCertPaths(info.Protocol.SNI, info.Type, info.Id)
+
+	switch info.Protocol.CertMode {
 	case "none", "":
-		// No certificate needed
+		return "", "", nil
 	case "file":
 		// Write inline certificate content from API to files
-		if c.info.Protocol.CertFile != "" && c.info.Protocol.KeyFile != "" {
-			// Ensure the directory exists
+		if info.Protocol.CertFile != "" && info.Protocol.KeyFile != "" {
 			dir := filepath.Dir(certFile)
 			if !file.IsExist(dir) {
 				if err := os.MkdirAll(dir, 0755); err != nil {
-					return fmt.Errorf("create cert directory error: %s", err)
+					return "", "", fmt.Errorf("create cert directory error: %s", err)
 				}
 			}
-			// Write cert file
-			if err := os.WriteFile(certFile, []byte(c.info.Protocol.CertFile), 0644); err != nil {
-				return fmt.Errorf("write cert file error: %s", err)
+			if err := os.WriteFile(certFile, []byte(info.Protocol.CertFile), 0644); err != nil {
+				return "", "", fmt.Errorf("write cert file error: %s", err)
 			}
-			log.WithField("node", c.tag).Info("Certificate file written: ", certFile)
-			// Write key file
-			if err := os.WriteFile(keyFile, []byte(c.info.Protocol.KeyFile), 0600); err != nil {
-				return fmt.Errorf("write key file error: %s", err)
+			log.WithField("node", tag).Info("Certificate file written: ", certFile)
+			if err := os.WriteFile(keyFile, []byte(info.Protocol.KeyFile), 0600); err != nil {
+				return "", "", fmt.Errorf("write key file error: %s", err)
 			}
-			log.WithField("node", c.tag).Info("Key file written: ", keyFile)
+			log.WithField("node", tag).Info("Key file written: ", keyFile)
 		} else if !file.IsExist(certFile) || !file.IsExist(keyFile) {
-			return fmt.Errorf("cert_mode is 'file' but no certificate content provided and files do not exist")
+			if existingCrt, existingKey, ok := findExistingDomainCert(info.Protocol.SNI); ok {
+				return existingCrt, existingKey, nil
+			}
+			return "", "", fmt.Errorf("cert_mode is 'file' but no certificate content provided and files do not exist")
 		}
+		return certFile, keyFile, nil
 	case "path":
-		// Use cert_file and key_file as direct filesystem paths — just validate they exist
-		if c.info.Protocol.CertFile == "" || c.info.Protocol.KeyFile == "" {
-			return fmt.Errorf("cert_mode is 'path' but cert_file or key_file is empty")
+		// Use cert_file and key_file as direct filesystem paths — validate they exist
+		if info.Protocol.CertFile == "" || info.Protocol.KeyFile == "" {
+			return "", "", fmt.Errorf("cert_mode is 'path' but cert_file or key_file is empty")
 		}
-		if !file.IsExist(c.info.Protocol.CertFile) {
-			return fmt.Errorf("cert_mode is 'path' but cert file does not exist: %s", c.info.Protocol.CertFile)
+		if !file.IsExist(info.Protocol.CertFile) {
+			return "", "", fmt.Errorf("cert_mode is 'path' but cert file does not exist: %s", info.Protocol.CertFile)
 		}
-		if !file.IsExist(c.info.Protocol.KeyFile) {
-			return fmt.Errorf("cert_mode is 'path' but key file does not exist: %s", c.info.Protocol.KeyFile)
+		if !file.IsExist(info.Protocol.KeyFile) {
+			return "", "", fmt.Errorf("cert_mode is 'path' but key file does not exist: %s", info.Protocol.KeyFile)
 		}
-		log.WithField("node", c.tag).Infof("Using cert path: %s, key path: %s", c.info.Protocol.CertFile, c.info.Protocol.KeyFile)
+		log.WithField("node", tag).Infof("Using cert path: %s, key path: %s", info.Protocol.CertFile, info.Protocol.KeyFile)
+		return info.Protocol.CertFile, info.Protocol.KeyFile, nil
 	case "dns", "http":
 		if file.IsExist(certFile) && file.IsExist(keyFile) {
-			return nil
+			return certFile, keyFile, nil
 		}
-		l, err := NewLego(c.info)
+		if existingCrt, existingKey, ok := findExistingDomainCert(info.Protocol.SNI); ok {
+			log.WithField("node", tag).Infof("Reusing existing domain certificate for %s: %s", info.Protocol.SNI, existingCrt)
+			return existingCrt, existingKey, nil
+		}
+		l, err := NewLego(info)
 		if err != nil {
-			return fmt.Errorf("create lego object error: %s", err)
+			return "", "", fmt.Errorf("create lego object error: %s", err)
 		}
-		err = l.CreateCert()
-		if err != nil {
-			return fmt.Errorf("create lego cert error: %s", err)
+		if err := l.CreateCert(); err != nil {
+			return "", "", fmt.Errorf("create lego cert error: %s", err)
 		}
+		return certFile, keyFile, nil
 	case "self":
 		if file.IsExist(certFile) && file.IsExist(keyFile) {
-			return nil
+			return certFile, keyFile, nil
 		}
-		err := generateSelfSslCertificate(
-			c.info.Protocol.SNI,
-			certFile,
-			keyFile)
-		if err != nil {
-			return fmt.Errorf("generate self cert error: %s", err)
+		if err := generateSelfSslCertificate(info.Protocol.SNI, certFile, keyFile); err != nil {
+			return "", "", fmt.Errorf("generate self cert error: %s", err)
 		}
+		return certFile, keyFile, nil
 	default:
-		return fmt.Errorf("unsupported certmode: %s", c.info.Protocol.CertMode)
+		return "", "", fmt.Errorf("unsupported certmode: %s", info.Protocol.CertMode)
 	}
-	return nil
 }
 
 func generateSelfSslCertificate(domain, certPath, keyPath string) error {

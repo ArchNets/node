@@ -89,10 +89,6 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 			{"reverse-reality", "Reverse Reality + HalfDuplex", true, false},
 			{"reverse-reality", "Reverse Reality + Fisher (Full-Duplex)", false, true},
 			{"reverse-reality", "Reverse Reality (Base Full-Duplex)", false, false},
-			{"tls-reverse", "TLS 1.3 Reverse + HalfDuplex + Fisher", true, true},
-			{"tls-reverse", "TLS 1.3 Reverse + HalfDuplex", true, false},
-			{"tls-reverse", "TLS 1.3 Reverse + Fisher", false, true},
-			{"tls-reverse", "UDP-over-TCP Reality Mux + HalfDuplex + Fisher", true, true},
 		}
 		for i, v := range variations {
 			candidates = append(candidates, BenchmarkCandidate{
