@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 
 	"github.com/archnets/node/api/panel"
@@ -113,6 +114,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		})
 	}
 
+	direction := "reverse"
 	carrierPort := 443
 	transport := "reverse-reality"
 	sni := ""
@@ -140,6 +142,9 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	}
 
 	if rc != nil {
+		if rc.Direction != "" {
+			direction = rc.Direction
+		}
 		if rc.CarrierPort > 0 {
 			carrierPort = rc.CarrierPort
 		}
@@ -173,12 +178,14 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		keyFile = rc.KeyFile
 		certDNSProvider = rc.CertDNSProvider
 		certDNSEnv = rc.CertDNSEnv
-	} else if t.Method == "tls-reverse" {
-		transport = "tls-reverse"
+	} else if t.Method != "" && t.Method != "waterwall" {
+		transport = t.Method
 	}
 
 	// Reuse the node's unified certificate manager (EnsureNodeCertificate in node/cert.go)
-	if t.Role == "entry" && transport == "tls-reverse" && sni != "" {
+	isListener := (direction == "direct" && t.Role == "exit") || (direction != "direct" && t.Role == "entry")
+	needsCert := (transport == "tls-reverse" || transport == "wss-reverse" || transport == "quic-reverse") && sni != ""
+	if isListener && needsCert {
 		nodeInfo := &panel.NodeInfo{
 			Id:   t.Id,
 			Type: "relay",
@@ -211,15 +218,25 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	} else if entryIP == "" {
 		entryIP = t.ExitServerIP
 	}
+	exitIP := t.ExitServerIP
+	if rc != nil {
+		if rc.ExitOverrideIP != "" {
+			exitIP = rc.ExitOverrideIP
+		}
+		if rc.EntryOverrideIP != "" {
+			entryIP = rc.EntryOverrideIP
+		}
+	}
 
 	cfg := relay.Config{
 		TunnelID:           t.Id,
 		Role:               t.Role,
+		Direction:          direction,
 		Transport:          transport,
 		CarrierPort:        carrierPort,
 		ListenIP:           "0.0.0.0",
 		EntryServerIP:      entryIP,
-		ExitServerIP:       t.ExitServerIP,
+		ExitServerIP:       exitIP,
 		TargetIP:           "127.0.0.1",
 		SNI:                sni,
 		OriginIP:           originIP,
@@ -307,13 +324,18 @@ func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnli
 		}, true
 	}
 
-	online := eng.IsAlive()
-	if t.Role == "exit" {
-		online = eng.IsAlive() && (eng.Stats.PoolIdleConnections.Load() > 0 || eng.Stats.ActiveConnections.Load() > 0)
-	}
 	deltaUpload, deltaDownload := eng.Stats.SnapshotDelta()
 	deltaUpload += carriedUp
 	deltaDownload += carriedDown
+
+	isDirect := t.RelayConfig != nil && strings.ToLower(t.RelayConfig.Direction) == "direct"
+	isDialer := (t.Role == "exit" && !isDirect) || (t.Role == "entry" && isDirect)
+	online := eng.IsAlive()
+	if eng.Stats.PoolIdleConnections.Load() > 0 || eng.Stats.ActiveConnections.Load() > 0 || deltaUpload > 0 || deltaDownload > 0 {
+		online = true
+	} else if isDialer {
+		online = false
+	}
 	curUpBps := eng.Stats.CurrentUploadBps.Load()
 	curDownBps := eng.Stats.CurrentDownloadBps.Load()
 	latency := int(eng.Stats.LatencyMs.Load())

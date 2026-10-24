@@ -41,9 +41,10 @@ type CoreConfig struct {
 	RamProfile string `json:"ram_profile"`
 }
 
-// RelayTunnelConfig configures the Native Go Relay Engine (reverse-reality / tls-reverse)
+// RelayTunnelConfig configures the Native Go Relay Engine
 type RelayTunnelConfig struct {
-	Transport          string   `json:"transport"`            // "reverse-reality", "tls-reverse"
+	Direction          string   `json:"direction,omitempty"`  // "reverse" (default), "direct"
+	Transport          string   `json:"transport"`            // "reverse-reality", "tls-reverse", "stealth", "ws-reverse", "wss-reverse", "quic-reverse"
 	CarrierPort        int      `json:"carrier_port"`         // Default: 443
 	SNI                string   `json:"sni"`                  // Default: "shariati.tums.ac.ir"
 	OriginIP           string   `json:"origin_ip,omitempty"`  // Auto-resolved from KnownIranOriginIPs if empty
@@ -53,6 +54,8 @@ type RelayTunnelConfig struct {
 	FisherConnections  int      `json:"fisher_connections"`   // Default: 3
 	MinHeldConnections int      `json:"min_held_connections"` // Default: 8
 	FloatingIPs        []string `json:"floating_ips,omitempty"`
+	EntryOverrideIP    string   `json:"entry_override_ip,omitempty"`
+	ExitOverrideIP     string   `json:"exit_override_ip,omitempty"`
 	EnableProbe        bool     `json:"enable_probe"`       // Default: true
 	ProbeIntervalMin   int      `json:"probe_interval_min"` // Default: 30
 	CertMode           string   `json:"cert_mode,omitempty"`

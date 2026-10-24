@@ -85,9 +85,11 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 			hd        bool
 			fisher    bool
 		}{
-			{"reverse-reality", "Reverse Reality + HalfDuplex + Fisher", true, true},
-			{"reverse-reality", "Reverse Reality + HalfDuplex", true, false},
-			{"reverse-reality", "Reverse Reality + Fisher (Full-Duplex)", false, true},
+			{"reverse-reality", "Reverse Reality (Anti-DPI TLS 1.3)", true, true},
+			{"stealth", "Stealth (Noise NNpsk0 + Random Padding)", true, false},
+			{"ws-reverse", "WebSocket Reverse (Nginx Decoy)", true, false},
+			{"wss-reverse", "WSS Reverse (TLS 1.3 + Nginx Decoy)", true, false},
+			{"quic-reverse", "QUIC Reverse (Native UDP Streams)", false, false},
 			{"reverse-reality", "Reverse Reality (Base Full-Duplex)", false, false},
 		}
 		for i, v := range variations {
@@ -401,12 +403,25 @@ func (c *TunnelController) evaluateCandidate(
 ) *panel.ScanResultItem {
 	originRTT := measureOriginTCPHandshake(cand.OriginIP, 443, 1200*time.Millisecond)
 
+	direction := "reverse"
+	exitIP := t.ExitServerIP
+	if t.RelayConfig != nil {
+		if t.RelayConfig.Direction != "" {
+			direction = t.RelayConfig.Direction
+		}
+		if t.RelayConfig.ExitOverrideIP != "" {
+			exitIP = t.RelayConfig.ExitOverrideIP
+		}
+	}
+
 	sandboxEngine := relay.NewEngine(relay.Config{
 		TunnelID:           t.Id*1000 + cand.Index,
 		Role:               "entry",
+		Direction:          direction,
 		Transport:          cand.Transport,
 		CarrierPort:        sandboxPort,
 		ListenIP:           "0.0.0.0",
+		ExitServerIP:       exitIP,
 		SNI:                cand.SNI,
 		OriginIP:           cand.OriginIP,
 		Password:           password,

@@ -14,6 +14,7 @@ import (
 	"github.com/archnets/node/core/relay/routing"
 	"github.com/archnets/node/core/relay/telemetry"
 	"github.com/archnets/node/core/relay/transport"
+	quic "github.com/apernet/quic-go"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,7 +22,8 @@ import (
 type Config struct {
 	TunnelID           int
 	Role               string // "entry" or "exit"
-	Transport          string // "reverse-reality", "tls-reverse"
+	Direction          string // "reverse" (default) or "direct"
+	Transport          string // "reverse-reality", "tls-reverse", "stealth", "ws-reverse", "wss-reverse", "quic-reverse"
 	CarrierPort        int    // Default: 443
 	ListenIP           string // Default: "0.0.0.0"
 	EntryServerIP      string // Entry public IP (dialed by Exit)
@@ -59,6 +61,9 @@ type Engine struct {
 	wg            sync.WaitGroup
 	mu            sync.Mutex
 	carrierLn     net.Listener
+	quicLn        *quic.Listener
+	quicUDPConn   *net.UDPConn
+	activeQuicConn *quic.Conn
 	tcpListeners  []net.Listener
 	udpListeners  []*net.UDPConn
 	hdMatcher     *transport.HalfDuplexMatcher
@@ -77,6 +82,9 @@ type Engine struct {
 func NewEngine(cfg Config) *Engine {
 	if cfg.Transport == "" {
 		cfg.Transport = "reverse-reality"
+	}
+	if cfg.Direction == "" {
+		cfg.Direction = "reverse"
 	}
 	if cfg.Password == "" {
 		cfg.Password = "archnet-default-secret"
@@ -154,6 +162,10 @@ func (e *Engine) IsAlive() bool {
 	return e.alive.Load()
 }
 
+func (e *Engine) isDirect() bool {
+	return strings.ToLower(e.cfg.Direction) == "direct"
+}
+
 // Close gracefully stops all listeners, pooled connections, and active streams.
 func (e *Engine) Close() error {
 	e.alive.Store(false)
@@ -162,6 +174,15 @@ func (e *Engine) Close() error {
 	e.mu.Lock()
 	if e.carrierLn != nil {
 		_ = e.carrierLn.Close()
+	}
+	if e.quicLn != nil {
+		_ = e.quicLn.Close()
+	}
+	if e.quicUDPConn != nil {
+		_ = e.quicUDPConn.Close()
+	}
+	if e.activeQuicConn != nil {
+		_ = e.activeQuicConn.CloseWithError(0, "engine closed")
 	}
 	for _, ln := range e.tcpListeners {
 		_ = ln.Close()
@@ -205,7 +226,48 @@ func (e *Engine) startEntry() error {
 		listenIP = "0.0.0.0"
 	}
 
-	if e.cfg.Transport == "tls-reverse" {
+	if e.isDirect() {
+		if e.cfg.ExitServerIP == "" {
+			return fmt.Errorf("direct relay engine on entry requires ExitServerIP")
+		}
+		e.wg.Add(1)
+		go e.exitPoolLoop()
+		e.triggerReplenish()
+	} else {
+		if err := e.startCarrierListener(listenIP); err != nil {
+			return err
+		}
+	}
+
+	for _, rule := range e.cfg.Forwarders {
+		pairs := routing.ExpandPortRange(rule)
+		proto := strings.ToLower(strings.TrimSpace(rule.Protocol))
+		for _, pair := range pairs {
+			lPort, tPort := pair[0], pair[1]
+			if !e.isDirect() && lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both") {
+				e.carrierFwd.Store(int64(tPort))
+				e.logger.WithFields(log.Fields{
+					"carrierPort": lPort,
+					"targetPort":  tPort,
+				}).Info("[Relay] Sharing carrier port with user forwarder (single-port multiplexing)")
+			} else if proto == "tcp" || proto == "tcp,udp" || proto == "both" {
+				if err := e.startTCPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
+					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start TCP forwarder listener")
+				}
+			}
+			if proto == "udp" || proto == "tcp,udp" || proto == "both" {
+				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
+					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start UDP forwarder listener")
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (e *Engine) startCarrierListener(listenIP string) error {
+	if e.cfg.Transport == "tls-reverse" || e.cfg.Transport == "wss-reverse" || e.cfg.Transport == "quic-reverse" {
 		tlsCfg, err := transport.BuildRelayTLSConfig(e.cfg.SNI, e.cfg.CertMode, e.cfg.CertFile, e.cfg.KeyFile)
 		if err != nil {
 			return fmt.Errorf("build relay tls config: %w", err)
@@ -213,11 +275,31 @@ func (e *Engine) startEntry() error {
 		e.tlsServerCfg = tlsCfg
 	}
 
-	if e.cfg.UseHalfDuplex {
+	if e.cfg.UseHalfDuplex && e.cfg.Transport != "quic-reverse" {
 		e.hdMatcher = transport.NewHalfDuplexMatcher()
 	}
 
 	carrierAddr := net.JoinHostPort(listenIP, strconv.Itoa(e.cfg.CarrierPort))
+
+	if e.cfg.Transport == "quic-reverse" {
+		qLn, udpConn, err := transport.ListenQuicCarrier(carrierAddr, e.cfg.SNI, e.cfg.CertMode, e.cfg.CertFile, e.cfg.KeyFile)
+		if err != nil {
+			return fmt.Errorf("listen quic carrier on %s: %w", carrierAddr, err)
+		}
+		e.mu.Lock()
+		e.quicLn = qLn
+		e.quicUDPConn = udpConn
+		e.mu.Unlock()
+		e.logger.WithFields(log.Fields{
+			"carrierPort": e.cfg.CarrierPort,
+			"sni":         e.cfg.SNI,
+			"transport":   e.cfg.Transport,
+		}).Info("[Relay] QUIC carrier listener started successfully")
+		e.wg.Add(1)
+		go e.quicAcceptLoop(qLn)
+		return nil
+	}
+
 	ln, err := transport.ListenTCP(e.ctx, carrierAddr)
 	if err != nil {
 		if transport.ReclaimPortIfOrphanedNode(e.cfg.CarrierPort) {
@@ -243,36 +325,44 @@ func (e *Engine) startEntry() error {
 		"carrierPort": e.cfg.CarrierPort,
 		"sni":         e.cfg.SNI,
 		"transport":   e.cfg.Transport,
-	}).Info("[Relay] Entry carrier listener started successfully")
+	}).Info("[Relay] Carrier listener started successfully")
 
 	e.wg.Add(1)
 	go e.entryAcceptLoop(ln)
+	return nil
+}
 
-	for _, rule := range e.cfg.Forwarders {
-		pairs := routing.ExpandPortRange(rule)
-		proto := strings.ToLower(strings.TrimSpace(rule.Protocol))
-		for _, pair := range pairs {
-			lPort, tPort := pair[0], pair[1]
-			if lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both") {
-				e.carrierFwd.Store(int64(tPort))
-				e.logger.WithFields(log.Fields{
-					"carrierPort": lPort,
-					"targetPort":  tPort,
-				}).Info("[Relay] Sharing carrier port with user forwarder (single-port multiplexing)")
-			} else if proto == "tcp" || proto == "tcp,udp" || proto == "both" {
-				if err := e.startTCPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
-					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start TCP forwarder listener")
-				}
-			}
-			if proto == "udp" || proto == "tcp,udp" || proto == "both" {
-				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
-					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start UDP forwarder listener")
-				}
+func (e *Engine) quicAcceptLoop(ln *quic.Listener) {
+	defer e.wg.Done()
+	for {
+		qConn, err := ln.Accept(e.ctx)
+		if err != nil {
+			select {
+			case <-e.ctx.Done():
+				return
+			default:
+				continue
 			}
 		}
+		go func(conn *quic.Conn) {
+			for {
+				stream, err := conn.AcceptStream(e.ctx)
+				if err != nil {
+					return
+				}
+				streamConn, err := transport.AcceptQuicCarrierStream(stream, conn, e.cfg.SNI, e.cfg.Password)
+				if err != nil {
+					continue
+				}
+				if e.isDirect() {
+					e.wg.Add(1)
+					go e.serveExitStream(streamConn)
+				} else {
+					e.pushIdleStream(streamConn)
+				}
+			}
+		}(qConn)
 	}
-
-	return nil
 }
 
 func (e *Engine) entryAcceptLoop(ln net.Listener) {
@@ -292,16 +382,61 @@ func (e *Engine) entryAcceptLoop(ln net.Listener) {
 }
 
 func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
+	isDirect := e.isDirect()
+	targetFwd := e.carrierFwd.Load()
+	hasUserFwd := targetFwd > 0 && !isDirect
 	var carrierConn net.Conn
-	if e.cfg.Transport == "tls-reverse" {
+
+	switch e.cfg.Transport {
+	case "tls-reverse":
 		tlsConn, err := transport.AcceptTLSReverseCarrier(rawConn, e.tlsServerCfg, e.cfg.SNI, e.cfg.Password)
 		if err != nil {
 			return
 		}
 		carrierConn = tlsConn
-	} else {
-		targetFwd := e.carrierFwd.Load()
-		hasUserFwd := targetFwd > 0
+
+	case "wss-reverse":
+		if e.tlsServerCfg == nil {
+			_ = rawConn.Close()
+			return
+		}
+		tlsConn := tls.Server(rawConn, e.tlsServerCfg)
+		_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := tlsConn.Handshake(); err != nil {
+			_ = tlsConn.Close()
+			return
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+		action, inspectedConn, err := transport.InspectWSTraffic(tlsConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		if err != nil || action != transport.ActionReverseCarrier {
+			if action == transport.ActionUserClient && inspectedConn != nil {
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			}
+			return
+		}
+		carrierConn = inspectedConn
+
+	case "ws-reverse":
+		action, inspectedConn, err := transport.InspectWSTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		if err != nil || action != transport.ActionReverseCarrier {
+			if action == transport.ActionUserClient && inspectedConn != nil {
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			}
+			return
+		}
+		carrierConn = inspectedConn
+
+	case "stealth":
+		action, inspectedConn, err := transport.InspectStealthTraffic(rawConn, e.cfg.Password, hasUserFwd)
+		if err != nil || action != transport.ActionReverseCarrier {
+			if action == transport.ActionUserClient && inspectedConn != nil {
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			}
+			return
+		}
+		carrierConn = inspectedConn
+
+	default: // "reverse-reality"
 		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
 		if err != nil {
 			return
@@ -337,7 +472,12 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		stream = carrierConn
 	}
 
-	e.pushIdleStream(stream)
+	if isDirect {
+		e.wg.Add(1)
+		go e.serveExitStream(stream)
+	} else {
+		e.pushIdleStream(stream)
+	}
 }
 
 func (e *Engine) pushIdleStream(stream net.Conn) {
@@ -394,6 +534,9 @@ func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 			if time.Since(item.createdAt) > 3*time.Minute || !transport.IsStreamAlive(item.conn) {
 				_ = item.conn.Close()
 				continue
+			}
+			if e.isDirect() {
+				e.triggerReplenish()
 			}
 			return item.conn, nil
 		}
@@ -475,6 +618,15 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 }
 
 func (e *Engine) startExit() error {
+	listenIP := e.cfg.ListenIP
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+
+	if e.isDirect() {
+		return e.startCarrierListener(listenIP)
+	}
+
 	if e.cfg.EntryServerIP == "" && len(e.cfg.FloatingIPs) == 0 {
 		return fmt.Errorf("exit relay engine requires EntryServerIP")
 	}
@@ -528,8 +680,12 @@ func (e *Engine) exitPoolLoop() {
 				return
 			default:
 			}
-			e.wg.Add(1)
-			go e.serveExitStream(stream)
+			if e.isDirect() {
+				e.pushIdleStream(stream)
+			} else {
+				e.wg.Add(1)
+				go e.serveExitStream(stream)
+			}
 		}()
 	}
 
@@ -542,7 +698,12 @@ func (e *Engine) exitPoolLoop() {
 		}
 
 		minHeld := int64(e.cfg.MinHeldConnections)
-		current := e.idleWaiters.Load() + dialingCount.Load()
+		var current int64
+		if e.isDirect() {
+			current = e.Stats.PoolIdleConnections.Load() + dialingCount.Load()
+		} else {
+			current = e.idleWaiters.Load() + dialingCount.Load()
+		}
 		needed := minHeld - current
 		for i := int64(0); i < needed; i++ {
 			spawnDial()
@@ -551,16 +712,59 @@ func (e *Engine) exitPoolLoop() {
 }
 
 func (e *Engine) dialCarrierStream() (net.Conn, error) {
+	if e.cfg.Transport == "quic-reverse" {
+		return e.dialQuicCarrier()
+	}
 	if e.cfg.UseHalfDuplex {
 		return transport.DialHalfDuplexPair(e.dialSingleCarrier)
 	}
 	return e.dialSingleCarrier()
 }
 
-func (e *Engine) dialSingleCarrier() (net.Conn, error) {
-	candidates := e.targetEntryIPs()
+func (e *Engine) dialQuicCarrier() (net.Conn, error) {
+	candidates := e.targetDialIPs()
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no entry server IP configured")
+		return nil, fmt.Errorf("no target server IP configured for quic dial")
+	}
+	addr := net.JoinHostPort(candidates[0], strconv.Itoa(e.cfg.CarrierPort))
+
+	e.mu.Lock()
+	qConn := e.activeQuicConn
+	e.mu.Unlock()
+
+	if qConn == nil || qConn.Context().Err() != nil {
+		newConn, err := transport.DialQuicSession(e.ctx, addr, e.cfg.SNI)
+		if err != nil {
+			return nil, err
+		}
+		e.mu.Lock()
+		e.activeQuicConn = newConn
+		qConn = newConn
+		e.mu.Unlock()
+	}
+
+	stream, err := transport.OpenQuicCarrierStream(e.ctx, qConn, e.cfg.SNI, e.cfg.Password)
+	if err != nil {
+		_ = qConn.CloseWithError(0, "stream open failed")
+		e.mu.Lock()
+		e.activeQuicConn = nil
+		e.mu.Unlock()
+		retryConn, rErr := transport.DialQuicSession(e.ctx, addr, e.cfg.SNI)
+		if rErr != nil {
+			return nil, rErr
+		}
+		e.mu.Lock()
+		e.activeQuicConn = retryConn
+		e.mu.Unlock()
+		return transport.OpenQuicCarrierStream(e.ctx, retryConn, e.cfg.SNI, e.cfg.Password)
+	}
+	return stream, nil
+}
+
+func (e *Engine) dialSingleCarrier() (net.Conn, error) {
+	candidates := e.targetDialIPs()
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no target server IP configured")
 	}
 
 	rawDial := func() (net.Conn, error) {
@@ -576,10 +780,28 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 		return dialTCP(e.ctx, 0)
 	}
 
-	if e.cfg.Transport == "tls-reverse" {
+	switch e.cfg.Transport {
+	case "tls-reverse":
 		return transport.DialTLSReverseCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
+	case "stealth":
+		return transport.DialStealthCarrier(rawDial, e.cfg.Password)
+	case "ws-reverse":
+		return transport.DialWSCarrier(rawDial, false, e.cfg.SNI, e.cfg.Password)
+	case "wss-reverse":
+		return transport.DialWSCarrier(rawDial, true, e.cfg.SNI, e.cfg.Password)
+	default:
+		return transport.DialRealityCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
 	}
-	return transport.DialRealityCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
+}
+
+func (e *Engine) targetDialIPs() []string {
+	if e.isDirect() {
+		if e.cfg.ExitServerIP != "" {
+			return []string{e.cfg.ExitServerIP}
+		}
+		return nil
+	}
+	return e.targetEntryIPs()
 }
 
 func (e *Engine) targetEntryIPs() []string {

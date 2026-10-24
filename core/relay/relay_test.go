@@ -2,9 +2,11 @@ package relay
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,28 @@ import (
 	"github.com/archnets/node/core/relay/telemetry"
 	"github.com/archnets/node/core/relay/transport"
 )
+
+func startMockTCPEchoServer(t *testing.T, port int) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("failed to start target echo server on %d: %v", port, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+	return ln
+}
 
 func getFreeTCPPort(t *testing.T) int {
 	t.Helper()
@@ -484,4 +508,309 @@ func TestPreHandshakeTCPMaxSegAndPathMTUDiscovery(t *testing.T) {
 		t.Fatalf("expected discovered Path MTU between 1280 and 1500, got %d", bestMTU)
 	}
 	t.Logf("Successfully discovered Optimal Path MTU: %d B (TCP MSS: %d B)", bestMTU, bestMTU-40)
+}
+
+func TestStealthTransportEndToEnd(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	targetPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+
+	startMockTCPEchoServer(t, targetPort)
+
+	entry := NewEngine(Config{
+		TunnelID:           401,
+		Role:               "entry",
+		Transport:          "stealth",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		Password:           "stealth-noise-psk",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders: []routing.ForwarderRule{
+			{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+		},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("failed to start stealth entry: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           401,
+		Role:               "exit",
+		Transport:          "stealth",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		Password:           "stealth-noise-psk",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("failed to start stealth exit: %v", err)
+	}
+	defer exit.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry.Stats.PoolIdleConnections.Load() >= 2 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect to stealth forwarder: %v", err)
+	}
+	defer clientConn.Close()
+
+	testMsg := "STEALTH-NOISE-ECHO-TEST"
+	if _, err := clientConn.Write([]byte(testMsg)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	resp := make([]byte, len(testMsg))
+	if _, err := io.ReadFull(clientConn, resp); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(resp) != testMsg {
+		t.Fatalf("expected %s, got %s", testMsg, string(resp))
+	}
+}
+
+func TestWSTransportAndDecoyEndToEnd(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	targetPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+
+	startMockTCPEchoServer(t, targetPort)
+
+	entry := NewEngine(Config{
+		TunnelID:           402,
+		Role:               "entry",
+		Transport:          "ws-reverse",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "decoy.domain.local",
+		Password:           "ws-auth-secret-123",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders: []routing.ForwarderRule{
+			{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+		},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("failed to start ws entry: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           402,
+		Role:               "exit",
+		Transport:          "ws-reverse",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "decoy.domain.local",
+		Password:           "ws-auth-secret-123",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("failed to start ws exit: %v", err)
+	}
+	defer exit.Close()
+
+	// 1. Verify unauthenticated HTTP probe receives deterministic Nginx decoy response
+	probeConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", carrierPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect to ws carrier for decoy probe: %v", err)
+	}
+	_, _ = probeConn.Write([]byte("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+	decoyBuf := make([]byte, 512)
+	n, _ := probeConn.Read(decoyBuf)
+	_ = probeConn.Close()
+	decoyStr := string(decoyBuf[:n])
+	if !strings.Contains(decoyStr, "Server: nginx") || !strings.Contains(decoyStr, "Welcome to nginx!") {
+		t.Fatalf("expected nginx decoy response, got:\n%s", decoyStr)
+	}
+
+	// 2. Verify reverse tunnel forwarder carries user data
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry.Stats.PoolIdleConnections.Load() >= 2 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect to ws forwarder: %v", err)
+	}
+	defer clientConn.Close()
+
+	testMsg := "WEBSOCKET-REVERSE-ECHO-TEST"
+	if _, err := clientConn.Write([]byte(testMsg)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	resp := make([]byte, len(testMsg))
+	if _, err := io.ReadFull(clientConn, resp); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(resp) != testMsg {
+		t.Fatalf("expected %s, got %s", testMsg, string(resp))
+	}
+}
+
+func TestDirectModeEndToEnd(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	targetPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+
+	startMockTCPEchoServer(t, targetPort)
+
+	// In direct mode: Exit listens on CarrierPort, Entry dials Exit!
+	exit := NewEngine(Config{
+		TunnelID:           403,
+		Role:               "exit",
+		Direction:          "direct",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "direct-secret-pass",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("failed to start direct exit: %v", err)
+	}
+	defer exit.Close()
+
+	entry := NewEngine(Config{
+		TunnelID:           403,
+		Role:               "entry",
+		Direction:          "direct",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ExitServerIP:       "127.0.0.1",
+		ListenIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "direct-secret-pass",
+		UseHalfDuplex:      true,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders: []routing.ForwarderRule{
+			{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+		},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("failed to start direct entry: %v", err)
+	}
+	defer entry.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry.Stats.PoolIdleConnections.Load() >= 2 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect to direct forwarder: %v", err)
+	}
+	defer clientConn.Close()
+
+	testMsg := "DIRECT-MODE-ECHO-TEST"
+	if _, err := clientConn.Write([]byte(testMsg)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	resp := make([]byte, len(testMsg))
+	if _, err := io.ReadFull(clientConn, resp); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(resp) != testMsg {
+		t.Fatalf("expected %s, got %s", testMsg, string(resp))
+	}
+}
+
+func TestQUICTransportEndToEnd(t *testing.T) {
+	carrierPort := getFreeUDPPort(t)
+	targetPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+
+	startMockTCPEchoServer(t, targetPort)
+
+	entry := NewEngine(Config{
+		TunnelID:           404,
+		Role:               "entry",
+		Transport:          "quic-reverse",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "quic.domain.local",
+		Password:           "quic-auth-pass-789",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders: []routing.ForwarderRule{
+			{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+		},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("failed to start quic entry: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           404,
+		Role:               "exit",
+		Transport:          "quic-reverse",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "quic.domain.local",
+		Password:           "quic-auth-pass-789",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("failed to start quic exit: %v", err)
+	}
+	defer exit.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry.Stats.PoolIdleConnections.Load() >= 2 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect to quic forwarder: %v", err)
+	}
+	defer clientConn.Close()
+
+	testMsg := "QUIC-REVERSE-ECHO-TEST"
+	if _, err := clientConn.Write([]byte(testMsg)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	resp := make([]byte, len(testMsg))
+	if _, err := io.ReadFull(clientConn, resp); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(resp) != testMsg {
+		t.Fatalf("expected %s, got %s", testMsg, string(resp))
+	}
 }
