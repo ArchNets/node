@@ -814,3 +814,82 @@ func TestQUICTransportEndToEnd(t *testing.T) {
 		t.Fatalf("expected %s, got %s", testMsg, string(resp))
 	}
 }
+
+func TestTCPMuxAndKCPTransportsEndToEnd(t *testing.T) {
+	for _, tr := range []string{"tcpmux", "kcp"} {
+		t.Run(tr, func(t *testing.T) {
+			var carrierPort int
+			if tr == "kcp" {
+				carrierPort = getFreeUDPPort(t)
+			} else {
+				carrierPort = getFreeTCPPort(t)
+			}
+			targetPort := getFreeTCPPort(t)
+			fwdPort := getFreeTCPPort(t)
+
+			startMockTCPEchoServer(t, targetPort)
+
+			entry := NewEngine(Config{
+				TunnelID:           410,
+				Role:               "entry",
+				Transport:          tr,
+				CarrierPort:        carrierPort,
+				ListenIP:           "127.0.0.1",
+				Password:           "mux-kcp-secret-999",
+				UseHalfDuplex:      false,
+				UseFisher:          false,
+				MinHeldConnections: 4,
+				Forwarders: []routing.ForwarderRule{
+					{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+				},
+			})
+			if err := entry.Start(); err != nil {
+				t.Fatalf("failed to start %s entry: %v", tr, err)
+			}
+			defer entry.Close()
+
+			exit := NewEngine(Config{
+				TunnelID:           410,
+				Role:               "exit",
+				Transport:          tr,
+				CarrierPort:        carrierPort,
+				EntryServerIP:      "127.0.0.1",
+				TargetIP:           "127.0.0.1",
+				Password:           "mux-kcp-secret-999",
+				UseHalfDuplex:      false,
+				UseFisher:          false,
+				MinHeldConnections: 4,
+			})
+			if err := exit.Start(); err != nil {
+				t.Fatalf("failed to start %s exit: %v", tr, err)
+			}
+			defer exit.Close()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if entry.Stats.PoolIdleConnections.Load() >= 2 {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+
+			clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 2*time.Second)
+			if err != nil {
+				t.Fatalf("failed to connect to %s forwarder: %v", tr, err)
+			}
+			defer clientConn.Close()
+
+			testMsg := "MUX-KCP-ECHO-PAYLOAD-" + tr
+			if _, err := clientConn.Write([]byte(testMsg)); err != nil {
+				t.Fatalf("write failed: %v", err)
+			}
+			resp := make([]byte, len(testMsg))
+			if _, err := io.ReadFull(clientConn, resp); err != nil {
+				t.Fatalf("read failed: %v", err)
+			}
+			if string(resp) != testMsg {
+				t.Fatalf("expected %s, got %s", testMsg, string(resp))
+			}
+		})
+	}
+}

@@ -92,15 +92,15 @@ type TunnelController struct {
 func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *conf.Conf) *TunnelController {
 	tag := generateTunnelTag(serverId)
 	relayDrv := NewRelayDriver(log.WithField("tag", tag))
-	RegisterTunnelDriver("reverse-reality", relayDrv)
-	RegisterTunnelDriver("tls-reverse", relayDrv)
-	RegisterTunnelDriver("stealth", relayDrv)
-	RegisterTunnelDriver("ws-reverse", relayDrv)
-	RegisterTunnelDriver("wss-reverse", relayDrv)
-	RegisterTunnelDriver("quic-reverse", relayDrv)
-	RegisterTunnelDriver("relay", relayDrv)
-	RegisterTunnelDriver("waterwall", relayDrv)
-	RegisterTunnelDriver("", relayDrv)
+	for _, m := range []string{
+		"reverse-reality", "tls-reverse", "stealth", "tcp", "tcpmux",
+		"ws-reverse", "wss-reverse", "wsmux", "wssmux",
+		"quic-reverse", "quic", "kcp", "udp", "pck", "xdi",
+		"l3-udp", "l3-quic", "l3-pck", "l3-xdi", "l3-sni", "spoof",
+		"relay", "waterwall", "",
+	} {
+		RegisterTunnelDriver(m, relayDrv)
+	}
 
 	return &TunnelController{
 		tag:                  tag,

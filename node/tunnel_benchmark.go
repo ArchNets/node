@@ -56,9 +56,10 @@ type exitSandboxState struct {
 // BenchmarkCandidate represents a single SNI or Transport/Method variation to benchmark.
 type BenchmarkCandidate struct {
 	Index         int
+	Direction     string // "reverse" or "direct"
 	SNI           string
 	OriginIP      string
-	Transport     string // "reverse-reality", "tls-reverse"
+	Transport     string
 	MethodLabel   string
 	UseHalfDuplex bool
 	UseFisher     bool
@@ -85,23 +86,103 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 
 	var candidates []BenchmarkCandidate
 	switch mode {
-	case "methods":
+	case "methods", "all":
+		variations := []struct {
+			direction string
+			transport string
+			label     string
+			hd        bool
+			fisher    bool
+		}{
+			{"reverse", "stealth", "Reverse • Stealth (Noise NNpsk0)", true, false},
+			{"reverse", "tcpmux", "Reverse • TCPMux (Multiplexed TCP)", false, false},
+			{"reverse", "tcp", "Reverse • Raw TCP", true, false},
+			{"reverse", "ws-reverse", "Reverse • WebSocket (Nginx Decoy)", true, false},
+			{"reverse", "wsmux", "Reverse • WSMux (Multiplexed WS)", false, false},
+			{"reverse", "wss-reverse", "Reverse • WSS (TLS 1.3 + Decoy)", true, false},
+			{"reverse", "wssmux", "Reverse • WSSMux (Multiplexed WSS)", false, false},
+			{"reverse", "quic-reverse", "Reverse • QUIC (UDP Streams)", false, false},
+			{"reverse", "kcp", "Reverse • KCP (UDP + FEC)", false, false},
+			{"reverse", "pck", "Reverse • PCK (Stateless Packet TCP)", false, false},
+			{"reverse", "xdi", "Reverse • XDI (ICMP Echo Tunnel)", false, false},
+			{"reverse", "tls-reverse", "Reverse • TLS 1.3", true, false},
+			{"reverse", "reverse-reality", "Reverse • Reality (TLS 1.3 Camouflage)", true, true},
+			{"direct", "stealth", "Direct • Stealth (Noise NNpsk0)", true, false},
+			{"direct", "quic-reverse", "Direct • QUIC (UDP Streams)", false, false},
+			{"direct", "kcp", "Direct • KCP (UDP + FEC)", false, false},
+			{"direct", "l3-udp", "L3 TUN • UDP Datagram", false, false},
+			{"direct", "l3-pck", "L3 TUN • PCK (Stateless Packet)", false, false},
+			{"direct", "l3-xdi", "L3 TUN • XDI (ICMP Echo)", false, false},
+		}
+		for i, v := range variations {
+			candidates = append(candidates, BenchmarkCandidate{
+				Index:         i + 1,
+				Direction:     v.direction,
+				SNI:           baseSNI,
+				OriginIP:      "",
+				Transport:     v.transport,
+				MethodLabel:   v.label,
+				UseHalfDuplex: v.hd,
+				UseFisher:     v.fisher,
+			})
+		}
+
+	case "reverse":
 		variations := []struct {
 			transport string
 			label     string
 			hd        bool
 			fisher    bool
 		}{
-			{"stealth", "Stealth (Noise NNpsk0 + Random Padding)", true, false},
-			{"quic-reverse", "QUIC Reverse (Native UDP Streams)", false, false},
-			{"ws-reverse", "WebSocket Reverse (Nginx Decoy)", true, false},
-			{"wss-reverse", "WSS Reverse (TLS 1.3 + Nginx Decoy)", true, false},
-			{"tls-reverse", "TLS 1.3 Reverse", true, false},
-			{"reverse-reality", "Reverse Reality (Anti-DPI TLS 1.3)", true, true},
+			{"stealth", "Reverse • Stealth (Noise NNpsk0)", true, false},
+			{"tcpmux", "Reverse • TCPMux (Multiplexed TCP)", false, false},
+			{"tcp", "Reverse • Raw TCP", true, false},
+			{"ws-reverse", "Reverse • WebSocket (Nginx Decoy)", true, false},
+			{"wsmux", "Reverse • WSMux (Multiplexed WS)", false, false},
+			{"wss-reverse", "Reverse • WSS (TLS 1.3 + Decoy)", true, false},
+			{"wssmux", "Reverse • WSSMux (Multiplexed WSS)", false, false},
+			{"quic-reverse", "Reverse • QUIC (UDP Streams)", false, false},
+			{"kcp", "Reverse • KCP (UDP + FEC)", false, false},
+			{"pck", "Reverse • PCK (Stateless Packet TCP)", false, false},
+			{"xdi", "Reverse • XDI (ICMP Echo Tunnel)", false, false},
+			{"tls-reverse", "Reverse • TLS 1.3", true, false},
+			{"reverse-reality", "Reverse • Reality (TLS 1.3 Camouflage)", true, true},
 		}
 		for i, v := range variations {
 			candidates = append(candidates, BenchmarkCandidate{
 				Index:         i + 1,
+				Direction:     "reverse",
+				SNI:           baseSNI,
+				OriginIP:      "",
+				Transport:     v.transport,
+				MethodLabel:   v.label,
+				UseHalfDuplex: v.hd,
+				UseFisher:     v.fisher,
+			})
+		}
+
+	case "direct":
+		variations := []struct {
+			transport string
+			label     string
+			hd        bool
+			fisher    bool
+		}{
+			{"stealth", "Direct • Stealth (Noise NNpsk0)", true, false},
+			{"tcpmux", "Direct • TCPMux (Multiplexed TCP)", false, false},
+			{"wssmux", "Direct • WSSMux (Multiplexed WSS)", false, false},
+			{"quic-reverse", "Direct • QUIC (UDP Streams)", false, false},
+			{"kcp", "Direct • KCP (UDP + FEC)", false, false},
+			{"l3-udp", "L3 TUN • UDP Datagram", false, false},
+			{"l3-quic", "L3 TUN • QUIC Datagram", false, false},
+			{"l3-pck", "L3 TUN • PCK (Stateless Packet)", false, false},
+			{"l3-xdi", "L3 TUN • XDI (ICMP Echo)", false, false},
+			{"l3-sni", "L3 TUN • SNI Spoofed Packet", false, false},
+		}
+		for i, v := range variations {
+			candidates = append(candidates, BenchmarkCandidate{
+				Index:         i + 1,
+				Direction:     "direct",
 				SNI:           baseSNI,
 				OriginIP:      "",
 				Transport:     v.transport,
@@ -416,18 +497,19 @@ func (c *TunnelController) evaluateCandidate(
 ) *panel.ScanResultItem {
 	originRTT := measureOriginTCPHandshake(cand.OriginIP, 443, 1200*time.Millisecond)
 
-	direction := "reverse"
+	direction := cand.Direction
+	if direction == "" {
+		direction = "reverse"
+		if t.RelayConfig != nil && t.RelayConfig.Direction != "" {
+			direction = t.RelayConfig.Direction
+		}
+	}
 	exitIP := t.ExitServerIP
 	if exitIP == "" {
 		exitIP = t.RemoteIP
 	}
-	if t.RelayConfig != nil {
-		if t.RelayConfig.Direction != "" {
-			direction = t.RelayConfig.Direction
-		}
-		if t.RelayConfig.ExitOverrideIP != "" {
-			exitIP = t.RelayConfig.ExitOverrideIP
-		}
+	if t.RelayConfig != nil && t.RelayConfig.ExitOverrideIP != "" {
+		exitIP = t.RelayConfig.ExitOverrideIP
 	}
 
 	candPort := sandboxPort + cand.Index
@@ -609,11 +691,15 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 			default:
 			}
 
+			candDirection := cand.Direction
+			if candDirection == "" {
+				candDirection = direction
+			}
 			candPort := sandboxPort + cand.Index
 			eng := relay.NewEngine(relay.Config{
 				TunnelID:           t.Id*1000 + cand.Index,
 				Role:               "exit",
-				Direction:          direction,
+				Direction:          candDirection,
 				Transport:          cand.Transport,
 				CarrierPort:        candPort,
 				ListenIP:           "0.0.0.0",
