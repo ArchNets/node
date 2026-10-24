@@ -128,19 +128,54 @@ func (s *Stats) GetLastProbeResult() (uploadMbps, downloadMbps float64, status s
 
 var relayBufferPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 64*1024)
+		b := make([]byte, 128*1024)
 		return &b
 	},
 }
 
+func unwrapReadTCP(r io.Reader) *net.TCPConn {
+	if tc, ok := r.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := r.(interface{ ReadTCPConn() *net.TCPConn }); ok {
+		return u.ReadTCPConn()
+	}
+	return nil
+}
+
+func unwrapWriteTCP(w io.Writer) *net.TCPConn {
+	if tc, ok := w.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := w.(interface{ WriteTCPConn() *net.TCPConn }); ok {
+		return u.WriteTCPConn()
+	}
+	return nil
+}
+
 // SpliceCopy moves data from src to dst.
-// If both src and dst are *net.TCPConn on Linux, it runs zero-copy kernel splice(2) via 1 MiB pipes.
-// Otherwise, it falls back to a pooled 64KB user-space buffer loop.
+// If both src and dst resolve to *net.TCPConn on Linux (including through HalfDuplexConn
+// and PrefixConn), it runs zero-copy kernel splice(2) via 1 MiB pipes.
+// Otherwise, it falls back to a pooled 128KB user-space buffer loop.
 func SpliceCopy(dst io.Writer, src io.Reader, counter *atomic.Int64) (int64, error) {
-	dstTCP, okDst := dst.(*net.TCPConn)
-	srcTCP, okSrc := src.(*net.TCPConn)
-	if okDst && okSrc {
-		var total int64
+	var total int64
+
+	if drainer, ok := src.(interface{ DrainPrefixTo(io.Writer) (int64, error) }); ok {
+		n, err := drainer.DrainPrefixTo(dst)
+		if n > 0 {
+			total += n
+			if counter != nil {
+				counter.Add(n)
+			}
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+
+	dstTCP := unwrapWriteTCP(dst)
+	srcTCP := unwrapReadTCP(src)
+	if dstTCP != nil && srcTCP != nil {
 		handled, err := spliceRelay(dstTCP, srcTCP, func(n int) {
 			total += int64(n)
 			if counter != nil {
@@ -155,8 +190,6 @@ func SpliceCopy(dst io.Writer, src io.Reader, counter *atomic.Int64) (int64, err
 	bufPtr := relayBufferPool.Get().(*[]byte)
 	defer relayBufferPool.Put(bufPtr)
 	buf := *bufPtr
-
-	var total int64
 	for {
 		nr, rErr := src.Read(buf)
 		if nr > 0 {

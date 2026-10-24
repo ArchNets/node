@@ -51,6 +51,34 @@ func (c *HalfDuplexConn) WriteTo(w io.Writer) (int64, error) {
 	return io.Copy(w, c.readConn)
 }
 
+// ReadTCPConn returns the underlying read *net.TCPConn for zero-copy kernel splice(2).
+func (c *HalfDuplexConn) ReadTCPConn() *net.TCPConn {
+	if c.readConn == nil {
+		return nil
+	}
+	if tc, ok := c.readConn.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := c.readConn.(interface{ ReadTCPConn() *net.TCPConn }); ok {
+		return u.ReadTCPConn()
+	}
+	return nil
+}
+
+// WriteTCPConn returns the underlying write *net.TCPConn for zero-copy kernel splice(2).
+func (c *HalfDuplexConn) WriteTCPConn() *net.TCPConn {
+	if c.writeConn == nil {
+		return nil
+	}
+	if tc, ok := c.writeConn.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := c.writeConn.(interface{ WriteTCPConn() *net.TCPConn }); ok {
+		return u.WriteTCPConn()
+	}
+	return nil
+}
+
 func (c *HalfDuplexConn) CloseWrite() error {
 	if tc, ok := c.writeConn.(*net.TCPConn); ok {
 		return tc.CloseWrite()
@@ -148,9 +176,26 @@ func NewHalfDuplexMatcher() *HalfDuplexMatcher {
 func (m *HalfDuplexMatcher) AcceptHalf(conn net.Conn) (*HalfDuplexConn, error) {
 	var intro [HalfDuplexIntroSize]byte
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.ReadFull(conn, intro[:]); err != nil {
+
+	var first5 [5]byte
+	if _, err := io.ReadFull(conn, first5[:]); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("read halfduplex intro: %w", err)
+		return nil, fmt.Errorf("read halfduplex intro prefix: %w", err)
+	}
+
+	// Support both TLS 1.3 ApplicationData framed intro (0x17 0x03 0x03 0x00 0x11 + 17B)
+	// and legacy raw 17-byte intro (0x01/0x02 + 16B PairID).
+	if first5[0] == 0x17 && first5[1] == 0x03 && first5[2] == 0x03 && first5[3] == 0x00 && first5[4] == HalfDuplexIntroSize {
+		if _, err := io.ReadFull(conn, intro[:]); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("read halfduplex tls-framed intro: %w", err)
+		}
+	} else {
+		copy(intro[0:5], first5[:])
+		if _, err := io.ReadFull(conn, intro[5:]); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("read halfduplex raw intro: %w", err)
+		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
@@ -243,11 +288,16 @@ func DialHalfDuplexPair(dialFn CarrierDialer) (*HalfDuplexConn, error) {
 			upCh <- dialRes{err: err}
 			return
 		}
-		var intro [HalfDuplexIntroSize]byte
-		intro[0] = HalfDuplexRoleUpload
-		copy(intro[1:17], pairID[:])
+		var framed [5 + HalfDuplexIntroSize]byte
+		framed[0] = 0x17
+		framed[1] = 0x03
+		framed[2] = 0x03
+		framed[3] = 0x00
+		framed[4] = HalfDuplexIntroSize
+		framed[5] = HalfDuplexRoleUpload
+		copy(framed[6:22], pairID[:])
 		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if _, err := c.Write(intro[:]); err != nil {
+		if _, err := c.Write(framed[:]); err != nil {
 			_ = c.Close()
 			upCh <- dialRes{err: err}
 			return
@@ -262,11 +312,16 @@ func DialHalfDuplexPair(dialFn CarrierDialer) (*HalfDuplexConn, error) {
 			downCh <- dialRes{err: err}
 			return
 		}
-		var intro [HalfDuplexIntroSize]byte
-		intro[0] = HalfDuplexRoleDownload
-		copy(intro[1:17], pairID[:])
+		var framed [5 + HalfDuplexIntroSize]byte
+		framed[0] = 0x17
+		framed[1] = 0x03
+		framed[2] = 0x03
+		framed[3] = 0x00
+		framed[4] = HalfDuplexIntroSize
+		framed[5] = HalfDuplexRoleDownload
+		copy(framed[6:22], pairID[:])
 		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if _, err := c.Write(intro[:]); err != nil {
+		if _, err := c.Write(framed[:]); err != nil {
 			_ = c.Close()
 			downCh <- dialRes{err: err}
 			return

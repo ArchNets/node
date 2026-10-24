@@ -8,14 +8,41 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/archnets/node/core/relay/protocol"
 )
 
 const (
-	ProbeChunkSize = 1300
+	ProbeChunkSize        = 1300
+	ProbeHighThroughputSz = 128 * 1024 // 128 KiB matching WaterWall SpeedTestClient payload-size
+	ProbeParallelStreams  = 4          // 4 parallel streams matching WaterWall SpeedTestClient connection-count
 )
+
+// probeHighEntropyChunk is pre-initialized once with TLS 1.3 ApplicationData headers (0x17 0x03 0x03)
+// and deterministic xorshift pseudo-random bytes so DPI entropy filters see genuine TLS 1.3 records.
+var probeHighEntropyChunk = func() []byte {
+	b := make([]byte, ProbeHighThroughputSz)
+	seed := uint32(0xA5A55A5A)
+	for i := 0; i < len(b); i++ {
+		v := seed + uint32(i)
+		v ^= v >> 13
+		v *= 0x85EBCA6B
+		v ^= v >> 16
+		b[i] = byte(v)
+	}
+	// Stamp TLS 1.3 ApplicationData headers every 16 KiB boundary
+	for off := 0; off+16384 <= len(b); off += 16384 {
+		b[off+0] = 0x17
+		b[off+1] = 0x03
+		b[off+2] = 0x03
+		b[off+3] = 0x3F
+		b[off+4] = 0xFB
+	}
+	return b
+}()
 
 // BandwidthSample represents a point-in-time bandwidth and health measurement over stream 0xFF.
 type BandwidthSample struct {
@@ -84,8 +111,8 @@ func HandleExitProbeStream(stream net.Conn, stats *Stats) {
 		if durSec > 15 {
 			durSec = 15
 		}
-		_ = stream.SetReadDeadline(time.Now().Add(time.Duration(durSec+3) * time.Second))
-		buf := make([]byte, 32*1024)
+		_ = stream.SetReadDeadline(time.Now().Add(time.Duration(durSec+4) * time.Second))
+		buf := make([]byte, ProbeHighThroughputSz)
 		var totalReceived uint64
 		for {
 			n, err := stream.Read(buf)
@@ -116,15 +143,11 @@ func HandleExitProbeStream(stream net.Conn, stats *Stats) {
 		if durSec > 15 {
 			durSec = 15
 		}
-		chunk := make([]byte, ProbeChunkSize*24)
-		for i := range chunk {
-			chunk[i] = byte(i & 0xFF)
-		}
 		deadline := time.Now().Add(time.Duration(durSec) * time.Second)
 		_ = stream.SetWriteDeadline(deadline.Add(2 * time.Second))
 		var totalSent int64
 		for time.Now().Before(deadline) {
-			n, err := stream.Write(chunk)
+			n, err := stream.Write(probeHighEntropyChunk)
 			if n > 0 {
 				totalSent += int64(n)
 			}
@@ -288,50 +311,82 @@ func measurePingSeries(claimStreamFn func(timeout time.Duration) (net.Conn, erro
 	return int(avg), jitter, loss
 }
 
+// claimProbeStreams claims 1 primary stream (up to 4s) and up to n-1 extra warm streams (15ms each)
+// for multi-stream bandwidth measurement matching WaterWall's SpeedTestClient.
+func claimProbeStreams(claimStreamFn func(timeout time.Duration) (net.Conn, error), maxStreams int) ([]net.Conn, error) {
+	first, err := claimStreamFn(4 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+	streams := make([]net.Conn, 0, maxStreams)
+	streams = append(streams, first)
+	for i := 1; i < maxStreams; i++ {
+		s, err := claimStreamFn(15 * time.Millisecond)
+		if err != nil || s == nil {
+			break
+		}
+		streams = append(streams, s)
+	}
+	return streams, nil
+}
+
 func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, error), stats *Stats, duration time.Duration, durSec int) (int64, error) {
-	stream, err := claimStreamFn(4 * time.Second)
+	streams, err := claimProbeStreams(claimStreamFn, ProbeParallelStreams)
 	if err != nil {
 		return 0, err
 	}
-	defer stream.Close()
+	defer func() {
+		for _, s := range streams {
+			_ = s.Close()
+		}
+	}()
 
-	_ = stream.SetDeadline(time.Now().Add(duration + 5*time.Second))
-	if err := protocol.WriteRoutingHeader(stream, protocol.RouteProtoProbe, 0); err != nil {
-		return 0, err
-	}
+	// Coalesce 3-byte routing header + UPLOAD command into a single write
+	cmdStr := fmt.Sprintf("UPLOAD:%d\n", durSec)
+	initPkt := make([]byte, 3+len(cmdStr))
+	initPkt[0] = protocol.RouteProtoProbe
+	initPkt[1] = 0
+	initPkt[2] = 0
+	copy(initPkt[3:], cmdStr)
 
-	cmd := fmt.Sprintf("UPLOAD:%d\n", durSec)
-	if _, err := stream.Write([]byte(cmd)); err != nil {
-		return 0, err
-	}
-
-	chunk := make([]byte, ProbeChunkSize*16)
-	for i := range chunk {
-		chunk[i] = byte((i + 1) & 0x7F)
-	}
-
+	var totalBytes atomic.Int64
+	var wg sync.WaitGroup
 	start := time.Now()
 	deadline := start.Add(duration)
-	var sentBytes int64
-	for time.Now().Before(deadline) {
-		n, wErr := stream.Write(chunk)
-		if n > 0 {
-			sentBytes += int64(n)
-		}
-		if wErr != nil {
-			break
-		}
-	}
-	_, _ = stream.Write(uploadDoneMarker)
 
-	var resp [8]byte
-	if _, err := io.ReadFull(stream, resp[:]); err == nil {
-		srvBytes := int64(binary.BigEndian.Uint64(resp[:]))
-		if srvBytes > 0 {
-			sentBytes = srvBytes
-		}
-	}
+	for _, stream := range streams {
+		wg.Add(1)
+		go func(s net.Conn) {
+			defer wg.Done()
+			_ = s.SetDeadline(time.Now().Add(duration + 5*time.Second))
+			if _, err := s.Write(initPkt); err != nil {
+				return
+			}
+			var sent int64
+			for time.Now().Before(deadline) {
+				n, wErr := s.Write(probeHighEntropyChunk)
+				if n > 0 {
+					sent += int64(n)
+				}
+				if wErr != nil {
+					break
+				}
+			}
+			_, _ = s.Write(uploadDoneMarker)
 
+			var resp [8]byte
+			if _, err := io.ReadFull(s, resp[:]); err == nil {
+				srvBytes := int64(binary.BigEndian.Uint64(resp[:]))
+				if srvBytes > 0 {
+					sent = srvBytes
+				}
+			}
+			totalBytes.Add(sent)
+		}(stream)
+	}
+	wg.Wait()
+
+	sentBytes := totalBytes.Load()
 	elapsed := time.Since(start).Seconds()
 	if elapsed <= 0 {
 		elapsed = duration.Seconds()
@@ -343,37 +398,71 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 }
 
 func measureDownloadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, error), stats *Stats, duration time.Duration, durSec int) (int64, error) {
-	stream, err := claimStreamFn(4 * time.Second)
+	streams, err := claimProbeStreams(claimStreamFn, ProbeParallelStreams)
 	if err != nil {
 		return 0, err
 	}
-	defer stream.Close()
-
-	_ = stream.SetDeadline(time.Now().Add(duration + 5*time.Second))
-	if err := protocol.WriteRoutingHeader(stream, protocol.RouteProtoProbe, 0); err != nil {
-		return 0, err
-	}
-
-	cmd := fmt.Sprintf("DNLOAD:%d\n", durSec)
-	if _, err := stream.Write([]byte(cmd)); err != nil {
-		return 0, err
-	}
-
-	buf := make([]byte, 32*1024)
-	start := time.Now()
-	deadline := start.Add(duration)
-	var receivedBytes int64
-	for time.Now().Before(deadline) {
-		n, rErr := stream.Read(buf)
-		if n > 0 {
-			receivedBytes += int64(n)
+	defer func() {
+		for _, s := range streams {
+			_ = s.Close()
 		}
-		if rErr != nil {
-			break
-		}
+	}()
+
+	// Coalesce 3-byte routing header + DNLOAD command into a single write
+	cmdStr := fmt.Sprintf("DNLOAD:%d\n", durSec)
+	initPkt := make([]byte, 3+len(cmdStr))
+	initPkt[0] = protocol.RouteProtoProbe
+	initPkt[1] = 0
+	initPkt[2] = 0
+	copy(initPkt[3:], cmdStr)
+
+	var totalBytes atomic.Int64
+	var firstByteOnce sync.Once
+	var measureStart time.Time
+	var wg sync.WaitGroup
+
+	for _, stream := range streams {
+		wg.Add(1)
+		go func(s net.Conn) {
+			defer wg.Done()
+			_ = s.SetDeadline(time.Now().Add(duration + 5*time.Second))
+			if _, err := s.Write(initPkt); err != nil {
+				return
+			}
+
+			buf := make([]byte, ProbeHighThroughputSz)
+			// Read first chunk to exclude command RTT from download throughput window
+			nFirst, rErr := s.Read(buf)
+			if nFirst > 0 {
+				firstByteOnce.Do(func() {
+					measureStart = time.Now()
+				})
+				totalBytes.Add(int64(nFirst))
+			}
+			if rErr != nil {
+				return
+			}
+
+			streamDeadline := time.Now().Add(duration)
+			for time.Now().Before(streamDeadline) {
+				n, err := s.Read(buf)
+				if n > 0 {
+					totalBytes.Add(int64(n))
+				}
+				if err != nil {
+					break
+				}
+			}
+		}(stream)
 	}
-	elapsed := time.Since(start).Seconds()
-	if elapsed <= 0 {
+	wg.Wait()
+
+	receivedBytes := totalBytes.Load()
+	var elapsed float64
+	if !measureStart.IsZero() {
+		elapsed = time.Since(measureStart).Seconds()
+	}
+	if elapsed <= 0.05 {
 		elapsed = duration.Seconds()
 	}
 	if stats != nil {

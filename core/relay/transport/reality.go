@@ -52,6 +52,42 @@ func (p *PrefixConn) Read(b []byte) (int, error) {
 	return p.Conn.Read(b)
 }
 
+// DrainPrefixTo flushes any buffered prefix bytes directly to w so the underlying
+// TCPConn can then be used with kernel splice(2).
+func (p *PrefixConn) DrainPrefixTo(w io.Writer) (int64, error) {
+	if p.prefix == nil {
+		return 0, nil
+	}
+	n, err := io.Copy(w, p.prefix)
+	p.prefix = nil
+	return n, err
+}
+
+// ReadTCPConn returns the underlying *net.TCPConn once the prefix buffer has been drained.
+func (p *PrefixConn) ReadTCPConn() *net.TCPConn {
+	if p.prefix != nil {
+		return nil
+	}
+	if tc, ok := p.Conn.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := p.Conn.(interface{ ReadTCPConn() *net.TCPConn }); ok {
+		return u.ReadTCPConn()
+	}
+	return nil
+}
+
+// WriteTCPConn returns the underlying *net.TCPConn for zero-copy splice writes.
+func (p *PrefixConn) WriteTCPConn() *net.TCPConn {
+	if tc, ok := p.Conn.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := p.Conn.(interface{ WriteTCPConn() *net.TCPConn }); ok {
+		return u.WriteTCPConn()
+	}
+	return nil
+}
+
 func (p *PrefixConn) CloseWrite() error {
 	if tc, ok := p.Conn.(*net.TCPConn); ok {
 		return tc.CloseWrite()
@@ -122,6 +158,75 @@ func VerifyRealityToken(key [32]byte, token []byte, expectedMagic string) bool {
 	return diff <= realityClockSkew
 }
 
+// buildTLS13ServerFlight constructs a genuine TLS 1.3 ServerHello (0x16) +
+// ChangeCipherSpec (0x14) + Encrypted Handshake ApplicationData (0x17) flight.
+// This ensures stateful DPI middleboxes observe a complete RFC 8446 TLS 1.3 handshake
+// and offload the connection to the router fast-path without throttling.
+func buildTLS13ServerFlight(clientHelloBody []byte, ackToken [32]byte) []byte {
+	// Extract client session_id from ClientHello (starts at offset 38: 1B type + 3B len + 2B ver + 32B random)
+	var sessionID []byte
+	if len(clientHelloBody) >= 39 {
+		sidLen := int(clientHelloBody[38])
+		if sidLen <= 32 && len(clientHelloBody) >= 39+sidLen {
+			sessionID = clientHelloBody[39 : 39+sidLen]
+		}
+	}
+
+	var serverRandom [32]byte
+	_, _ = rand.Read(serverRandom[:])
+
+	var x25519Pub [32]byte
+	_, _ = rand.Read(x25519Pub[:])
+
+	// Extensions: supported_versions (0x002b -> 0x0304) + key_share (0x0033 -> x25519 32B)
+	extLen := 6 + 40 // 46 bytes
+	shBodyLen := 2 + 32 + 1 + len(sessionID) + 2 + 1 + 2 + extLen
+	shRecordLen := 4 + shBodyLen
+
+	// Encrypted handshake record body: 32B ackToken + 96B high-entropy encrypted extensions/cert/finished simulation
+	const appBodyLen = 128
+	var appPadding [appBodyLen - 32]byte
+	_, _ = rand.Read(appPadding[:])
+
+	totalLen := (5 + shRecordLen) + 6 + (5 + appBodyLen)
+	flight := make([]byte, 0, totalLen)
+
+	// 1. TLS 1.3 ServerHello Record (0x16)
+	flight = append(flight,
+		0x16, 0x03, 0x03,
+		byte(shRecordLen>>8), byte(shRecordLen),
+		0x02, // HandshakeType: ServerHello
+		byte(shBodyLen>>16), byte(shBodyLen>>8), byte(shBodyLen),
+		0x03, 0x03, // legacy_version: TLS 1.2
+	)
+	flight = append(flight, serverRandom[:]...)
+	flight = append(flight, byte(len(sessionID)))
+	flight = append(flight, sessionID...)
+	flight = append(flight,
+		0x13, 0x01, // CipherSuite: TLS_AES_128_GCM_SHA256
+		0x00,                         // CompressionMethod: null
+		byte(extLen>>8), byte(extLen), // Extensions length (46)
+		// Extension: supported_versions (0x002b) = TLS 1.3 (0x0304)
+		0x00, 0x2b, 0x00, 0x02, 0x03, 0x04,
+		// Extension: key_share (0x0033) = x25519 (0x001d), 32 bytes
+		0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20,
+	)
+	flight = append(flight, x25519Pub[:]...)
+
+	// 2. TLS 1.3 ChangeCipherSpec Record (0x14)
+	flight = append(flight, 0x14, 0x03, 0x03, 0x00, 0x01, 0x01)
+
+	// 3. TLS 1.3 ApplicationData Record (0x17) carrying ackToken + encrypted handshake padding
+	flight = append(flight,
+		0x17, 0x03, 0x03,
+		byte(appBodyLen>>8), byte(appBodyLen),
+	)
+	flight = append(flight, ackToken[:]...)
+	flight = append(flight, appPadding[:]...)
+
+	return flight
+}
+
 // DialRealityCarrier connects to EntryServerIP:CarrierPort with genuine Chrome uTLS ClientHello
 // embedding the authenticated Reality token in ClientRandom.
 func DialRealityCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, error) {
@@ -174,22 +279,42 @@ func DialRealityCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, 
 		return nil, fmt.Errorf("write reality client hello: %w", err)
 	}
 
-	var ackBuf [37]byte
-	if _, err := io.ReadFull(conn, ackBuf[:]); err != nil {
+	// Read TLS 1.3 Server Flight: skip ServerHello (0x16) and ChangeCipherSpec (0x14)
+	// until we read the ApplicationData (0x17) record carrying the 32-byte ackToken.
+	for i := 0; i < 4; i++ {
+		var recHdr [5]byte
+		if _, err := io.ReadFull(conn, recHdr[:]); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("read reality server record header: %w", err)
+		}
+		recLen := int(binary.BigEndian.Uint16(recHdr[3:5]))
+		if recLen <= 0 || recLen > 16384 {
+			_ = conn.Close()
+			return nil, fmt.Errorf("invalid reality server record length: %d", recLen)
+		}
+		recBody := make([]byte, recLen)
+		if _, err := io.ReadFull(conn, recBody); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("read reality server record body: %w", err)
+		}
+
+		if recHdr[0] == 0x16 || recHdr[0] == 0x14 {
+			continue
+		}
+		if recHdr[0] == 0x17 {
+			if len(recBody) < 32 || !VerifyRealityToken(key, recBody[0:32], realityAckMagic) {
+				_ = conn.Close()
+				return nil, fmt.Errorf("invalid reality server ack token")
+			}
+			_ = conn.SetDeadline(time.Time{})
+			return conn, nil
+		}
 		_ = conn.Close()
-		return nil, fmt.Errorf("read reality server ack: %w", err)
-	}
-	if ackBuf[0] != 0x17 || ackBuf[1] != 0x03 || ackBuf[2] != 0x03 {
-		_ = conn.Close()
-		return nil, fmt.Errorf("unexpected reality ack record header")
-	}
-	if !VerifyRealityToken(key, ackBuf[5:37], realityAckMagic) {
-		_ = conn.Close()
-		return nil, fmt.Errorf("invalid reality server ack token")
+		return nil, fmt.Errorf("unexpected reality server record type: 0x%02x", recHdr[0])
 	}
 
-	_ = conn.SetDeadline(time.Time{})
-	return conn, nil
+	_ = conn.Close()
+	return nil, fmt.Errorf("reality server flight exceeded max records")
 }
 
 type InspectAction int
@@ -248,15 +373,10 @@ func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder
 				_ = conn.Close()
 				return ActionDPIProbe, nil, ackErr
 			}
-			var ackRecord [37]byte
-			ackRecord[0] = 0x17
-			ackRecord[1] = 0x03
-			ackRecord[2] = 0x03
-			binary.BigEndian.PutUint16(ackRecord[3:5], 32)
-			copy(ackRecord[5:37], ackToken[:])
+			flight := buildTLS13ServerFlight(body, ackToken)
 
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if _, wErr := conn.Write(ackRecord[:]); wErr != nil {
+			if _, wErr := conn.Write(flight); wErr != nil {
 				_ = conn.Close()
 				return ActionDPIProbe, nil, wErr
 			}
@@ -299,15 +419,24 @@ func SpliceToOrigin(visitorConn net.Conn, originAddr string) {
 
 	respDone := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(originConn, visitorConn)
+		if pc, ok := visitorConn.(*PrefixConn); ok {
+			_, _ = pc.DrainPrefixTo(originConn)
+			_, _ = io.Copy(originConn, pc.Conn)
+		} else {
+			_, _ = io.Copy(originConn, visitorConn)
+		}
 		if tc, ok := originConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
 	}()
 	go func() {
-		_, _ = io.Copy(visitorConn, originConn)
-		if tc, ok := visitorConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		if pc, ok := visitorConn.(*PrefixConn); ok {
+			_, _ = io.Copy(pc.Conn, originConn)
+		} else {
+			_, _ = io.Copy(visitorConn, originConn)
+		}
+		if hc, ok := visitorConn.(interface{ CloseWrite() error }); ok {
+			_ = hc.CloseWrite()
 		}
 		close(respDone)
 	}()
