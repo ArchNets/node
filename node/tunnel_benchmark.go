@@ -48,9 +48,9 @@ func (s *scanContext) getSignal() string {
 }
 
 type exitSandboxState struct {
-	cancel context.CancelFunc
-	engine *relay.Engine
-	mu     sync.Mutex
+	cancel  context.CancelFunc
+	engines []*relay.Engine
+	mu      sync.Mutex
 }
 
 // BenchmarkCandidate represents a single SNI or Transport/Method variation to benchmark.
@@ -319,26 +319,8 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 		password = t.RelayConfig.Password
 	}
 
-	// Verify tunnel connectivity before running sweep
-	if c.relayDriver != nil {
-		activeEngine := c.relayDriver.GetEngine(t.Id)
-		if activeEngine == nil || activeEngine.Stats.PoolIdleConnections.Load() == 0 {
-			waitExit := time.Now().Add(10 * time.Second)
-			for time.Now().Before(waitExit) {
-				if activeEngine != nil && activeEngine.Stats.PoolIdleConnections.Load() > 0 {
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-				activeEngine = c.relayDriver.GetEngine(t.Id)
-			}
-			if activeEngine == nil || activeEngine.Stats.PoolIdleConnections.Load() == 0 {
-				c.reportScanError(t.Id, "Cannot run benchmark sweep: Exit server (Germany) is not connected to tunnel carrier")
-				return
-			}
-		}
-	}
-
 	results := make([]panel.ScanResultItem, 0, total)
+	exitCheckedIn := false
 
 	for idx, cand := range candidates {
 		select {
@@ -352,8 +334,16 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			continue
 		}
 
-		item := c.evaluateCandidate(ctx, t, cand, sandboxPort, password)
+		// Wait up to 35s on the first candidate so Exit has time to poll /v2/server/:id/tunnel (30s interval)
+		// and launch its parallel sandbox engines. Once Exit checks in once, subsequent candidates need only 4s.
+		waitTimeout := 4 * time.Second
+		if !exitCheckedIn {
+			waitTimeout = 35 * time.Second
+		}
+
+		item := c.evaluateCandidate(ctx, t, cand, sandboxPort, password, waitTimeout)
 		if item != nil {
+			exitCheckedIn = true
 			results = append(results, *item)
 			sort.SliceStable(results, func(i, j int) bool {
 				return results[i].Score > results[j].Score
@@ -400,11 +390,15 @@ func (c *TunnelController) evaluateCandidate(
 	cand BenchmarkCandidate,
 	sandboxPort int,
 	password string,
+	waitTimeout time.Duration,
 ) *panel.ScanResultItem {
 	originRTT := measureOriginTCPHandshake(cand.OriginIP, 443, 1200*time.Millisecond)
 
 	direction := "reverse"
 	exitIP := t.ExitServerIP
+	if exitIP == "" {
+		exitIP = t.RemoteIP
+	}
 	if t.RelayConfig != nil {
 		if t.RelayConfig.Direction != "" {
 			direction = t.RelayConfig.Direction
@@ -414,12 +408,13 @@ func (c *TunnelController) evaluateCandidate(
 		}
 	}
 
+	candPort := sandboxPort + cand.Index
 	sandboxEngine := relay.NewEngine(relay.Config{
 		TunnelID:           t.Id*1000 + cand.Index,
 		Role:               "entry",
 		Direction:          direction,
 		Transport:          cand.Transport,
-		CarrierPort:        sandboxPort,
+		CarrierPort:        candPort,
 		ListenIP:           "0.0.0.0",
 		ExitServerIP:       exitIP,
 		SNI:                cand.SNI,
@@ -428,13 +423,13 @@ func (c *TunnelController) evaluateCandidate(
 		UseHalfDuplex:      cand.UseHalfDuplex,
 		UseFisher:          cand.UseFisher,
 		FisherConnections:  3,
-		MinHeldConnections: 4,
+		MinHeldConnections: 6,
 		Logger:             c.logger,
 	})
 
 	var sample *telemetry.BandwidthSample
 	if err := sandboxEngine.Start(); err == nil {
-		waitDeadline := time.Now().Add(1500 * time.Millisecond)
+		waitDeadline := time.Now().Add(waitTimeout)
 		for time.Now().Before(waitDeadline) {
 			select {
 			case <-ctx.Done():
@@ -569,11 +564,22 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 			sandboxPort = cmd.TcpTestPort
 		}
 		password := "archnet-default-secret"
-		if t.RelayConfig != nil && t.RelayConfig.Password != "" {
-			password = t.RelayConfig.Password
-		}
+		direction := "reverse"
 		entryIP := t.RemoteIP
+		if t.RelayConfig != nil {
+			if t.RelayConfig.Password != "" {
+				password = t.RelayConfig.Password
+			}
+			if t.RelayConfig.Direction != "" {
+				direction = t.RelayConfig.Direction
+			}
+			if t.RelayConfig.EntryOverrideIP != "" {
+				entryIP = t.RelayConfig.EntryOverrideIP
+			}
+		}
 
+		// Start all candidate sandbox engines concurrently on their dedicated port (sandboxPort + cand.Index)
+		// so Entry and Exit never suffer from 30-second config poll clock skew.
 		for _, cand := range candidates {
 			select {
 			case <-ctx.Done():
@@ -581,11 +587,14 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 			default:
 			}
 
+			candPort := sandboxPort + cand.Index
 			eng := relay.NewEngine(relay.Config{
 				TunnelID:           t.Id*1000 + cand.Index,
 				Role:               "exit",
+				Direction:          direction,
 				Transport:          cand.Transport,
-				CarrierPort:        sandboxPort,
+				CarrierPort:        candPort,
+				ListenIP:           "0.0.0.0",
 				EntryServerIP:      entryIP,
 				TargetIP:           "127.0.0.1",
 				SNI:                cand.SNI,
@@ -593,22 +602,19 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				UseHalfDuplex:      cand.UseHalfDuplex,
 				UseFisher:          cand.UseFisher,
 				FisherConnections:  3,
-				MinHeldConnections: 4,
+				MinHeldConnections: 6,
 				Logger:             c.logger,
 			})
-			state.mu.Lock()
-			state.engine = eng
-			state.mu.Unlock()
-
-			_ = eng.Start()
-
-			select {
-			case <-ctx.Done():
-				_ = eng.Close()
-				return
-			case <-time.After(BenchmarkSlotDur):
-				_ = eng.Close()
+			if err := eng.Start(); err == nil {
+				state.mu.Lock()
+				state.engines = append(state.engines, eng)
+				state.mu.Unlock()
 			}
+		}
+
+		select {
+		case <-ctx.Done():
+		case <-time.After(120 * time.Second):
 		}
 	}()
 }
@@ -627,9 +633,11 @@ func (c *TunnelController) stopEchoServers(tunnelId int) {
 		state.cancel()
 	}
 	state.mu.Lock()
-	if state.engine != nil {
-		_ = state.engine.Close()
-		state.engine = nil
+	for _, eng := range state.engines {
+		if eng != nil {
+			_ = eng.Close()
+		}
 	}
+	state.engines = nil
 	state.mu.Unlock()
 }
