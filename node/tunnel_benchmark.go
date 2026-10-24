@@ -66,7 +66,7 @@ type BenchmarkCandidate struct {
 
 // BuildBenchmarkCandidates constructs the ordered list of benchmark profiles for a ScanCommand.
 func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnelConfig) []BenchmarkCandidate {
-	mode := "hospital"
+	mode := "methods"
 	if cmd != nil && cmd.ScanMode != "" {
 		mode = strings.ToLower(strings.TrimSpace(cmd.ScanMode))
 	}
@@ -74,6 +74,13 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 	baseSNI := ""
 	if baseCfg != nil && baseCfg.SNI != "" {
 		baseSNI = baseCfg.SNI
+	}
+	if baseSNI == "" {
+		if presets := telemetry.GetActiveSNIPresets(); len(presets) > 0 {
+			baseSNI = presets[0].SNI
+		} else {
+			baseSNI = "divar.ir"
+		}
 	}
 
 	var candidates []BenchmarkCandidate
@@ -85,12 +92,12 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 			hd        bool
 			fisher    bool
 		}{
-			{"reverse-reality", "Reverse Reality (Anti-DPI TLS 1.3)", true, true},
 			{"stealth", "Stealth (Noise NNpsk0 + Random Padding)", true, false},
+			{"quic-reverse", "QUIC Reverse (Native UDP Streams)", false, false},
 			{"ws-reverse", "WebSocket Reverse (Nginx Decoy)", true, false},
 			{"wss-reverse", "WSS Reverse (TLS 1.3 + Nginx Decoy)", true, false},
-			{"quic-reverse", "QUIC Reverse (Native UDP Streams)", false, false},
-			{"reverse-reality", "Reverse Reality (Base Full-Duplex)", false, false},
+			{"tls-reverse", "TLS 1.3 Reverse", true, false},
+			{"reverse-reality", "Reverse Reality (Anti-DPI TLS 1.3)", true, true},
 		}
 		for i, v := range variations {
 			candidates = append(candidates, BenchmarkCandidate{
@@ -123,32 +130,47 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 		if len(snis) == 0 {
 			snis = telemetry.GetActiveSNIPresets()
 		}
+		if len(snis) > 4 {
+			snis = snis[:4]
+		}
 
 		idx := 1
-		for _, preset := range snis {
-			// Combination A: Anti-DPI Combo (HalfDuplex + Fisher)
-			candidates = append(candidates, BenchmarkCandidate{
-				Index:         idx,
-				SNI:           preset.SNI,
-				OriginIP:      preset.OriginIP,
-				Transport:     "reverse-reality",
-				MethodLabel:   "Reverse Reality + HalfDuplex + Fisher",
-				UseHalfDuplex: true,
-				UseFisher:     true,
-			})
-			idx++
+		// 1. Stealth (SNI-independent)
+		candidates = append(candidates, BenchmarkCandidate{
+			Index:         idx,
+			SNI:           "",
+			OriginIP:      "",
+			Transport:     "stealth",
+			MethodLabel:   "Stealth (Noise NNpsk0 + Random Padding)",
+			UseHalfDuplex: true,
+			UseFisher:     false,
+		})
+		idx++
 
-			// Combination B: Base Full-Duplex (Without HalfDuplex or Fisher)
-			candidates = append(candidates, BenchmarkCandidate{
-				Index:         idx,
-				SNI:           preset.SNI,
-				OriginIP:      preset.OriginIP,
-				Transport:     "reverse-reality",
-				MethodLabel:   "Reverse Reality (Full-Duplex)",
-				UseHalfDuplex: false,
-				UseFisher:     false,
-			})
-			idx++
+		// 2. Test QUIC, WSS, WS, and Reverse Reality across the top domains
+		for _, preset := range snis {
+			for _, m := range []struct {
+				transport string
+				label     string
+				hd        bool
+				fisher    bool
+			}{
+				{"quic-reverse", "QUIC Reverse (UDP)", false, false},
+				{"wss-reverse", "WSS Reverse (TLS 1.3 + Decoy)", true, false},
+				{"ws-reverse", "WebSocket Reverse (Decoy)", true, false},
+				{"reverse-reality", "Reverse Reality (Anti-DPI TLS 1.3)", true, true},
+			} {
+				candidates = append(candidates, BenchmarkCandidate{
+					Index:         idx,
+					SNI:           preset.SNI,
+					OriginIP:      preset.OriginIP,
+					Transport:     m.transport,
+					MethodLabel:   m.label,
+					UseHalfDuplex: m.hd,
+					UseFisher:     m.fisher,
+				})
+				idx++
+			}
 		}
 
 	default:
