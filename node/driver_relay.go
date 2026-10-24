@@ -16,6 +16,8 @@ type RelayDriver struct {
 	mu             sync.Mutex
 	engines        map[int]*relay.Engine
 	lastErrors     map[int]string
+	unsentUpload   map[int]int64
+	unsentDownload map[int]int64
 	pendingSamples map[int]*panel.BandwidthSamplePayload
 	samplesMu      sync.Mutex
 	logger         *log.Entry
@@ -25,9 +27,48 @@ func NewRelayDriver(logger *log.Entry) *RelayDriver {
 	return &RelayDriver{
 		engines:        make(map[int]*relay.Engine),
 		lastErrors:     make(map[int]string),
+		unsentUpload:   make(map[int]int64),
+		unsentDownload: make(map[int]int64),
 		pendingSamples: make(map[int]*panel.BandwidthSamplePayload),
 		logger:         logger,
 	}
+}
+
+func (d *RelayDriver) harvestUnsentLocked(tunnelId int, eng *relay.Engine) {
+	if eng == nil || eng.Stats == nil {
+		return
+	}
+	up, down := eng.Stats.SnapshotDelta()
+	if up > 0 {
+		d.unsentUpload[tunnelId] += up
+	}
+	if down > 0 {
+		d.unsentDownload[tunnelId] += down
+	}
+}
+
+// RefundStats restores unsent traffic deltas and probe samples if a panel API status push fails.
+func (d *RelayDriver) RefundStats(statuses []panel.TunnelStatus) {
+	d.mu.Lock()
+	for _, st := range statuses {
+		if st.TotalUpload > 0 {
+			d.unsentUpload[st.TunnelId] += st.TotalUpload
+		}
+		if st.TotalDownload > 0 {
+			d.unsentDownload[st.TunnelId] += st.TotalDownload
+		}
+	}
+	d.mu.Unlock()
+
+	d.samplesMu.Lock()
+	for _, st := range statuses {
+		if st.ProbeSample != nil {
+			if _, exists := d.pendingSamples[st.TunnelId]; !exists {
+				d.pendingSamples[st.TunnelId] = st.ProbeSample
+			}
+		}
+	}
+	d.samplesMu.Unlock()
 }
 
 func (d *RelayDriver) QueueProbeSample(tunnelID int, sample *telemetry.BandwidthSample) {
@@ -52,8 +93,9 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Stop existing instance if running
+	// Stop existing instance if running, harvesting any unsent traffic delta first
 	if old, ok := d.engines[t.Id]; ok && old != nil {
+		d.harvestUnsentLocked(t.Id, old)
 		_ = old.Close()
 		delete(d.engines, t.Id)
 	}
@@ -220,6 +262,7 @@ func (d *RelayDriver) Stop(tunnelId int) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if eng, ok := d.engines[tunnelId]; ok && eng != nil {
+		d.harvestUnsentLocked(tunnelId, eng)
 		_ = eng.Close()
 		delete(d.engines, tunnelId)
 		d.logger.WithField("tunnelId", tunnelId).Info("[Relay] Native Go Relay Engine stopped")
@@ -232,6 +275,7 @@ func (d *RelayDriver) StopAll() {
 	defer d.mu.Unlock()
 	for id, eng := range d.engines {
 		if eng != nil {
+			d.harvestUnsentLocked(id, eng)
 			_ = eng.Close()
 			d.logger.WithField("tunnelId", id).Info("RelayDriver: stopped engine instance")
 		}
@@ -243,6 +287,10 @@ func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnli
 	d.mu.Lock()
 	eng := d.engines[t.Id]
 	lastErr := d.lastErrors[t.Id]
+	carriedUp := d.unsentUpload[t.Id]
+	carriedDown := d.unsentDownload[t.Id]
+	delete(d.unsentUpload, t.Id)
+	delete(d.unsentDownload, t.Id)
 	d.mu.Unlock()
 
 	if eng == nil {
@@ -251,9 +299,11 @@ func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnli
 			probeStatus = "ERROR: " + lastErr
 		}
 		return panel.TunnelStatus{
-			TunnelId:    t.Id,
-			Online:      false,
-			ProbeStatus: probeStatus,
+			TunnelId:      t.Id,
+			Online:        false,
+			TotalUpload:   carriedUp,
+			TotalDownload: carriedDown,
+			ProbeStatus:   probeStatus,
 		}, true
 	}
 
@@ -262,6 +312,8 @@ func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnli
 		online = eng.IsAlive() && (eng.Stats.PoolIdleConnections.Load() > 0 || eng.Stats.ActiveConnections.Load() > 0)
 	}
 	deltaUpload, deltaDownload := eng.Stats.SnapshotDelta()
+	deltaUpload += carriedUp
+	deltaDownload += carriedDown
 	curUpBps := eng.Stats.CurrentUploadBps.Load()
 	curDownBps := eng.Stats.CurrentDownloadBps.Load()
 	latency := int(eng.Stats.LatencyMs.Load())

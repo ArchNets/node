@@ -3,6 +3,7 @@ package routing
 import (
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/archnets/node/core/relay/telemetry"
@@ -60,9 +61,9 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 			closeHalf(stream)
 			done <- struct{}{}
 		}()
-		var counter = &stats.TotalUploadBytes
-		if stats == nil {
-			counter = nil
+		var counter *atomic.Int64
+		if stats != nil {
+			counter = &stats.TotalUploadBytes
 		}
 		_, _ = telemetry.SpliceCopy(stream, clientConn, counter)
 	}()
@@ -71,9 +72,9 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 			closeHalf(clientConn)
 			done <- struct{}{}
 		}()
-		var counter = &stats.TotalDownloadBytes
-		if stats == nil {
-			counter = nil
+		var counter *atomic.Int64
+		if stats != nil {
+			counter = &stats.TotalDownloadBytes
 		}
 		_, _ = telemetry.SpliceCopy(clientConn, stream, counter)
 	}()
@@ -115,9 +116,9 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 			closeHalf(targetConn)
 			done <- struct{}{}
 		}()
-		var counter = &stats.TotalUploadBytes
-		if stats == nil {
-			counter = nil
+		var counter *atomic.Int64
+		if stats != nil {
+			counter = &stats.TotalUploadBytes
 		}
 		_, _ = telemetry.SpliceCopy(targetConn, stream, counter)
 	}()
@@ -126,9 +127,9 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 			closeHalf(stream)
 			done <- struct{}{}
 		}()
-		var counter = &stats.TotalDownloadBytes
-		if stats == nil {
-			counter = nil
+		var counter *atomic.Int64
+		if stats != nil {
+			counter = &stats.TotalDownloadBytes
 		}
 		_, _ = telemetry.SpliceCopy(stream, targetConn, counter)
 	}()

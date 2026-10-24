@@ -508,10 +508,12 @@ func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder
 	return ActionDPIProbe, NewPrefixConn(conn, captured), nil
 }
 
-// SpliceToOrigin dials the camouflage origin server and splices visitor streams with Linux splice(2).
+// SpliceToOrigin dials the camouflage origin server and splices visitor streams with a strict
+// 15s deadline and 512 KiB cap so active GFW probes see the genuine origin site without allowing
+// scanners to hold zombie sockets or drain Iran server bandwidth.
 func SpliceToOrigin(visitorConn net.Conn, originAddr string) {
 	defer visitorConn.Close()
-	_ = visitorConn.SetDeadline(time.Time{})
+	_ = visitorConn.SetDeadline(time.Now().Add(15 * time.Second))
 
 	if originAddr == "" {
 		return
@@ -527,14 +529,17 @@ func SpliceToOrigin(visitorConn net.Conn, originAddr string) {
 	}
 	defer originConn.Close()
 	TuneTCPConn(originConn)
+	_ = originConn.SetDeadline(time.Now().Add(15 * time.Second))
+
+	const maxOriginSpliceBytes = 512 * 1024 // 512 KiB max per probe
 
 	respDone := make(chan struct{})
 	go func() {
 		if pc, ok := visitorConn.(*PrefixConn); ok {
 			_, _ = pc.DrainPrefixTo(originConn)
-			_, _ = io.Copy(originConn, pc.Conn)
+			_, _ = io.Copy(originConn, io.LimitReader(pc.Conn, maxOriginSpliceBytes))
 		} else {
-			_, _ = io.Copy(originConn, visitorConn)
+			_, _ = io.Copy(originConn, io.LimitReader(visitorConn, maxOriginSpliceBytes))
 		}
 		if tc, ok := originConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
@@ -542,9 +547,9 @@ func SpliceToOrigin(visitorConn net.Conn, originAddr string) {
 	}()
 	go func() {
 		if pc, ok := visitorConn.(*PrefixConn); ok {
-			_, _ = io.Copy(pc.Conn, originConn)
+			_, _ = io.Copy(pc.Conn, io.LimitReader(originConn, maxOriginSpliceBytes))
 		} else {
-			_, _ = io.Copy(visitorConn, originConn)
+			_, _ = io.Copy(visitorConn, io.LimitReader(originConn, maxOriginSpliceBytes))
 		}
 		if hc, ok := visitorConn.(interface{ CloseWrite() error }); ok {
 			_ = hc.CloseWrite()

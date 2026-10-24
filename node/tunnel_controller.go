@@ -355,16 +355,28 @@ func (c *TunnelController) statusReport() error {
 		if probeIP == "" {
 			probeIP = t.ExitServerIP
 		}
-		latency, online := c.pingTarget(probeIP, probePort)
 
 		// Check if handled by registered pluggable driver
 		driver := GetTunnelDriver(t.Method)
 		if driver != nil {
+			var latency int
+			var online bool
+			if c.relayDriver != nil {
+				if eng := c.relayDriver.GetEngine(t.Id); eng != nil && eng.Stats.LatencyMs.Load() > 0 {
+					latency = int(eng.Stats.LatencyMs.Load())
+					online = true
+				}
+			}
+			if latency <= 0 {
+				latency, online = c.pingTarget(probeIP, probePort)
+			}
 			if st, handled := driver.CollectStats(t, latency, online); handled {
 				statuses = append(statuses, st)
 				continue
 			}
 		}
+
+		latency, online := c.pingTarget(probeIP, probePort)
 
 		var deltaUpload, deltaDownload int64
 
@@ -435,6 +447,9 @@ func (c *TunnelController) statusReport() error {
 			Tunnels: statuses,
 		})
 		if err != nil {
+			if c.relayDriver != nil {
+				c.relayDriver.RefundStats(statuses)
+			}
 			c.logger.WithField("err", err).Warn("Tunnel: Report status failed")
 		} else {
 			c.logger.WithFields(log.Fields{

@@ -113,8 +113,8 @@ func ConfigureDontFragmentProbe(c net.Conn, testMTU int) {
 	}
 }
 
-// InspectKernelPMTU queries the Linux kernel's TCP_INFO structure on the socket to read
-// the discovered Path MTU (tcpi_pmtu) and active Send MSS (tcpi_snd_mss).
+// InspectKernelPMTU queries the Linux kernel's TCP_INFO and IP_MTU socket options to read
+// the discovered Path MTU (tcpi_pmtu / IP_MTU) and active Send MSS (tcpi_snd_mss).
 func InspectKernelPMTU(c net.Conn) (pmtu int, sndMSS int) {
 	inspectOne := func(tc *net.TCPConn) (int, int) {
 		if tc == nil {
@@ -126,8 +126,13 @@ func InspectKernelPMTU(c net.Conn) (pmtu int, sndMSS int) {
 		}
 		var p, m int
 		_ = raw.Control(func(fd uintptr) {
+			if ipMTU, err := unix.GetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MTU); err == nil && ipMTU >= 576 {
+				p = ipMTU
+			}
 			if info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO); err == nil && info != nil {
-				p = int(info.Pmtu)
+				if p == 0 || (int(info.Pmtu) >= 576 && int(info.Pmtu) < p) {
+					p = int(info.Pmtu)
+				}
 				m = int(info.Snd_mss)
 				// On loopback (pmtu=65535) or when MSS clamping is active on the route/socket,
 				// derive the effective MTU from Snd_mss if it is clamped below standard 1500-byte Ethernet MSS (1448 with timestamps).

@@ -20,4 +20,6 @@ deploy/**/node
 deploy/**/cloudflared
 __pycache__/
 *.pyc
+/main
+node/main
 
