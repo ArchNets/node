@@ -452,6 +452,11 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 		waitTimeout := 4 * time.Second
 		if !exitCheckedIn {
 			waitTimeout = 35 * time.Second
+		} else {
+			spec := transport.GetTransportSpec(cand.Transport)
+			if spec.IsPacket || spec.IsQuic || spec.NeedsTLSServerCfg {
+				waitTimeout = 12 * time.Second
+			}
 		}
 
 		item := c.evaluateCandidate(ctx, t, cand, sandboxPort, password, waitTimeout)
@@ -515,31 +520,7 @@ func (c *TunnelController) evaluateCandidate(
 		"port":      sandboxPort + cand.Index,
 	}).Info("[Benchmark] >>> Starting candidate benchmark")
 
-	// If candidate requires an SSL certificate (tls-reverse, wss-reverse, wssmux) but none is configured on the tunnel,
-	// mark as skipped rather than generating a fake certificate against an arbitrary domain.
 	spec := transport.GetTransportSpec(cand.Transport)
-	if spec.NeedsTLSServerCfg && (t.RelayConfig == nil || (t.RelayConfig.CertFile == "" && t.RelayConfig.CertMode != "self" && t.RelayConfig.CertMode != "http" && t.RelayConfig.CertMode != "dns")) {
-		c.logger.WithFields(log.Fields{
-			"tunnel_id": t.Id,
-			"idx":       cand.Index,
-			"transport": cand.Transport,
-		}).Info("[Benchmark] Candidate skipped (requires domain SSL certificate)")
-		return &panel.ScanResultItem{
-			ProtocolNumber: cand.Index,
-			Type:           cand.Transport,
-			SNI:            cand.SNI,
-			MethodLabel:    cand.MethodLabel,
-			UseHalfDuplex:  cand.UseHalfDuplex,
-			UseFisher:      cand.UseFisher,
-			LatencyMs:      0,
-			UploadSpeed:    0,
-			DownloadSpeed:  0,
-			PacketLoss:     100,
-			Status:         "skipped",
-			Detail:         "Skipped (Requires SSL Certificate)",
-			Score:          0,
-		}
-	}
 
 	originRTT := measureOriginTCPHandshake(cand.OriginIP, 443, 1200*time.Millisecond)
 
@@ -559,6 +540,11 @@ func (c *TunnelController) evaluateCandidate(
 	}
 
 	candPort := sandboxPort + cand.Index
+	certMode := ""
+	if spec.NeedsTLSServerCfg {
+		certMode = "self"
+	}
+
 	sandboxEngine := relay.NewEngine(relay.Config{
 		TunnelID:           t.Id*1000 + cand.Index,
 		Role:               "entry",
@@ -574,6 +560,7 @@ func (c *TunnelController) evaluateCandidate(
 		UseFisher:          false,
 		FisherConnections:  1,
 		MinHeldConnections: 1,
+		CertMode:           certMode,
 		Logger:             c.logger,
 	})
 
@@ -604,6 +591,7 @@ func (c *TunnelController) evaluateCandidate(
 			}).Warn("[Benchmark] Candidate failed to establish warm reverse connection (exit did not check in)")
 		}
 		_ = sandboxEngine.Close()
+		time.Sleep(150 * time.Millisecond) // Allow port release between sequential candidates
 	} else {
 		c.logger.WithFields(log.Fields{
 			"tunnel_id": t.Id,
@@ -801,6 +789,11 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 
 			// For Direct mode, Exit is the Listener, so ListenIP is exitBindIP
 			// For Reverse mode, Exit dials Entry, so EntryServerIP is entryIP
+			exitCertMode := ""
+			if transport.GetTransportSpec(cand.Transport).NeedsTLSServerCfg {
+				exitCertMode = "self"
+			}
+
 			eng := relay.NewEngine(relay.Config{
 				TunnelID:           t.Id*1000 + cand.Index,
 				Role:               "exit",
@@ -816,6 +809,7 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				UseFisher:          false,
 				FisherConnections:  1,
 				MinHeldConnections: 1,
+				CertMode:           exitCertMode,
 				Logger:             c.logger,
 			})
 			if err := eng.Start(); err == nil {
