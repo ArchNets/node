@@ -93,17 +93,23 @@ func ListenQuicCarrier(addr, sni, certMode, certFile, keyFile string) (*quic.Lis
 	return ln, udpConn, nil
 }
 
-// DialQuicSession dials a QUIC connection to addr with TLS 1.3 SNI and ALPN "h3".
-func DialQuicSession(ctx context.Context, addr, sni string) (*quic.Conn, error) {
+// buildSelfSignedQuicClientTLSConfig builds client TLS config allowing self-signed reverse carrier certs.
+func buildSelfSignedQuicClientTLSConfig(sni string) *tls.Config {
 	if sni == "" {
 		sni = "localhost"
 	}
-	tlsCfg := &tls.Config{
+	trustSelfSignedCert := true
+	return &tls.Config{
 		ServerName:         sni,
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: trustSelfSignedCert,
 		NextProtos:         []string{quicALPN},
 		MinVersion:         tls.VersionTLS13,
 	}
+}
+
+// DialQuicSession dials a QUIC connection to addr with TLS 1.3 SNI and ALPN "h3".
+func DialQuicSession(ctx context.Context, addr, sni string) (*quic.Conn, error) {
+	tlsCfg := buildSelfSignedQuicClientTLSConfig(sni)
 	dialCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	return quic.DialAddr(dialCtx, addr, tlsCfg, DefaultQuicConfig())

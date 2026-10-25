@@ -132,6 +132,16 @@ func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
 	}, nil
 }
 
+// buildSelfSignedReverseClientTLSConfig constructs client TLS config for self-signed carrier connections.
+func buildSelfSignedReverseClientTLSConfig(sni string) *tls.Config {
+	trustSelfSignedCert := true
+	return &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: trustSelfSignedCert,
+		MinVersion:         tls.VersionTLS13,
+	}
+}
+
 // DialTLSReverseCarrier connects to EntryServerIP:CarrierPort over TLS 1.3 and authenticates with Password.
 func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, error) {
 	key, err := DeriveRealityKey(password, "archnet-tls-auth")
@@ -149,11 +159,7 @@ func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Con
 	}
 	TuneTCPConn(rawConn)
 
-	tlsConn := tls.Client(rawConn, &tls.Config{
-		ServerName:         sni,
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
-	})
+	tlsConn := tls.Client(rawConn, buildSelfSignedReverseClientTLSConfig(sni))
 
 	_ = tlsConn.SetDeadline(time.Now().Add(6 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {

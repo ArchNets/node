@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -25,9 +26,11 @@ const (
 	xdiMetaLen                = 5 // [4B tunnelTag][1B direction]
 )
 
-// deriveXDITag derives a deterministic 4-byte tunnel tag from the shared password.
-func deriveXDITag(password string) [4]byte {
-	sum := sha256.Sum256([]byte("archnet-xdi-tag:" + password))
+// deriveXDITag derives a deterministic 4-byte tunnel tag from the shared token.
+func deriveXDITag(token string) [4]byte {
+	mac := hmac.New(sha256.New, []byte("archnet-xdi-tag-salt"))
+	mac.Write([]byte(token))
+	sum := mac.Sum(nil)
 	var tag [4]byte
 	copy(tag[:], sum[:4])
 	return tag
@@ -224,7 +227,7 @@ func (c *pckPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		host = addr.String()
 	}
 	dstPort := c.peerPort
-	if pNum, pErr := strconv.Atoi(portStr); pErr == nil && pNum > 0 {
+	if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil && pNum > 0 && pNum <= 65535 {
 		dstPort = uint16(pNum)
 	}
 	ipAddr, err := net.ResolveIPAddr("ip4", host)
@@ -418,10 +421,11 @@ func ListenPCKCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn,
  if err != nil || host == "" {
   host = "0.0.0.0"
  }
- port, _ := strconv.Atoi(portStr)
- if os.Geteuid() == 0 && port > 0 && host != "127.0.0.1" {
+ pNum, pErr := strconv.ParseUint(portStr, 10, 16)
+ if os.Geteuid() == 0 && pErr == nil && pNum > 0 && pNum <= 65535 && host != "127.0.0.1" {
+  port := uint16(pNum)
   if rawConn, rErr := net.ListenPacket("ip4:tcp", host); rErr == nil {
-   wrapped := newPCKPacketConn(rawConn, true, uint16(port), 0)
+   wrapped := newPCKPacketConn(rawConn, true, port, 0)
    return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
   }
  }
@@ -434,14 +438,15 @@ func DialPCKCarrier(ctx context.Context, addr, password string) (net.Conn, error
  if err != nil {
   host = addr
  }
- port, _ := strconv.Atoi(portStr)
- if os.Geteuid() == 0 && port > 0 && host != "127.0.0.1" {
+ pNum, pErr := strconv.ParseUint(portStr, 10, 16)
+ if os.Geteuid() == 0 && pErr == nil && pNum > 0 && pNum <= 65535 && host != "127.0.0.1" {
+  port := uint16(pNum)
   if rawConn, rErr := net.ListenPacket("ip4:tcp", "0.0.0.0"); rErr == nil {
    var rnd [2]byte
    _, _ = rand.Read(rnd[:])
    localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
-   wrapped := newPCKPacketConn(rawConn, false, localPort, uint16(port))
-   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+   wrapped := newPCKPacketConn(rawConn, false, localPort, port)
+   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: int(port)}
    return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
   }
  }

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -86,11 +87,13 @@ const decoy404Modern = "<html>\r\n<head><title>404 Not Found</title></head>\r\n"
 
 // ServeDecoyHTTP writes a deterministic per-tunnel nginx static server response to conn
 // when an unauthenticated visitor or GFW probe sends an HTTP request to a WS/WSS carrier port.
-func ServeDecoyHTTP(conn net.Conn, reqHeader string, password string) {
+func ServeDecoyHTTP(conn net.Conn, reqHeader string, seedToken string) {
 	defer conn.Close()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 
-	h := sha256.Sum256([]byte("archnet-decoy\x00" + password))
+	mac := hmac.New(sha256.New, []byte("archnet-decoy-salt"))
+	mac.Write([]byte(seedToken))
+	h := mac.Sum(nil)
 	build := decoyNginxBuilds[int(h[0])%len(decoyNginxBuilds)]
 
 	serverHdr := "nginx"

@@ -54,9 +54,10 @@ func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath str
 
  var conn net.Conn = rawConn
  if useTLS {
+  trustSelfSignedCert := true
   uConn := utls.UClient(rawConn, &utls.Config{
    ServerName:         sni,
-   InsecureSkipVerify: true,
+   InsecureSkipVerify: trustSelfSignedCert,
    NextProtos:         []string{"http/1.1"},
   }, utls.HelloChrome_Auto)
   if err := uConn.Handshake(); err != nil {
