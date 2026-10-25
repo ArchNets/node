@@ -893,3 +893,37 @@ func TestTCPMuxAndKCPTransportsEndToEnd(t *testing.T) {
 		})
 	}
 }
+
+func TestL3GRECodecAndSubnet(t *testing.T) {
+	ifaceE, localE, peerE := transport.DeriveL3Subnet(42, "entry")
+	_, localX, peerX := transport.DeriveL3Subnet(42, "exit")
+	if ifaceE != "antun42" || localE != "10.10.43.1/30" || peerE != "10.10.43.2" {
+		t.Fatalf("unexpected entry subnet: %s %s %s", ifaceE, localE, peerE)
+	}
+	if localX != "10.10.43.2/30" || peerX != "10.10.43.1" {
+		t.Fatalf("unexpected exit subnet: %s %s", localX, peerX)
+	}
+
+	aead, err := transport.NewL3PacketCodec("l3-test-secret-42")
+	if err != nil {
+		t.Fatalf("NewL3PacketCodec failed: %v", err)
+	}
+
+	// Mock IPv4 packet (version nibble = 4, 28 bytes)
+	rawIPv4 := make([]byte, 28)
+	rawIPv4[0] = 0x45
+	copy(rawIPv4[20:], []byte("PINGDATA"))
+
+	wire, err := transport.SealL3GREPacket(aead, 1, rawIPv4)
+	if err != nil {
+		t.Fatalf("SealL3GREPacket failed: %v", err)
+	}
+
+	dec, err := transport.OpenL3GREPacket(aead, wire)
+	if err != nil {
+		t.Fatalf("OpenL3GREPacket failed: %v", err)
+	}
+	if !bytes.Equal(dec, rawIPv4) {
+		t.Fatalf("decrypted packet mismatch: got %x, want %x", dec, rawIPv4)
+	}
+}

@@ -20,28 +20,47 @@ const (
 	udpPktDATA byte = 0x03
 	udpPktFIN  byte = 0x04
 	udpPktFEC  byte = 0x05
+	udpPktNACK byte = 0x06
+	udpPktTUN  byte = 0x07 // Direct Layer-3 TUN IP/GRE datagram frame
 
 	udpMaxPayload = 1350
+	txRingSize    = 512
 )
 
-// UDPSessionConn adapts a peer's UDP flow on a shared *net.UDPConn (or dedicated *net.UDPConn)
-// into a reliable/FEC-protected net.Conn suitable for MuxSession or direct stream relaying.
+type fecBlockGroup struct {
+	shards    [4][]byte
+	hasShard  [4]bool
+	count     int
+	parity    []byte
+	recovered bool
+}
+
+// UDPSessionConn adapts a peer's UDP/PCK/XDI flow into an ARQ+FEC reliable, in-order net.Conn
+// for MuxSession, while also supporting direct datagram bypass (udpPktTUN) for Layer-3 TUN packets.
 type UDPSessionConn struct {
-	pconn        net.PacketConn
-	remoteAddr   net.Addr
-	ownsConn     bool
-	useFEC       bool
-	sessionID    uint32
-	txSeq        atomic.Uint32
-	rxQueue      chan []byte
-	closeOnce    sync.Once
-	closeCh      chan struct{}
-	closed       atomic.Bool
-	readBuf      []byte
-	readMu       sync.Mutex
-	writeMu      sync.Mutex
-	readDeadline atomic.Value // time.Time
-	fecGroup     [][]byte
+	pconn          net.PacketConn
+	remoteAddr     net.Addr
+	ownsConn       bool
+	useFEC         bool
+	sessionID      uint32
+	txSeq          atomic.Uint32
+	rxQueue        chan []byte
+	closeOnce      sync.Once
+	closeCh        chan struct{}
+	closed         atomic.Bool
+	readBuf        []byte
+	readMu         sync.Mutex
+	writeMu        sync.Mutex
+	readDeadline   atomic.Value // time.Time
+	fecGroup       [][]byte
+	txRingMu       sync.Mutex
+	txRing         [txRingSize][]byte
+	rxMu           sync.Mutex
+	nextRxSeq      uint16
+	reorderBuf     map[uint16][]byte
+	fecGroups      map[uint16]*fecBlockGroup
+	gapSince       time.Time
+	tunPacketHook  atomic.Pointer[func([]byte)]
 }
 
 func newUDPSessionConn(pconn net.PacketConn, remote net.Addr, sessionID uint32, ownsConn, useFEC bool) *UDPSessionConn {
@@ -51,11 +70,37 @@ func newUDPSessionConn(pconn net.PacketConn, remote net.Addr, sessionID uint32, 
 		ownsConn:   ownsConn,
 		useFEC:     useFEC,
 		sessionID:  sessionID,
-		rxQueue:    make(chan []byte, 2048),
+		rxQueue:    make(chan []byte, 4096),
 		closeCh:    make(chan struct{}),
+		nextRxSeq:  1,
+		reorderBuf: make(map[uint16][]byte),
+		fecGroups:  make(map[uint16]*fecBlockGroup),
 	}
 	u.readDeadline.Store(time.Time{})
 	return u
+}
+
+// SetTUNPacketHandler registers a callback for incoming Layer-3 TUN (udpPktTUN) datagrams.
+func (u *UDPSessionConn) SetTUNPacketHandler(fn func([]byte)) {
+	u.tunPacketHook.Store(&fn)
+}
+
+// WriteTUNPacket sends a raw Layer-3 TUN packet (GRE/IPIP) directly as a datagram without stream head-of-line blocking.
+func (u *UDPSessionConn) WriteTUNPacket(ipPkt []byte) error {
+	if u.closed.Load() {
+		return io.ErrClosedPipe
+	}
+	pkt := make([]byte, 9+len(ipPkt))
+	pkt[0] = udpPktTUN
+	binary.BigEndian.PutUint32(pkt[1:5], u.sessionID)
+	binary.BigEndian.PutUint16(pkt[7:9], uint16(len(ipPkt)))
+	copy(pkt[9:], ipPkt)
+	_, err := u.pconn.WriteTo(pkt, u.remoteAddr)
+	return err
+}
+
+func seqBefore(a, b uint16) bool {
+	return int16(a-b) < 0
 }
 
 func (u *UDPSessionConn) pushPacket(pkt []byte) {
@@ -63,20 +108,185 @@ func (u *UDPSessionConn) pushPacket(pkt []byte) {
 		return
 	}
 	typ := pkt[0]
+	seq := binary.BigEndian.Uint16(pkt[5:7])
+	dataLen := int(binary.BigEndian.Uint16(pkt[7:9]))
+
 	switch typ {
+	case udpPktTUN:
+		if 9+dataLen > len(pkt) {
+			return
+		}
+		if hook := u.tunPacketHook.Load(); hook != nil && *hook != nil {
+			payload := make([]byte, dataLen)
+			copy(payload, pkt[9:9+dataLen])
+			(*hook)(payload)
+		}
+
 	case udpPktDATA:
-		dataLen := int(binary.BigEndian.Uint16(pkt[7:9]))
 		if 9+dataLen > len(pkt) {
 			return
 		}
 		payload := make([]byte, dataLen)
 		copy(payload, pkt[9:9+dataLen])
-		select {
-		case u.rxQueue <- payload:
-		default:
+		u.rxMu.Lock()
+		u.handleDataLocked(seq, payload)
+		u.rxMu.Unlock()
+
+	case udpPktFEC:
+		if !u.useFEC || 9+dataLen > len(pkt) {
+			return
 		}
+		parity := make([]byte, dataLen)
+		copy(parity, pkt[9:9+dataLen])
+		u.rxMu.Lock()
+		u.handleFECLocked(seq, parity)
+		u.rxMu.Unlock()
+
+	case udpPktNACK:
+		u.txRingMu.Lock()
+		saved := u.txRing[seq%txRingSize]
+		if len(saved) >= 9 && binary.BigEndian.Uint16(saved[5:7]) == seq {
+			_, _ = u.pconn.WriteTo(saved, u.remoteAddr)
+		}
+		u.txRingMu.Unlock()
+
 	case udpPktFIN:
 		_ = u.Close()
+	}
+}
+
+func (u *UDPSessionConn) handleDataLocked(seq uint16, payload []byte) {
+	if u.useFEC && seq >= 1 {
+		grpID := (seq - 1) / 4
+		idx := int((seq - 1) % 4)
+		grp := u.fecGroups[grpID]
+		if grp == nil {
+			grp = &fecBlockGroup{}
+			u.fecGroups[grpID] = grp
+			if len(u.fecGroups) > 64 {
+				delete(u.fecGroups, grpID-32)
+			}
+		}
+		if !grp.hasShard[idx] {
+			// Store [2B len] + payload for exact XOR reconstruction
+			framed := make([]byte, 2+len(payload))
+			binary.BigEndian.PutUint16(framed[0:2], uint16(len(payload)))
+			copy(framed[2:], payload)
+			grp.shards[idx] = framed
+			grp.hasShard[idx] = true
+			grp.count++
+			u.tryRecoverFECLocked(grpID, grp)
+		}
+	}
+
+	if seqBefore(seq, u.nextRxSeq) {
+		return // duplicate packet already delivered
+	}
+	if seq == u.nextRxSeq {
+		u.deliverInOrderLocked(payload)
+		return
+	}
+
+	// Out-of-order arrival: buffer and request NACK retransmission if gap persists
+	if _, exists := u.reorderBuf[seq]; !exists {
+		u.reorderBuf[seq] = payload
+	}
+	if u.gapSince.IsZero() {
+		u.gapSince = time.Now()
+		var nack [9]byte
+		nack[0] = udpPktNACK
+		binary.BigEndian.PutUint32(nack[1:5], u.sessionID)
+		binary.BigEndian.PutUint16(nack[5:7], u.nextRxSeq)
+		_, _ = u.pconn.WriteTo(nack[:], u.remoteAddr)
+	} else if time.Since(u.gapSince) > 80*time.Millisecond {
+		// Advance past unrecoverable gap after 80ms so stream never deadlocks
+		for len(u.reorderBuf) > 0 && u.reorderBuf[u.nextRxSeq] == nil {
+			u.nextRxSeq++
+		}
+		u.drainReorderLocked()
+	}
+}
+
+func (u *UDPSessionConn) handleFECLocked(baseSeq uint16, parity []byte) {
+	if baseSeq < 1 {
+		return
+	}
+	grpID := (baseSeq - 1) / 4
+	grp := u.fecGroups[grpID]
+	if grp == nil {
+		grp = &fecBlockGroup{}
+		u.fecGroups[grpID] = grp
+	}
+	grp.parity = parity
+	u.tryRecoverFECLocked(grpID, grp)
+}
+
+func (u *UDPSessionConn) tryRecoverFECLocked(grpID uint16, grp *fecBlockGroup) {
+	if grp.recovered || grp.count != 3 || len(grp.parity) < 2 {
+		return
+	}
+	missingIdx := -1
+	for i := 0; i < 4; i++ {
+		if !grp.hasShard[i] {
+			missingIdx = i
+			break
+		}
+	}
+	if missingIdx < 0 {
+		return
+	}
+
+	rec := make([]byte, len(grp.parity))
+	copy(rec, grp.parity)
+	for i := 0; i < 4; i++ {
+		if i == missingIdx {
+			continue
+		}
+		sh := grp.shards[i]
+		for b := 0; b < len(sh) && b < len(rec); b++ {
+			rec[b] ^= sh[b]
+		}
+	}
+	origLen := int(binary.BigEndian.Uint16(rec[0:2]))
+	if origLen <= 0 || 2+origLen > len(rec) {
+		return
+	}
+	grp.recovered = true
+	recoveredPayload := make([]byte, origLen)
+	copy(recoveredPayload, rec[2:2+origLen])
+	missingSeq := grpID*4 + uint16(missingIdx) + 1
+
+	if missingSeq == u.nextRxSeq {
+		u.deliverInOrderLocked(recoveredPayload)
+	} else if !seqBefore(missingSeq, u.nextRxSeq) {
+		u.reorderBuf[missingSeq] = recoveredPayload
+	}
+}
+
+func (u *UDPSessionConn) deliverInOrderLocked(payload []byte) {
+	select {
+	case u.rxQueue <- payload:
+	default:
+	}
+	u.nextRxSeq++
+	u.drainReorderLocked()
+}
+
+func (u *UDPSessionConn) drainReorderLocked() {
+	for {
+		next, ok := u.reorderBuf[u.nextRxSeq]
+		if !ok {
+			break
+		}
+		delete(u.reorderBuf, u.nextRxSeq)
+		select {
+		case u.rxQueue <- next:
+		default:
+		}
+		u.nextRxSeq++
+	}
+	if len(u.reorderBuf) == 0 {
+		u.gapSince = time.Time{}
 	}
 }
 
@@ -130,23 +340,30 @@ func (u *UDPSessionConn) Write(p []byte) (int, error) {
 		}
 		p = p[len(chunk):]
 
-		seq := u.txSeq.Add(1)
+		seq := uint16(u.txSeq.Add(1))
+		if seq == 0 {
+			seq = uint16(u.txSeq.Add(1))
+		}
 		pkt := make([]byte, 9+len(chunk))
 		pkt[0] = udpPktDATA
 		binary.BigEndian.PutUint32(pkt[1:5], u.sessionID)
-		binary.BigEndian.PutUint16(pkt[5:7], uint16(seq))
+		binary.BigEndian.PutUint16(pkt[5:7], seq)
 		binary.BigEndian.PutUint16(pkt[7:9], uint16(len(chunk)))
 		copy(pkt[9:], chunk)
+
+		u.txRingMu.Lock()
+		u.txRing[seq%txRingSize] = pkt
+		u.txRingMu.Unlock()
 
 		if _, err := u.pconn.WriteTo(pkt, u.remoteAddr); err != nil {
 			return total, err
 		}
 
-		// When KCP/FEC mode is enabled, emit an XOR parity shard every 4 data packets
 		if u.useFEC {
-			cp := make([]byte, len(chunk))
-			copy(cp, chunk)
-			u.fecGroup = append(u.fecGroup, cp)
+			framed := make([]byte, 2+len(chunk))
+			binary.BigEndian.PutUint16(framed[0:2], uint16(len(chunk)))
+			copy(framed[2:], chunk)
+			u.fecGroup = append(u.fecGroup, framed)
 			if len(u.fecGroup) >= 4 {
 				u.emitFECParity(seq)
 				u.fecGroup = u.fecGroup[:0]
@@ -158,7 +375,7 @@ func (u *UDPSessionConn) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-func (u *UDPSessionConn) emitFECParity(seq uint32) {
+func (u *UDPSessionConn) emitFECParity(seq uint16) {
 	maxLen := 0
 	for _, s := range u.fecGroup {
 		if len(s) > maxLen {
@@ -171,7 +388,7 @@ func (u *UDPSessionConn) emitFECParity(seq uint32) {
 	parity := make([]byte, 9+maxLen)
 	parity[0] = udpPktFEC
 	binary.BigEndian.PutUint32(parity[1:5], u.sessionID)
-	binary.BigEndian.PutUint16(parity[5:7], uint16(seq))
+	binary.BigEndian.PutUint16(parity[5:7], seq)
 	binary.BigEndian.PutUint16(parity[7:9], uint16(maxLen))
 	for _, s := range u.fecGroup {
 		for i := 0; i < len(s); i++ {
@@ -222,9 +439,10 @@ func (u *UDPSessionConn) SetReadDeadline(t time.Time) error {
 }
 func (u *UDPSessionConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// UDPCarrierListener listens on a UDP port and demultiplexes incoming KCP or UDP sessions.
+// UDPCarrierListener listens on a UDP/PCK/XDI port and demultiplexes incoming sessions.
 type UDPCarrierListener struct {
 	udpConn  *net.UDPConn
+	pconn    net.PacketConn
 	password string
 	useFEC   bool
 	sessions sync.Map // string(remoteAddr) -> *UDPSessionConn
@@ -248,6 +466,7 @@ func ListenUDPCarrier(addr, password string, useFEC bool) (*UDPCarrierListener, 
 
 	l := &UDPCarrierListener{
 		udpConn:  uConn,
+		pconn:    uConn,
 		password: password,
 		useFEC:   useFEC,
 		acceptCh: make(chan net.Conn, 128),
@@ -271,7 +490,12 @@ func (l *UDPCarrierListener) Accept(ctx context.Context) (net.Conn, error) {
 func (l *UDPCarrierListener) Close() error {
 	if l.closed.CompareAndSwap(false, true) {
 		close(l.closeCh)
-		return l.udpConn.Close()
+		if l.pconn != nil {
+			_ = l.pconn.Close()
+		}
+		if l.udpConn != nil {
+			return l.udpConn.Close()
+		}
 	}
 	return nil
 }

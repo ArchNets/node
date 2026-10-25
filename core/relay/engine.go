@@ -66,6 +66,7 @@ type Engine struct {
 	udpCarrierLn   *transport.UDPCarrierListener
 	activeQuicConn *quic.Conn
 	activeMuxSess  *transport.MuxSession
+	l3TunDev       *transport.L3TUNDevice
 	tcpListeners   []net.Listener
 	udpListeners  []*net.UDPConn
 	hdMatcher     *transport.HalfDuplexMatcher
@@ -143,6 +144,21 @@ func (e *Engine) Start() error {
 
 	e.alive.Store(true)
 
+	if strings.HasPrefix(e.cfg.Transport, "l3-") {
+		if tunDev, err := transport.OpenL3TUN(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, transport.GetConfiguredMTU()); err == nil {
+			e.mu.Lock()
+			e.l3TunDev = tunDev
+			e.mu.Unlock()
+			e.logger.WithFields(log.Fields{
+				"iface":   tunDev.Name(),
+				"localIP": tunDev.LocalIP(),
+				"peerIP":  tunDev.PeerIP(),
+			}).Info("[Relay] Layer-3 TUN interface (GRE + ChaCha20-Poly1305) brought up")
+		} else {
+			e.logger.WithField("err", err).Debug("[Relay] Layer-3 TUN device skipped (running unprivileged or in sandbox)")
+		}
+	}
+
 	e.wg.Add(1)
 	go e.telemetryLoop()
 
@@ -191,6 +207,10 @@ func (e *Engine) Close() error {
 	}
 	if e.activeMuxSess != nil {
 		_ = e.activeMuxSess.Close()
+	}
+	if e.l3TunDev != nil {
+		_ = e.l3TunDev.Close()
+		e.l3TunDev = nil
 	}
 	for _, ln := range e.tcpListeners {
 		_ = ln.Close()
@@ -433,7 +453,29 @@ func (e *Engine) packetCarrierAcceptLoop(ln *transport.UDPCarrierListener) {
 	}
 }
 
+func (e *Engine) bindL3TUNDuplex(conn net.Conn) {
+	uSess, ok := conn.(*transport.UDPSessionConn)
+	if !ok {
+		return
+	}
+	e.mu.Lock()
+	tunDev := e.l3TunDev
+	e.mu.Unlock()
+	if tunDev == nil {
+		return
+	}
+	tunDev.SetSender(func(wire []byte) error {
+		e.Stats.AddUpload(int64(len(wire)))
+		return uSess.WriteTUNPacket(wire)
+	})
+	uSess.SetTUNPacketHandler(func(wire []byte) {
+		e.Stats.AddDownload(int64(len(wire)))
+		_ = tunDev.InjectWirePacket(wire)
+	})
+}
+
 func (e *Engine) serveMuxSession(rawConn net.Conn) {
+	e.bindL3TUNDuplex(rawConn)
 	muxSess := transport.NewMuxSession(rawConn, false)
 	defer muxSess.Close()
 	for {
@@ -834,6 +876,7 @@ func (e *Engine) dialMuxCarrier() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+		e.bindL3TUNDuplex(baseConn)
 		newSess := transport.NewMuxSession(baseConn, true)
 		e.mu.Lock()
 		e.activeMuxSess = newSess
