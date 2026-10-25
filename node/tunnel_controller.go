@@ -288,7 +288,11 @@ func (c *TunnelController) configMonitor() error {
 	// re-applying config while a scan is in progress
 	hashData := *resp.Data
 	cleanTunnels := make([]panel.TunnelInfo, len(hashData.Tunnels))
+	forceReload := false
 	for i, t := range hashData.Tunnels {
+		if t.Config != "" && strings.Contains(t.Config, `"restart_sig":true`) {
+			forceReload = true
+		}
 		t.ScanCommand = nil
 		cleanTunnels[i] = t
 	}
@@ -297,7 +301,7 @@ func (c *TunnelController) configMonitor() error {
 	hash := sha256.Sum256(configJSON)
 	configHash := hex.EncodeToString(hash[:])
 
-	if configHash == c.lastConfigHash {
+	if configHash == c.lastConfigHash && !forceReload {
 		return nil // No changes, skip re-apply
 	}
 

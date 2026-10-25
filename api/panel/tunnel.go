@@ -192,6 +192,8 @@ type ScanResultItem struct {
 	DownloadSpeed  int64   `json:"download_speed"`
 	PacketLoss     int     `json:"packet_loss"`
 	Jitter         int     `json:"jitter"`
+	Status         string  `json:"status,omitempty"`
+	Detail         string  `json:"detail,omitempty"`
 	Score          float64 `json:"score,omitempty"`
 }
 

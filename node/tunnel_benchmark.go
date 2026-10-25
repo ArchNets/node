@@ -515,6 +515,32 @@ func (c *TunnelController) evaluateCandidate(
 		"port":      sandboxPort + cand.Index,
 	}).Info("[Benchmark] >>> Starting candidate benchmark")
 
+	// If candidate requires an SSL certificate (tls-reverse, wss-reverse, wssmux) but none is configured on the tunnel,
+	// mark as skipped rather than generating a fake certificate against an arbitrary domain.
+	spec := transport.GetTransportSpec(cand.Transport)
+	if spec.NeedsTLSServerCfg && (t.RelayConfig == nil || (t.RelayConfig.CertFile == "" && t.RelayConfig.CertMode != "self" && t.RelayConfig.CertMode != "http" && t.RelayConfig.CertMode != "dns")) {
+		c.logger.WithFields(log.Fields{
+			"tunnel_id": t.Id,
+			"idx":       cand.Index,
+			"transport": cand.Transport,
+		}).Info("[Benchmark] Candidate skipped (requires domain SSL certificate)")
+		return &panel.ScanResultItem{
+			ProtocolNumber: cand.Index,
+			Type:           cand.Transport,
+			SNI:            cand.SNI,
+			MethodLabel:    cand.MethodLabel,
+			UseHalfDuplex:  cand.UseHalfDuplex,
+			UseFisher:      cand.UseFisher,
+			LatencyMs:      0,
+			UploadSpeed:    0,
+			DownloadSpeed:  0,
+			PacketLoss:     100,
+			Status:         "skipped",
+			Detail:         "Skipped (Requires SSL Certificate)",
+			Score:          0,
+		}
+	}
+
 	originRTT := measureOriginTCPHandshake(cand.OriginIP, 443, 1200*time.Millisecond)
 
 	direction := cand.Direction
@@ -599,8 +625,22 @@ func (c *TunnelController) evaluateCandidate(
 			"tunnel_id": t.Id,
 			"idx":       cand.Index,
 			"transport": cand.Transport,
-		}).Warn("[Benchmark] <<< Candidate benchmark failed (zero bandwidth/unreachable)")
-		return nil
+		}).Warn("[Benchmark] <<< Candidate benchmark failed (carrier blocked or dropped)")
+		return &panel.ScanResultItem{
+			ProtocolNumber: cand.Index,
+			Type:           cand.Transport,
+			SNI:            cand.SNI,
+			MethodLabel:    cand.MethodLabel,
+			UseHalfDuplex:  cand.UseHalfDuplex,
+			UseFisher:      cand.UseFisher,
+			LatencyMs:      0,
+			UploadSpeed:    0,
+			DownloadSpeed:  0,
+			PacketLoss:     100,
+			Status:         "blocked",
+			Detail:         "Blocked (Carrier connection dropped or timed out)",
+			Score:          0,
+		}
 	}
 
 	latencyMs := sample.RttMs
@@ -639,6 +679,7 @@ func (c *TunnelController) evaluateCandidate(
 		DownloadSpeed:  downloadBps,
 		PacketLoss:     sample.PacketLoss,
 		Jitter:         sample.JitterMs,
+		Status:         "ok",
 		Score:          score,
 	}
 }
