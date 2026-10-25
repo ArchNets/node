@@ -43,6 +43,22 @@ type Config struct {
 	CertMode           string
 	CertFile           string
 	KeyFile            string
+	TCPNoDelay         *bool
+	PCKFlags           []string
+	EdgeIP             string
+	WSPath             string
+	SimpleAuth         bool
+	KCPDataShards      int
+	KCPParityShards    int
+	KCPMTU             int
+	L3LocalIP          string
+	L3PeerIP           string
+	L3Iface            string
+	L3MTU              int
+	SpoofSrcIP         string
+	SpoofProfile       string
+	SpoofPadding       bool
+	SpoofShufflePort   bool
 	Forwarders         []routing.ForwarderRule
 	Logger             *log.Entry
 	OnProbeSample      func(tunnelID int, sample *telemetry.BandwidthSample)
@@ -166,7 +182,11 @@ func (e *Engine) Start() error {
 	e.alive.Store(true)
 
 	if transport.GetTransportSpec(e.cfg.Transport).IsL3 {
-		if tunDev, err := transport.OpenL3TUN(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, transport.GetConfiguredMTU()); err == nil {
+		mtu := e.cfg.L3MTU
+		if mtu <= 0 {
+			mtu = transport.GetConfiguredMTU()
+		}
+		if tunDev, err := transport.OpenL3TUNWithSubnet(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP); err == nil {
 			e.mu.Lock()
 			e.l3TunDev = tunDev
 			e.mu.Unlock()
@@ -1007,15 +1027,18 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 	case "stealth":
 		return transport.DialStealthCarrier(rawDial, e.cfg.Password)
 	case "ws-reverse", "wsmux":
-		return transport.DialWSCarrier(rawDial, false, e.cfg.SNI, e.cfg.Password)
+		return transport.DialWSCarrier(rawDial, false, e.cfg.SNI, e.cfg.Password, e.cfg.WSPath)
 	case "wss-reverse", "wssmux":
-		return transport.DialWSCarrier(rawDial, true, e.cfg.SNI, e.cfg.Password)
+		return transport.DialWSCarrier(rawDial, true, e.cfg.SNI, e.cfg.Password, e.cfg.WSPath)
 	default:
 		return transport.DialRealityCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
 	}
 }
 
 func (e *Engine) targetDialIPs() []string {
+	if e.cfg.EdgeIP != "" && (e.cfg.Transport == "ws-reverse" || e.cfg.Transport == "wss-reverse" || e.cfg.Transport == "wsmux" || e.cfg.Transport == "wssmux") {
+		return []string{e.cfg.EdgeIP}
+	}
 	if e.isDirect() {
 		if e.cfg.ExitServerIP != "" {
 			return []string{e.cfg.ExitServerIP}

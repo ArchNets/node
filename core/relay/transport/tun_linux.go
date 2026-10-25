@@ -157,6 +157,11 @@ func OpenL3GREPacket(aead cipher.AEAD, wire []byte) ([]byte, error) {
 
 // OpenL3TUN creates and configures a Linux Layer-3 TUN interface (/dev/net/tun).
 func OpenL3TUN(tunnelID int, role, password string, mtu int) (*L3TUNDevice, error) {
+	return OpenL3TUNWithSubnet(tunnelID, role, password, mtu, "", "", "")
+}
+
+// OpenL3TUNWithSubnet creates and configures a Linux Layer-3 TUN interface (/dev/net/tun) with optional custom subnet.
+func OpenL3TUNWithSubnet(tunnelID int, role, password string, mtu int, customIface, customLocalCIDR, customPeerIP string) (*L3TUNDevice, error) {
 	if os.Geteuid() != 0 {
 		return nil, errors.New("l3: creating TUN device requires root or CAP_NET_ADMIN")
 	}
@@ -170,6 +175,16 @@ func OpenL3TUN(tunnelID int, role, password string, mtu int) (*L3TUNDevice, erro
 	mss := mtu - 40
 
 	ifaceName, localCIDR, peerIP := DeriveL3Subnet(tunnelID, role)
+	if customIface != "" {
+		ifaceName = customIface
+		if len(ifaceName) >= unix.IFNAMSIZ {
+			ifaceName = ifaceName[:unix.IFNAMSIZ-1]
+		}
+	}
+	if customLocalCIDR != "" && customPeerIP != "" {
+		localCIDR = customLocalCIDR
+		peerIP = customPeerIP
+	}
 
 	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {

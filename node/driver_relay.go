@@ -229,8 +229,36 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	}
 
 	preset := "turbo"
-	if rc != nil && rc.Preset != "" {
-		preset = rc.Preset
+	var tcpNoDelay *bool
+	var pckFlags []string
+	var edgeIP, wsPath string
+	var simpleAuth bool
+	var kcpDataShards, kcpParityShards, kcpMTU int
+	var l3LocalIP, l3PeerIP, l3Iface string
+	var l3MTU int
+	var spoofSrcIP, spoofProfile string
+	var spoofPadding, spoofShufflePort bool
+
+	if rc != nil {
+		if rc.Preset != "" {
+			preset = rc.Preset
+		}
+		tcpNoDelay = rc.TCPNoDelay
+		pckFlags = rc.PCKFlags
+		edgeIP = rc.EdgeIP
+		wsPath = rc.WSPath
+		simpleAuth = rc.SimpleAuth
+		kcpDataShards = rc.KCPDataShards
+		kcpParityShards = rc.KCPParityShards
+		kcpMTU = rc.KCPMTU
+		l3LocalIP = rc.L3LocalIP
+		l3PeerIP = rc.L3PeerIP
+		l3Iface = rc.L3Iface
+		l3MTU = rc.L3MTU
+		spoofSrcIP = rc.SpoofSrcIP
+		spoofProfile = rc.SpoofProfile
+		spoofPadding = rc.SpoofPadding
+		spoofShufflePort = rc.SpoofShufflePort
 	}
 
 	cfg := relay.Config{
@@ -257,6 +285,22 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		CertMode:           certMode,
 		CertFile:           certFile,
 		KeyFile:            keyFile,
+		TCPNoDelay:         tcpNoDelay,
+		PCKFlags:           pckFlags,
+		EdgeIP:             edgeIP,
+		WSPath:             wsPath,
+		SimpleAuth:         simpleAuth,
+		KCPDataShards:      kcpDataShards,
+		KCPParityShards:    kcpParityShards,
+		KCPMTU:             kcpMTU,
+		L3LocalIP:          l3LocalIP,
+		L3PeerIP:           l3PeerIP,
+		L3Iface:            l3Iface,
+		L3MTU:              l3MTU,
+		SpoofSrcIP:         spoofSrcIP,
+		SpoofProfile:       spoofProfile,
+		SpoofPadding:       spoofPadding,
+		SpoofShufflePort:   spoofShufflePort,
 		Forwarders:         forwarderRules,
 		Logger:             d.logger,
 		OnProbeSample:      d.QueueProbeSample,

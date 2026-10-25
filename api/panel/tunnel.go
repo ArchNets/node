@@ -64,6 +64,23 @@ type RelayTunnelConfig struct {
 	KeyFile            string   `json:"key_file,omitempty"`
 	CertDNSProvider    string   `json:"cert_dns_provider,omitempty"`
 	CertDNSEnv         string   `json:"cert_dns_env,omitempty"`
+	// Protocol-specific fine-tuning knobs (BackPack compatibility)
+	TCPNoDelay       *bool    `json:"tcp_nodelay,omitempty"`
+	PCKFlags         []string `json:"pck_flags,omitempty"`
+	EdgeIP           string   `json:"edge_ip,omitempty"`
+	WSPath           string   `json:"ws_path,omitempty"`
+	SimpleAuth       bool     `json:"simple_auth,omitempty"`
+	KCPDataShards    int      `json:"kcp_datashards,omitempty"`
+	KCPParityShards  int      `json:"kcp_parityshards,omitempty"`
+	KCPMTU           int      `json:"kcp_mtu,omitempty"`
+	L3LocalIP        string   `json:"l3_local_ip,omitempty"`
+	L3PeerIP         string   `json:"l3_peer_ip,omitempty"`
+	L3Iface          string   `json:"l3_iface,omitempty"`
+	L3MTU            int      `json:"l3_mtu,omitempty"`
+	SpoofSrcIP       string   `json:"spoof_src_ip,omitempty"`
+	SpoofProfile     string   `json:"spoof_profile,omitempty"`
+	SpoofPadding     bool     `json:"spoof_padding,omitempty"`
+	SpoofShufflePort bool     `json:"spoof_shuffle_port,omitempty"`
 }
 
 // TunnelInfo represents a single tunnel configuration

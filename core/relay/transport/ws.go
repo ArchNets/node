@@ -23,49 +23,53 @@ const (
 
 // DialWSCarrier dials Entry over HTTP/1.1 WebSocket Upgrade (or HTTPS with Chrome uTLS when useTLS is true).
 // Once the 101 Switching Protocols handshake succeeds, the raw stream is returned for zero-copy splicing.
-func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password string) (net.Conn, error) {
-	if sni == "" {
-		sni = "localhost"
-	}
-	key, err := DeriveRealityKey(password, sni)
-	if err != nil {
-		return nil, err
-	}
-	token, err := GenerateRealityToken(key, wsAuthMagic)
-	if err != nil {
-		return nil, err
-	}
-	authHex := hex.EncodeToString(token[:])
+func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath string) (net.Conn, error) {
+ if sni == "" {
+  sni = "localhost"
+ }
+ path := strings.TrimSpace(wsPath)
+ if path == "" || !strings.HasPrefix(path, "/") {
+  path = "/ws"
+ }
+ key, err := DeriveRealityKey(password, sni)
+ if err != nil {
+  return nil, err
+ }
+ token, err := GenerateRealityToken(key, wsAuthMagic)
+ if err != nil {
+  return nil, err
+ }
+ authHex := hex.EncodeToString(token[:])
 
-	var wsKeyRaw [16]byte
-	_, _ = rand.Read(wsKeyRaw[:])
-	wsKey := base64.StdEncoding.EncodeToString(wsKeyRaw[:])
+ var wsKeyRaw [16]byte
+ _, _ = rand.Read(wsKeyRaw[:])
+ wsKey := base64.StdEncoding.EncodeToString(wsKeyRaw[:])
 
-	rawConn, err := dialCtx()
-	if err != nil {
-		return nil, err
-	}
-	TuneTCPConn(rawConn)
-	_ = rawConn.SetDeadline(time.Now().Add(6 * time.Second))
+ rawConn, err := dialCtx()
+ if err != nil {
+  return nil, err
+ }
+ TuneTCPConn(rawConn)
+ _ = rawConn.SetDeadline(time.Now().Add(6 * time.Second))
 
-	var conn net.Conn = rawConn
-	if useTLS {
-		uConn := utls.UClient(rawConn, &utls.Config{
-			ServerName:         sni,
-			InsecureSkipVerify: true,
-			NextProtos:         []string{"http/1.1"},
-		}, utls.HelloChrome_Auto)
-		if err := uConn.Handshake(); err != nil {
-			_ = rawConn.Close()
-			return nil, fmt.Errorf("wss utls handshake: %w", err)
-		}
-		conn = uConn
-	}
+ var conn net.Conn = rawConn
+ if useTLS {
+  uConn := utls.UClient(rawConn, &utls.Config{
+   ServerName:         sni,
+   InsecureSkipVerify: true,
+   NextProtos:         []string{"http/1.1"},
+  }, utls.HelloChrome_Auto)
+  if err := uConn.Handshake(); err != nil {
+   _ = rawConn.Close()
+   return nil, fmt.Errorf("wss utls handshake: %w", err)
+  }
+  conn = uConn
+ }
 
-	req := fmt.Sprintf(
-		"GET /ws HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nX-Requested-With: %s\r\n\r\n",
-		sni, wsKey, authHex,
-	)
+ req := fmt.Sprintf(
+  "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nX-Requested-With: %s\r\n\r\n",
+  path, sni, wsKey, authHex,
+ )
 	if _, err := conn.Write([]byte(req)); err != nil {
 		_ = conn.Close()
 		return nil, err
