@@ -31,7 +31,7 @@ func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath str
  if path == "" || !strings.HasPrefix(path, "/") {
   path = "/ws"
  }
- key, err := DeriveRealityKey(password, sni)
+ key, err := DeriveRealityKey(password, "archnet-ws-auth")
  if err != nil {
   return nil, err
  }
@@ -139,7 +139,7 @@ func InspectWSTraffic(conn net.Conn, sni, password string, hasUserForwarder bool
 
 	if wsKey != "" && len(authHex) == 64 {
 		if tokenBytes, decErr := hex.DecodeString(authHex); decErr == nil && len(tokenBytes) == 32 {
-			if key, kErr := DeriveRealityKey(password, sni); kErr == nil {
+			if key, kErr := DeriveRealityKey(password, "archnet-ws-auth"); kErr == nil {
 				if VerifyRealityToken(key, tokenBytes, wsAuthMagic) {
 					h := sha1.Sum([]byte(wsKey + wsGUID))
 					accept := base64.StdEncoding.EncodeToString(h[:])

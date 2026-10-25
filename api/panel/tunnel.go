@@ -47,7 +47,7 @@ type RelayTunnelConfig struct {
  Preset             string   `json:"preset,omitempty"`    // "turbo" (default), "balance", "aggressive"
 	Transport          string   `json:"transport"`            // "reverse-reality", "tls-reverse", "stealth", "ws-reverse", "wss-reverse", "quic-reverse"
 	CarrierPort        int      `json:"carrier_port"`         // Default: 443
-	SNI                string   `json:"sni"`                  // Default: "shariati.tums.ac.ir"
+	SNI                string   `json:"sni,omitempty"`        // Default: "shariati.tums.ac.ir"
 	OriginIP           string   `json:"origin_ip,omitempty"`  // Auto-resolved from KnownIranOriginIPs if empty
 	Password           string   `json:"password"`             // Shared secret
 	UseHalfDuplex      bool     `json:"use_halfduplex"`       // Default: true

@@ -38,7 +38,7 @@ const (
 )
 
 const (
-	ConfigPollSeconds = 60
+	ConfigPollSeconds = 5
 	StatusPushSeconds = 30
 	ControllerLogFile = "controller.log"
 	ForwarderLogFile  = "forwarder.log"

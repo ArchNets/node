@@ -134,7 +134,7 @@ func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
 
 // DialTLSReverseCarrier connects to EntryServerIP:CarrierPort over TLS 1.3 and authenticates with Password.
 func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, error) {
-	key, err := DeriveRealityKey(password, sni)
+	key, err := DeriveRealityKey(password, "archnet-tls-auth")
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func AcceptTLSReverseCarrier(rawConn net.Conn, tlsCfg *tls.Config, sni, password
 		return nil, err
 	}
 
-	key, err := DeriveRealityKey(password, sni)
+	key, err := DeriveRealityKey(password, "archnet-tls-auth")
 	if err != nil {
 		_ = tlsConn.Close()
 		return nil, err
