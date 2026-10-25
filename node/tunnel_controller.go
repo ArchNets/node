@@ -79,6 +79,8 @@ type TunnelController struct {
 	logger                *log.Entry
 	forwarderLogFile      *os.File
 	lastConfigHash        string
+	lastRestartTs         map[int]int64
+	lastRestartMu         sync.Mutex
 
 	// Pluggable Tunnel Drivers
 	relayDriver *RelayDriver
@@ -103,6 +105,7 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		nodeConfig:           nodeConfig,
 		tunnelDir:            TunnelDir,
 		forwarderProcesses:   make(map[int]*exec.Cmd),
+		lastRestartTs:        make(map[int]int64),
 		logger:               log.WithField("tag", tag),
 		relayDriver:          relayDrv,
 		xrayInstances:        make(map[int]*core.Instance),
@@ -289,13 +292,24 @@ func (c *TunnelController) configMonitor() error {
 	hashData := *resp.Data
 	cleanTunnels := make([]panel.TunnelInfo, len(hashData.Tunnels))
 	forceReload := false
+	c.lastRestartMu.Lock()
 	for i, t := range hashData.Tunnels {
-		if t.Config != "" && strings.Contains(t.Config, `"restart_sig":true`) {
+		var restartTs int64 = t.RestartTimestamp
+		if restartTs == 0 && t.Config != "" && strings.Contains(t.Config, `"restart_sig":true`) {
+			var parsed struct {
+				RestartTs int64 `json:"restart_ts"`
+			}
+			_ = json.Unmarshal([]byte(t.Config), &parsed)
+			restartTs = parsed.RestartTs
+		}
+		if restartTs > 0 && restartTs != c.lastRestartTs[t.Id] {
+			c.lastRestartTs[t.Id] = restartTs
 			forceReload = true
 		}
 		t.ScanCommand = nil
 		cleanTunnels[i] = t
 	}
+	c.lastRestartMu.Unlock()
 	hashData.Tunnels = cleanTunnels
 	configJSON, _ := json.Marshal(hashData)
 	hash := sha256.Sum256(configJSON)

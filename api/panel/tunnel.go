@@ -101,6 +101,7 @@ type TunnelInfo struct {
 	Forwarders        []Forwarder              `json:"forwarders"`
 	ScanCommand       *ScanCommand             `json:"scan_command,omitempty"`
 	SniSpoofingConfig *SniSpoofingConfig       `json:"sni_spoofing_config,omitempty"`
+	RestartTimestamp  int64                    `json:"restart_ts,omitempty"`
 }
 
 // SniSpoofingConfig represents the sidecar config for SNI-Spoofing
