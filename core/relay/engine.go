@@ -23,7 +23,8 @@ type Config struct {
 	TunnelID           int
 	Role               string // "entry" or "exit"
 	Direction          string // "reverse" (default) or "direct"
-	Transport          string // "reverse-reality", "tls-reverse", "stealth", "ws-reverse", "wss-reverse", "quic-reverse"
+	Preset             string // "turbo" (default), "balance", "aggressive"
+	Transport          string // "reverse-reality", "tls-reverse", etc.
 	CarrierPort        int    // Default: 443
 	ListenIP           string // Default: "0.0.0.0"
 	EntryServerIP      string // Entry public IP (dialed by Exit)
@@ -92,11 +93,31 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.Password == "" {
 		cfg.Password = "archnet-default-secret"
 	}
-	if cfg.FisherConnections <= 0 {
-		cfg.FisherConnections = transport.DefaultFisherCount
+	if cfg.Preset == "" {
+		cfg.Preset = "turbo"
 	}
-	if cfg.MinHeldConnections <= 0 {
-		cfg.MinHeldConnections = 8
+	switch strings.ToLower(cfg.Preset) {
+	case "balance":
+		if cfg.MinHeldConnections <= 0 {
+			cfg.MinHeldConnections = 4
+		}
+		if cfg.FisherConnections <= 0 {
+			cfg.FisherConnections = 2
+		}
+	case "aggressive":
+		if cfg.MinHeldConnections <= 0 {
+			cfg.MinHeldConnections = 16
+		}
+		if cfg.FisherConnections <= 0 {
+			cfg.FisherConnections = 4
+		}
+	default: // "turbo"
+		if cfg.MinHeldConnections <= 0 {
+			cfg.MinHeldConnections = 8
+		}
+		if cfg.FisherConnections <= 0 {
+			cfg.FisherConnections = 3
+		}
 	}
 	if cfg.ProbeIntervalMin <= 0 {
 		cfg.ProbeIntervalMin = 30

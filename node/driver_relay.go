@@ -228,10 +228,16 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		}
 	}
 
+	preset := "turbo"
+	if rc != nil && rc.Preset != "" {
+		preset = rc.Preset
+	}
+
 	cfg := relay.Config{
 		TunnelID:           t.Id,
 		Role:               t.Role,
 		Direction:          direction,
+		Preset:             preset,
 		Transport:          transport,
 		CarrierPort:        carrierPort,
 		ListenIP:           "0.0.0.0",

@@ -43,7 +43,8 @@ type CoreConfig struct {
 
 // RelayTunnelConfig configures the Native Go Relay Engine
 type RelayTunnelConfig struct {
-	Direction          string   `json:"direction,omitempty"`  // "reverse" (default), "direct"
+ Direction          string   `json:"direction,omitempty"` // "reverse" (default), "direct"
+ Preset             string   `json:"preset,omitempty"`    // "turbo" (default), "balance", "aggressive"
 	Transport          string   `json:"transport"`            // "reverse-reality", "tls-reverse", "stealth", "ws-reverse", "wss-reverse", "quic-reverse"
 	CarrierPort        int      `json:"carrier_port"`         // Default: 443
 	SNI                string   `json:"sni"`                  // Default: "shariati.tums.ac.ir"
