@@ -147,6 +147,46 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 
 	var candidates []BenchmarkCandidate
 	switch mode {
+	case "current", "configured":
+		tr := "reverse-reality"
+		direction := "reverse"
+		hd := true
+		fisher := true
+		sni := baseSNI
+		if baseCfg != nil {
+			if baseCfg.Transport != "" {
+				tr = baseCfg.Transport
+			}
+			if baseCfg.Direction != "" {
+				direction = baseCfg.Direction
+			}
+			hd = baseCfg.UseHalfDuplex
+			fisher = baseCfg.UseFisher
+			if baseCfg.SNI != "" {
+				sni = baseCfg.SNI
+			}
+		}
+		spec := transport.GetTransportSpec(tr)
+		if !spec.NeedsSNI {
+			sni = ""
+		}
+		prefix := "Reverse • "
+		if spec.IsL3 {
+			prefix = ""
+		} else if direction == "direct" {
+			prefix = "Direct • "
+		}
+		candidates = append(candidates, BenchmarkCandidate{
+			Index:         1,
+			Direction:     direction,
+			SNI:           sni,
+			OriginIP:      "",
+			Transport:     tr,
+			MethodLabel:   prefix + spec.Label + " (Active Config)",
+			UseHalfDuplex: hd,
+			UseFisher:     fisher,
+		})
+
 	case "methods", "all":
 		for i, v := range allRouteBenchmarkTransports {
 			candidates = append(candidates, buildTransportCandidate(i+1, v.direction, v.transport, baseSNI))
@@ -680,15 +720,20 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 		direction := "reverse"
 		entryIP := t.RemoteIP
 		if t.RelayConfig != nil {
-			if t.RelayConfig.Password != "" {
-				password = t.RelayConfig.Password
-			}
-			if t.RelayConfig.Direction != "" {
-				direction = t.RelayConfig.Direction
-			}
-			if t.RelayConfig.EntryOverrideIP != "" {
-				entryIP = t.RelayConfig.EntryOverrideIP
-			}
+		 if t.RelayConfig.Password != "" {
+		  password = t.RelayConfig.Password
+		 }
+		 if t.RelayConfig.Direction != "" {
+		  direction = t.RelayConfig.Direction
+		 }
+		 if t.RelayConfig.EntryOverrideIP != "" {
+		  entryIP = t.RelayConfig.EntryOverrideIP
+		 }
+		}
+
+		exitBindIP := "0.0.0.0"
+		if t.LocalIP != "" {
+		 exitBindIP = t.LocalIP
 		}
 
 		// Start all candidate sandbox engines concurrently on their dedicated port (sandboxPort + cand.Index)
@@ -712,13 +757,16 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				candDirection = direction
 			}
 			candPort := sandboxPort + cand.Index
+
+			// For Direct mode, Exit is the Listener, so ListenIP is exitBindIP
+			// For Reverse mode, Exit dials Entry, so EntryServerIP is entryIP
 			eng := relay.NewEngine(relay.Config{
 				TunnelID:           t.Id*1000 + cand.Index,
 				Role:               "exit",
 				Direction:          candDirection,
 				Transport:          cand.Transport,
 				CarrierPort:        candPort,
-				ListenIP:           "0.0.0.0",
+				ListenIP:           exitBindIP,
 				EntryServerIP:      entryIP,
 				TargetIP:           "127.0.0.1",
 				SNI:                cand.SNI,

@@ -816,7 +816,7 @@ func (e *Engine) logDialFailure(err error) {
 
 func (e *Engine) exitPoolLoop() {
 	defer e.wg.Done()
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 
 	var dialingCount atomic.Int64
@@ -861,8 +861,10 @@ func (e *Engine) exitPoolLoop() {
 			current = e.idleWaiters.Load() + dialingCount.Load()
 		}
 		needed := minHeld - current
-		for i := int64(0); i < needed; i++ {
-			spawnDial()
+		if needed > 0 {
+			for i := int64(0); i < needed; i++ {
+				spawnDial()
+			}
 		}
 	}
 }

@@ -28,7 +28,7 @@ func closeHalf(c net.Conn) {
 func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn func(timeout time.Duration) (net.Conn, error), stats *telemetry.Stats) {
 	defer clientConn.Close()
 
-	stream, err := claimStreamFn(4 * time.Second)
+	stream, err := claimStreamFn(10 * time.Second)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"targetPort": targetPort,
