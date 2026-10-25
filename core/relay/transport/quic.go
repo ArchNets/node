@@ -111,10 +111,7 @@ func DialQuicSession(ctx context.Context, addr, sni string) (*quic.Conn, error) 
 
 // OpenQuicCarrierStream opens a new stream on an active *quic.Conn and authenticates it with the tunnel password.
 func OpenQuicCarrierStream(ctx context.Context, qConn *quic.Conn, sni, password string) (net.Conn, error) {
-	if sni == "" {
-		sni = "localhost"
-	}
-	key, err := DeriveRealityKey(password, sni)
+	key, err := DeriveRealityKey(password, "archnet-quic-auth")
 	if err != nil {
 		return nil, err
 	}
@@ -145,9 +142,6 @@ func OpenQuicCarrierStream(ctx context.Context, qConn *quic.Conn, sni, password 
 
 // AcceptQuicCarrierStream verifies the 32-byte HMAC auth token on an incoming QUIC stream.
 func AcceptQuicCarrierStream(stream *quic.Stream, qConn *quic.Conn, sni, password string) (net.Conn, error) {
-	if sni == "" {
-		sni = "localhost"
-	}
 	_ = stream.SetDeadline(time.Now().Add(5 * time.Second))
 	var token [32]byte
 	if _, err := io.ReadFull(stream, token[:]); err != nil {
@@ -155,7 +149,7 @@ func AcceptQuicCarrierStream(stream *quic.Stream, qConn *quic.Conn, sni, passwor
 		_ = stream.Close()
 		return nil, err
 	}
-	key, err := DeriveRealityKey(password, sni)
+	key, err := DeriveRealityKey(password, "archnet-quic-auth")
 	if err != nil || !VerifyRealityToken(key, token[:], quicAuthMagic) {
 		stream.CancelRead(0)
 		_ = stream.Close()

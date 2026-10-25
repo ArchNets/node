@@ -308,12 +308,13 @@ func (e *Engine) startEntry() error {
 		}
 	}
 
+	isTCPCarrier := !e.isDirect() && !e.isQuicTransport() && !e.isPacketTransport()
 	for _, rule := range e.cfg.Forwarders {
 		pairs := routing.ExpandPortRange(rule)
 		proto := strings.ToLower(strings.TrimSpace(rule.Protocol))
 		for _, pair := range pairs {
 			lPort, tPort := pair[0], pair[1]
-			if !e.isDirect() && lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both") {
+			if isTCPCarrier && lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both") {
 				e.carrierFwd.Store(int64(tPort))
 				e.logger.WithFields(log.Fields{
 					"carrierPort": lPort,
@@ -325,6 +326,13 @@ func (e *Engine) startEntry() error {
 				}
 			}
 			if proto == "udp" || proto == "tcp,udp" || proto == "both" {
+				if !e.isDirect() && (e.isQuicTransport() || e.isPacketTransport()) && lPort == e.cfg.CarrierPort {
+					e.logger.WithFields(log.Fields{
+						"carrierPort": lPort,
+						"transport":   e.cfg.Transport,
+					}).Warn("[Relay] User UDP forwarder matches UDP carrier port; skipped duplicate socket bind on entry")
+					continue
+				}
 				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
 					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start UDP forwarder listener")
 				}
