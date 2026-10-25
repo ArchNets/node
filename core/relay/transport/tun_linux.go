@@ -60,7 +60,13 @@ func DeriveL3Subnet(tunnelID int, role string) (ifaceName, localCIDR, peerIP str
 	if octet <= 0 || octet > 250 {
 		octet = 1
 	}
-	ifaceName = fmt.Sprintf("antun%d", tunnelID%10000)
+	// Benchmark sandbox engines use TunnelID >= 1000 (t.Id*1000 + candIndex).
+	// Use a distinct prefix so they never collide with production "antun" interfaces.
+	if tunnelID >= 1000 {
+		ifaceName = fmt.Sprintf("antbs%d", tunnelID%10000)
+	} else {
+		ifaceName = fmt.Sprintf("antun%d", tunnelID%10000)
+	}
 	if len(ifaceName) >= unix.IFNAMSIZ {
 		ifaceName = ifaceName[:unix.IFNAMSIZ-1]
 	}
@@ -320,6 +326,9 @@ func (d *L3TUNDevice) Close() error {
 		if d.file != nil {
 			err = d.file.Close()
 		}
+		// Explicitly delete the interface so its subnet is fully released before
+		// the next sandbox engine tries to assign the same /30 block.
+		_ = exec.Command("ip", "link", "delete", d.name).Run()
 	})
 	return err
 }

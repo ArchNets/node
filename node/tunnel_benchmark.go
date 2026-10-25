@@ -93,12 +93,14 @@ var (
 		{"reverse", "xdi"},
 		{"reverse", "tls-reverse"},
 		{"reverse", "reverse-reality"},
-		{"direct", "stealth"},
-		{"direct", "quic-reverse"},
-		{"direct", "kcp"},
+		// L3 TUN (direct, requires root + open UDP/ICMP firewall on Exit)
 		{"direct", "l3-udp"},
 		{"direct", "l3-pck"},
 		{"direct", "l3-xdi"},
+		// Direct overlay transports
+		{"direct", "stealth"},
+		{"direct", "quic-reverse"},
+		{"direct", "kcp"},
 	}
 )
 
@@ -454,7 +456,7 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			waitTimeout = 35 * time.Second
 		} else {
 			spec := transport.GetTransportSpec(cand.Transport)
-			if spec.IsPacket || spec.IsQuic || spec.NeedsTLSServerCfg {
+			if spec.IsPacket || spec.IsQuic || spec.NeedsTLSServerCfg || spec.IsL3 {
 				waitTimeout = 12 * time.Second
 			}
 		}
@@ -821,7 +823,7 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 
 		select {
 		case <-ctx.Done():
-		case <-time.After(300 * time.Second):
+		case <-time.After(600 * time.Second):
 		}
 	}()
 }
