@@ -451,6 +451,20 @@ type UDPCarrierListener struct {
 	closed   atomic.Bool
 }
 
+// newPacketCarrierListener wraps any net.PacketConn (UDP, raw ICMP, or raw TCP) into a session listener.
+func newPacketCarrierListener(pconn net.PacketConn, udpConn *net.UDPConn, password string, useFEC bool) *UDPCarrierListener {
+	l := &UDPCarrierListener{
+		udpConn:  udpConn,
+		pconn:    pconn,
+		password: password,
+		useFEC:   useFEC,
+		acceptCh: make(chan net.Conn, 128),
+		closeCh:  make(chan struct{}),
+	}
+	go l.readLoop()
+	return l
+}
+
 // ListenUDPCarrier binds a UDP listener for "kcp" (useFEC=true) or "udp" (useFEC=false) transport.
 func ListenUDPCarrier(addr, password string, useFEC bool) (*UDPCarrierListener, *net.UDPConn, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
@@ -464,16 +478,7 @@ func ListenUDPCarrier(addr, password string, useFEC bool) (*UDPCarrierListener, 
 	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
 	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
 
-	l := &UDPCarrierListener{
-		udpConn:  uConn,
-		pconn:    uConn,
-		password: password,
-		useFEC:   useFEC,
-		acceptCh: make(chan net.Conn, 128),
-		closeCh:  make(chan struct{}),
-	}
-	go l.readLoop()
-	return l, uConn, nil
+	return newPacketCarrierListener(uConn, uConn, password, useFEC), uConn, nil
 }
 
 func (l *UDPCarrierListener) Accept(ctx context.Context) (net.Conn, error) {
@@ -491,7 +496,7 @@ func (l *UDPCarrierListener) Close() error {
 	if l.closed.CompareAndSwap(false, true) {
 		close(l.closeCh)
 		if l.pconn != nil {
-			_ = l.pconn.Close()
+			return l.pconn.Close()
 		}
 		if l.udpConn != nil {
 			return l.udpConn.Close()
@@ -509,7 +514,7 @@ func (l *UDPCarrierListener) readLoop() {
 	key, _ := DeriveRealityKey(l.password, "archnet-udp-carrier")
 
 	for {
-		n, remote, err := l.udpConn.ReadFromUDP(buf)
+		n, remote, err := l.pconn.ReadFrom(buf)
 		if err != nil {
 			if l.closed.Load() {
 				return
@@ -531,10 +536,10 @@ func (l *UDPCarrierListener) readLoop() {
 			var ack [9]byte
 			ack[0] = udpPktACK
 			binary.BigEndian.PutUint32(ack[1:5], sessID)
-			_, _ = l.udpConn.WriteToUDP(ack[:], remote)
+			_, _ = l.pconn.WriteTo(ack[:], remote)
 
 			if _, exists := l.sessions.Load(rKey); !exists {
-				sess := newUDPSessionConn(l.udpConn, remote, sessID, false, l.useFEC)
+				sess := newUDPSessionConn(l.pconn, remote, sessID, false, l.useFEC)
 				l.sessions.Store(rKey, sess)
 				select {
 				case l.acceptCh <- sess:
@@ -556,6 +561,60 @@ func (l *UDPCarrierListener) readLoop() {
 	}
 }
 
+// dialPacketCarrier performs the authenticated 32-byte HMAC token handshake over any net.PacketConn.
+func dialPacketCarrier(ctx context.Context, pconn net.PacketConn, rAddr net.Addr, password string, useFEC bool) (net.Conn, error) {
+	magic := udpAuthMagic
+	if useFEC {
+		magic = kcpAuthMagic
+	}
+	key, err := DeriveRealityKey(password, "archnet-udp-carrier")
+	if err != nil {
+		_ = pconn.Close()
+		return nil, err
+	}
+	token, err := GenerateRealityToken(key, magic)
+	if err != nil {
+		_ = pconn.Close()
+		return nil, err
+	}
+
+	sessID := binary.BigEndian.Uint32(token[0:4])
+	synPkt := make([]byte, 9+32)
+	synPkt[0] = udpPktSYN
+	binary.BigEndian.PutUint32(synPkt[1:5], sessID)
+	copy(synPkt[9:], token[:])
+
+	_ = pconn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	if _, err := pconn.WriteTo(synPkt, rAddr); err != nil {
+		_ = pconn.Close()
+		return nil, err
+	}
+
+	var ack [64]byte
+	n, _, err := pconn.ReadFrom(ack[:])
+	if err != nil || n < 9 || ack[0] != udpPktACK {
+		_ = pconn.Close()
+		return nil, errors.New("packet carrier handshake timed out")
+	}
+	_ = pconn.SetReadDeadline(time.Time{})
+
+	sess := newUDPSessionConn(pconn, rAddr, sessID, true, useFEC)
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			nr, _, rErr := pconn.ReadFrom(buf)
+			if rErr != nil {
+				_ = sess.Close()
+				return
+			}
+			if nr >= 9 {
+				sess.pushPacket(buf[:nr])
+			}
+		}
+	}()
+	return sess, nil
+}
+
 // DialUDPCarrier dials a UDP or KCP+FEC session to addr and authenticates with a 32-byte HMAC token.
 func DialUDPCarrier(ctx context.Context, addr, password string, useFEC bool) (net.Conn, error) {
 	rAddr, err := net.ResolveUDPAddr("udp", addr)
@@ -568,55 +627,5 @@ func DialUDPCarrier(ctx context.Context, addr, password string, useFEC bool) (ne
 	}
 	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
 	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
-
-	magic := udpAuthMagic
-	if useFEC {
-		magic = kcpAuthMagic
-	}
-	key, err := DeriveRealityKey(password, "archnet-udp-carrier")
-	if err != nil {
-		_ = uConn.Close()
-		return nil, err
-	}
-	token, err := GenerateRealityToken(key, magic)
-	if err != nil {
-		_ = uConn.Close()
-		return nil, err
-	}
-
-	sessID := binary.BigEndian.Uint32(token[0:4])
-	synPkt := make([]byte, 9+32)
-	synPkt[0] = udpPktSYN
-	binary.BigEndian.PutUint32(synPkt[1:5], sessID)
-	copy(synPkt[9:], token[:])
-
-	_ = uConn.SetReadDeadline(time.Now().Add(4 * time.Second))
-	if _, err := uConn.WriteToUDP(synPkt, rAddr); err != nil {
-		_ = uConn.Close()
-		return nil, err
-	}
-
-	var ack [64]byte
-	n, _, err := uConn.ReadFromUDP(ack[:])
-	if err != nil || n < 9 || ack[0] != udpPktACK {
-		_ = uConn.Close()
-		return nil, errors.New("udp/kcp carrier handshake timed out")
-	}
-	_ = uConn.SetReadDeadline(time.Time{})
-
-	sess := newUDPSessionConn(uConn, rAddr, sessID, true, useFEC)
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			nr, _, rErr := uConn.ReadFromUDP(buf)
-			if rErr != nil {
-				_ = sess.Close()
-				return
-			}
-			if nr >= 9 {
-				sess.pushPacket(buf[:nr])
-			}
-		}
-	}()
-	return sess, nil
+	return dialPacketCarrier(ctx, uConn, rAddr, password, useFEC)
 }

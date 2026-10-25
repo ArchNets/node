@@ -13,6 +13,7 @@ import (
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/core/relay"
 	"github.com/archnets/node/core/relay/telemetry"
+	"github.com/archnets/node/core/relay/transport"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -65,6 +66,62 @@ type BenchmarkCandidate struct {
 	UseFisher     bool
 }
 
+var (
+	reverseBenchmarkTransports = []string{
+		"stealth", "tcpmux", "tcp", "ws-reverse", "wsmux",
+		"wss-reverse", "wssmux", "quic-reverse", "kcp",
+		"pck", "xdi", "tls-reverse", "reverse-reality",
+	}
+	directBenchmarkTransports = []string{
+		"stealth", "tcpmux", "wssmux", "quic-reverse", "kcp",
+		"l3-udp", "l3-quic", "l3-pck", "l3-xdi", "l3-sni",
+	}
+	allRouteBenchmarkTransports = []struct {
+		direction string
+		transport string
+	}{
+		{"reverse", "stealth"},
+		{"reverse", "tcpmux"},
+		{"reverse", "tcp"},
+		{"reverse", "ws-reverse"},
+		{"reverse", "wsmux"},
+		{"reverse", "wss-reverse"},
+		{"reverse", "wssmux"},
+		{"reverse", "quic-reverse"},
+		{"reverse", "kcp"},
+		{"reverse", "pck"},
+		{"reverse", "xdi"},
+		{"reverse", "tls-reverse"},
+		{"reverse", "reverse-reality"},
+		{"direct", "stealth"},
+		{"direct", "quic-reverse"},
+		{"direct", "kcp"},
+		{"direct", "l3-udp"},
+		{"direct", "l3-pck"},
+		{"direct", "l3-xdi"},
+	}
+)
+
+func buildTransportCandidate(idx int, direction, tr, baseSNI string) BenchmarkCandidate {
+	spec := transport.GetTransportSpec(tr)
+	prefix := "Reverse • "
+	if spec.IsL3 {
+		prefix = ""
+	} else if direction == "direct" {
+		prefix = "Direct • "
+	}
+	return BenchmarkCandidate{
+		Index:         idx,
+		Direction:     direction,
+		SNI:           baseSNI,
+		OriginIP:      "",
+		Transport:     tr,
+		MethodLabel:   prefix + spec.Label,
+		UseHalfDuplex: spec.DefaultHalfDuplex,
+		UseFisher:     spec.DefaultFisher,
+	}
+}
+
 // BuildBenchmarkCandidates constructs the ordered list of benchmark profiles for a ScanCommand.
 func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnelConfig) []BenchmarkCandidate {
 	mode := "methods"
@@ -87,109 +144,18 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 	var candidates []BenchmarkCandidate
 	switch mode {
 	case "methods", "all":
-		variations := []struct {
-			direction string
-			transport string
-			label     string
-			hd        bool
-			fisher    bool
-		}{
-			{"reverse", "stealth", "Reverse • Stealth (Noise NNpsk0)", true, false},
-			{"reverse", "tcpmux", "Reverse • TCPMux (Multiplexed TCP)", false, false},
-			{"reverse", "tcp", "Reverse • Raw TCP", true, false},
-			{"reverse", "ws-reverse", "Reverse • WebSocket (Nginx Decoy)", true, false},
-			{"reverse", "wsmux", "Reverse • WSMux (Multiplexed WS)", false, false},
-			{"reverse", "wss-reverse", "Reverse • WSS (TLS 1.3 + Decoy)", true, false},
-			{"reverse", "wssmux", "Reverse • WSSMux (Multiplexed WSS)", false, false},
-			{"reverse", "quic-reverse", "Reverse • QUIC (UDP Streams)", false, false},
-			{"reverse", "kcp", "Reverse • KCP (UDP + FEC)", false, false},
-			{"reverse", "pck", "Reverse • PCK (Stateless Packet TCP)", false, false},
-			{"reverse", "xdi", "Reverse • XDI (ICMP Echo Tunnel)", false, false},
-			{"reverse", "tls-reverse", "Reverse • TLS 1.3", true, false},
-			{"reverse", "reverse-reality", "Reverse • Reality (TLS 1.3 Camouflage)", true, true},
-			{"direct", "stealth", "Direct • Stealth (Noise NNpsk0)", true, false},
-			{"direct", "quic-reverse", "Direct • QUIC (UDP Streams)", false, false},
-			{"direct", "kcp", "Direct • KCP (UDP + FEC)", false, false},
-			{"direct", "l3-udp", "L3 TUN • UDP Datagram", false, false},
-			{"direct", "l3-pck", "L3 TUN • PCK (Stateless Packet)", false, false},
-			{"direct", "l3-xdi", "L3 TUN • XDI (ICMP Echo)", false, false},
-		}
-		for i, v := range variations {
-			candidates = append(candidates, BenchmarkCandidate{
-				Index:         i + 1,
-				Direction:     v.direction,
-				SNI:           baseSNI,
-				OriginIP:      "",
-				Transport:     v.transport,
-				MethodLabel:   v.label,
-				UseHalfDuplex: v.hd,
-				UseFisher:     v.fisher,
-			})
+		for i, v := range allRouteBenchmarkTransports {
+			candidates = append(candidates, buildTransportCandidate(i+1, v.direction, v.transport, baseSNI))
 		}
 
 	case "reverse":
-		variations := []struct {
-			transport string
-			label     string
-			hd        bool
-			fisher    bool
-		}{
-			{"stealth", "Reverse • Stealth (Noise NNpsk0)", true, false},
-			{"tcpmux", "Reverse • TCPMux (Multiplexed TCP)", false, false},
-			{"tcp", "Reverse • Raw TCP", true, false},
-			{"ws-reverse", "Reverse • WebSocket (Nginx Decoy)", true, false},
-			{"wsmux", "Reverse • WSMux (Multiplexed WS)", false, false},
-			{"wss-reverse", "Reverse • WSS (TLS 1.3 + Decoy)", true, false},
-			{"wssmux", "Reverse • WSSMux (Multiplexed WSS)", false, false},
-			{"quic-reverse", "Reverse • QUIC (UDP Streams)", false, false},
-			{"kcp", "Reverse • KCP (UDP + FEC)", false, false},
-			{"pck", "Reverse • PCK (Stateless Packet TCP)", false, false},
-			{"xdi", "Reverse • XDI (ICMP Echo Tunnel)", false, false},
-			{"tls-reverse", "Reverse • TLS 1.3", true, false},
-			{"reverse-reality", "Reverse • Reality (TLS 1.3 Camouflage)", true, true},
-		}
-		for i, v := range variations {
-			candidates = append(candidates, BenchmarkCandidate{
-				Index:         i + 1,
-				Direction:     "reverse",
-				SNI:           baseSNI,
-				OriginIP:      "",
-				Transport:     v.transport,
-				MethodLabel:   v.label,
-				UseHalfDuplex: v.hd,
-				UseFisher:     v.fisher,
-			})
+		for i, tr := range reverseBenchmarkTransports {
+			candidates = append(candidates, buildTransportCandidate(i+1, "reverse", tr, baseSNI))
 		}
 
 	case "direct":
-		variations := []struct {
-			transport string
-			label     string
-			hd        bool
-			fisher    bool
-		}{
-			{"stealth", "Direct • Stealth (Noise NNpsk0)", true, false},
-			{"tcpmux", "Direct • TCPMux (Multiplexed TCP)", false, false},
-			{"wssmux", "Direct • WSSMux (Multiplexed WSS)", false, false},
-			{"quic-reverse", "Direct • QUIC (UDP Streams)", false, false},
-			{"kcp", "Direct • KCP (UDP + FEC)", false, false},
-			{"l3-udp", "L3 TUN • UDP Datagram", false, false},
-			{"l3-quic", "L3 TUN • QUIC Datagram", false, false},
-			{"l3-pck", "L3 TUN • PCK (Stateless Packet)", false, false},
-			{"l3-xdi", "L3 TUN • XDI (ICMP Echo)", false, false},
-			{"l3-sni", "L3 TUN • SNI Spoofed Packet", false, false},
-		}
-		for i, v := range variations {
-			candidates = append(candidates, BenchmarkCandidate{
-				Index:         i + 1,
-				Direction:     "direct",
-				SNI:           baseSNI,
-				OriginIP:      "",
-				Transport:     v.transport,
-				MethodLabel:   v.label,
-				UseHalfDuplex: v.hd,
-				UseFisher:     v.fisher,
-			})
+		for i, tr := range directBenchmarkTransports {
+			candidates = append(candidates, buildTransportCandidate(i+1, "direct", tr, baseSNI))
 		}
 
 	case "matrix":

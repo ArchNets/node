@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const (
@@ -371,205 +370,82 @@ func discoverLocalIPv4For(dst net.IP) net.IP {
 // ListenXDICarrier starts an XDI (ICMP Echo) listener. If the process has CAP_NET_RAW / root,
 // it binds a raw "ip4:icmp" socket with direction-tag filtering and iptables echo guard.
 func ListenXDICarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil || host == "" {
-		host = "0.0.0.0"
-	}
-	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:icmp", host); rErr == nil {
-			ident := uint16(port & 0xFFFF)
-			wrapped := &icmpPacketConn{
-				PacketConn: rawConn,
-				isServer:   true,
-				ident:      ident,
-				tag:        deriveXDITag(password),
-				echoRule:   installXDIEchoGuard(ident),
-			}
-			l := &UDPCarrierListener{
-				pconn:    wrapped,
-				password: password,
-				useFEC:   true,
-				acceptCh: make(chan net.Conn, 128),
-				closeCh:  make(chan struct{}),
-			}
-			go l.readLoopPacketConn(wrapped)
-			return l, nil, nil
-		}
-	}
-	return ListenUDPCarrier(addr, password, true)
+ host, _, err := net.SplitHostPort(addr)
+ if err != nil || host == "" {
+  host = "0.0.0.0"
+ }
+ if os.Geteuid() == 0 && host != "127.0.0.1" {
+  if rawConn, rErr := net.ListenPacket("ip4:icmp", host); rErr == nil {
+   ident := uint16(port & 0xFFFF)
+   wrapped := &icmpPacketConn{
+    PacketConn: rawConn,
+    isServer:   true,
+    ident:      ident,
+    tag:        deriveXDITag(password),
+    echoRule:   installXDIEchoGuard(ident),
+   }
+   return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+  }
+ }
+ return ListenUDPCarrier(addr, password, true)
 }
 
 // DialXDICarrier dials an XDI (ICMP Echo) session to addr.
 func DialXDICarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:icmp", "0.0.0.0"); rErr == nil {
-			ident := uint16(port & 0xFFFF)
-			wrapped := &icmpPacketConn{
-				PacketConn: rawConn,
-				isServer:   false,
-				ident:      ident,
-				tag:        deriveXDITag(password),
-			}
-			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
-			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
-		}
-	}
-	return DialUDPCarrier(ctx, addr, password, true)
+ host, _, err := net.SplitHostPort(addr)
+ if err != nil {
+  host = addr
+ }
+ if os.Geteuid() == 0 && host != "127.0.0.1" {
+  if rawConn, rErr := net.ListenPacket("ip4:icmp", "0.0.0.0"); rErr == nil {
+   ident := uint16(port & 0xFFFF)
+   wrapped := &icmpPacketConn{
+    PacketConn: rawConn,
+    isServer:   false,
+    ident:      ident,
+    tag:        deriveXDITag(password),
+   }
+   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+   return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+  }
+ }
+ return DialUDPCarrier(ctx, addr, password, true)
 }
 
 // ListenPCKCarrier starts a PCK (Stateless Raw TCP Packet + KCP/FEC) carrier listener.
 func ListenPCKCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil || host == "" {
-		host = "0.0.0.0"
-	}
-	port, _ := strconv.Atoi(portStr)
-	if os.Geteuid() == 0 && port > 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:tcp", host); rErr == nil {
-			wrapped := newPCKPacketConn(rawConn, true, uint16(port), 0)
-			l := &UDPCarrierListener{
-				pconn:    wrapped,
-				password: password,
-				useFEC:   true,
-				acceptCh: make(chan net.Conn, 128),
-				closeCh:  make(chan struct{}),
-			}
-			go l.readLoopPacketConn(wrapped)
-			return l, nil, nil
-		}
-	}
-	return ListenUDPCarrier(addr, password, true)
+ host, portStr, err := net.SplitHostPort(addr)
+ if err != nil || host == "" {
+  host = "0.0.0.0"
+ }
+ port, _ := strconv.Atoi(portStr)
+ if os.Geteuid() == 0 && port > 0 && host != "127.0.0.1" {
+  if rawConn, rErr := net.ListenPacket("ip4:tcp", host); rErr == nil {
+   wrapped := newPCKPacketConn(rawConn, true, uint16(port), 0)
+   return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+  }
+ }
+ return ListenUDPCarrier(addr, password, true)
 }
 
 // DialPCKCarrier dials a PCK (Stateless Raw TCP Packet + KCP/FEC) carrier session.
 func DialPCKCarrier(ctx context.Context, addr, password string) (net.Conn, error) {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	port, _ := strconv.Atoi(portStr)
-	if os.Geteuid() == 0 && port > 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:tcp", "0.0.0.0"); rErr == nil {
-			var rnd [2]byte
-			_, _ = rand.Read(rnd[:])
-			localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
-			wrapped := newPCKPacketConn(rawConn, false, localPort, uint16(port))
-			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
-			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
-		}
-	}
-	return DialUDPCarrier(ctx, addr, password, true)
-}
-
-func (l *UDPCarrierListener) readLoopPacketConn(pconn net.PacketConn) {
-	buf := make([]byte, 65535)
-	magic := kcpAuthMagic
-	key, _ := DeriveRealityKey(l.password, "archnet-udp-carrier")
-
-	for {
-		n, remote, err := pconn.ReadFrom(buf)
-		if err != nil {
-			if l.closed.Load() {
-				_ = pconn.Close()
-				return
-			}
-			continue
-		}
-		if n < 9 {
-			continue
-		}
-
-		typ := buf[0]
-		sessID := binary.BigEndian.Uint32(buf[1:5])
-		rKey := remote.String()
-
-		if typ == udpPktSYN && n >= 9+32 {
-			if !VerifyRealityToken(key, buf[9:9+32], magic) {
-				continue
-			}
-			var ack [9]byte
-			ack[0] = udpPktACK
-			binary.BigEndian.PutUint32(ack[1:5], sessID)
-			_, _ = pconn.WriteTo(ack[:], remote)
-
-			if _, exists := l.sessions.Load(rKey); !exists {
-				sess := newUDPSessionConn(pconn, remote, sessID, false, true)
-				l.sessions.Store(rKey, sess)
-				select {
-				case l.acceptCh <- sess:
-				default:
-					_ = sess.Close()
-					l.sessions.Delete(rKey)
-				}
-			}
-			continue
-		}
-
-		if val, ok := l.sessions.Load(rKey); ok {
-			sess := val.(*UDPSessionConn)
-			sess.pushPacket(buf[:n])
-			if typ == udpPktFIN {
-				l.sessions.Delete(rKey)
-			}
-		}
-	}
-}
-
-func dialPacketCarrier(ctx context.Context, pconn net.PacketConn, rAddr net.Addr, password string, useFEC bool) (net.Conn, error) {
-	magic := udpAuthMagic
-	if useFEC {
-		magic = kcpAuthMagic
-	}
-	key, err := DeriveRealityKey(password, "archnet-udp-carrier")
-	if err != nil {
-		_ = pconn.Close()
-		return nil, err
-	}
-	token, err := GenerateRealityToken(key, magic)
-	if err != nil {
-		_ = pconn.Close()
-		return nil, err
-	}
-
-	sessID := binary.BigEndian.Uint32(token[0:4])
-	synPkt := make([]byte, 9+32)
-	synPkt[0] = udpPktSYN
-	binary.BigEndian.PutUint32(synPkt[1:5], sessID)
-	copy(synPkt[9:], token[:])
-
-	_ = pconn.SetReadDeadline(time.Now().Add(4 * time.Second))
-	if _, err := pconn.WriteTo(synPkt, rAddr); err != nil {
-		_ = pconn.Close()
-		return nil, err
-	}
-
-	var ack [64]byte
-	n, _, err := pconn.ReadFrom(ack[:])
-	if err != nil || n < 9 || ack[0] != udpPktACK {
-		_ = pconn.Close()
-		return nil, fmt.Errorf("packet carrier handshake timed out")
-	}
-	_ = pconn.SetReadDeadline(time.Time{})
-
-	sess := newUDPSessionConn(pconn, rAddr, sessID, true, useFEC)
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			nr, _, rErr := pconn.ReadFrom(buf)
-			if rErr != nil {
-				_ = sess.Close()
-				return
-			}
-			if nr >= 9 {
-				sess.pushPacket(buf[:nr])
-			}
-		}
-	}()
-	return sess, nil
+ host, portStr, err := net.SplitHostPort(addr)
+ if err != nil {
+  host = addr
+ }
+ port, _ := strconv.Atoi(portStr)
+ if os.Geteuid() == 0 && port > 0 && host != "127.0.0.1" {
+  if rawConn, rErr := net.ListenPacket("ip4:tcp", "0.0.0.0"); rErr == nil {
+   var rnd [2]byte
+   _, _ = rand.Read(rnd[:])
+   localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
+   wrapped := newPCKPacketConn(rawConn, false, localPort, uint16(port))
+   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+   return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+  }
+ }
+ return DialUDPCarrier(ctx, addr, password, true)
 }
 
 // CheckRPFilterStatus checks /proc/sys/net/ipv4/conf/all/rp_filter on Linux (matching BackPack's ctStrictRPFilter).

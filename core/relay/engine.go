@@ -144,7 +144,7 @@ func (e *Engine) Start() error {
 
 	e.alive.Store(true)
 
-	if strings.HasPrefix(e.cfg.Transport, "l3-") {
+	if transport.GetTransportSpec(e.cfg.Transport).IsL3 {
 		if tunDev, err := transport.OpenL3TUN(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, transport.GetConfiguredMTU()); err == nil {
 			e.mu.Lock()
 			e.l3TunDev = tunDev
@@ -295,27 +295,20 @@ func (e *Engine) startEntry() error {
 }
 
 func (e *Engine) isQuicTransport() bool {
-	return e.cfg.Transport == "quic-reverse" || e.cfg.Transport == "quic" || e.cfg.Transport == "l3-quic"
+	return transport.GetTransportSpec(e.cfg.Transport).IsQuic
 }
 
 func (e *Engine) isPacketTransport() bool {
-	switch e.cfg.Transport {
-	case "kcp", "udp", "pck", "xdi", "l3-udp", "l3-pck", "l3-xdi", "l3-sni", "spoof":
-		return true
-	}
-	return false
+	return transport.GetTransportSpec(e.cfg.Transport).IsPacket
 }
 
 func (e *Engine) isMuxTransport() bool {
-	switch e.cfg.Transport {
-	case "tcpmux", "wsmux", "wssmux":
-		return true
-	}
-	return e.isPacketTransport()
+	return transport.GetTransportSpec(e.cfg.Transport).IsMux
 }
 
 func (e *Engine) startCarrierListener(listenIP string) error {
-	if e.cfg.Transport == "tls-reverse" || e.cfg.Transport == "wss-reverse" || e.cfg.Transport == "wssmux" || e.isQuicTransport() {
+	spec := transport.GetTransportSpec(e.cfg.Transport)
+	if spec.NeedsTLSServerCfg {
 		tlsCfg, err := transport.BuildRelayTLSConfig(e.cfg.SNI, e.cfg.CertMode, e.cfg.CertFile, e.cfg.KeyFile)
 		if err != nil {
 			return fmt.Errorf("build relay tls config: %w", err)
