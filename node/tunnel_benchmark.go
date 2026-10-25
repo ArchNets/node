@@ -571,9 +571,9 @@ func (c *TunnelController) evaluateCandidate(
 		OriginIP:           cand.OriginIP,
 		Password:           password,
 		UseHalfDuplex:      cand.UseHalfDuplex,
-		UseFisher:          cand.UseFisher,
-		FisherConnections:  3,
-		MinHeldConnections: 6,
+		UseFisher:          false,
+		FisherConnections:  1,
+		MinHeldConnections: 1,
 		Logger:             c.logger,
 	})
 
@@ -813,9 +813,9 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				SNI:                cand.SNI,
 				Password:           password,
 				UseHalfDuplex:      cand.UseHalfDuplex,
-				UseFisher:          cand.UseFisher,
-				FisherConnections:  3,
-				MinHeldConnections: 6,
+				UseFisher:          false,
+				FisherConnections:  1,
+				MinHeldConnections: 1,
 				Logger:             c.logger,
 			})
 			if err := eng.Start(); err == nil {
@@ -827,7 +827,7 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 
 		select {
 		case <-ctx.Done():
-		case <-time.After(120 * time.Second):
+		case <-time.After(300 * time.Second):
 		}
 	}()
 }

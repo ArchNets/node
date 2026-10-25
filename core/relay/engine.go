@@ -801,6 +801,9 @@ func (e *Engine) triggerReplenish() {
 }
 
 func (e *Engine) logDialFailure(err error) {
+	if e.cfg.TunnelID >= 1000 {
+		return // Suppress benchmark candidate dial errors while waiting for Entry to open port
+	}
 	now := time.Now().Unix()
 	last := e.lastDialLog.Load()
 	if now-last >= 10 {
@@ -816,7 +819,12 @@ func (e *Engine) logDialFailure(err error) {
 
 func (e *Engine) exitPoolLoop() {
 	defer e.wg.Done()
-	ticker := time.NewTicker(300 * time.Millisecond)
+	tickDuration := 500 * time.Millisecond
+	if e.cfg.TunnelID >= 1000 {
+		// Benchmark sandbox instances: gentle 2s ticker, no aggressive hammering
+		tickDuration = 2 * time.Second
+	}
+	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
 
 	var dialingCount atomic.Int64
