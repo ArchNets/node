@@ -110,10 +110,14 @@ func buildTransportCandidate(idx int, direction, tr, baseSNI string) BenchmarkCa
 	} else if direction == "direct" {
 		prefix = "Direct • "
 	}
+	sni := ""
+	if spec.NeedsSNI {
+		sni = baseSNI
+	}
 	return BenchmarkCandidate{
 		Index:         idx,
 		Direction:     direction,
-		SNI:           baseSNI,
+		SNI:           sni,
 		OriginIP:      "",
 		Transport:     tr,
 		MethodLabel:   prefix + spec.Label,
@@ -461,6 +465,16 @@ func (c *TunnelController) evaluateCandidate(
 	password string,
 	waitTimeout time.Duration,
 ) *panel.ScanResultItem {
+	c.logger.WithFields(log.Fields{
+		"tunnel_id": t.Id,
+		"idx":       cand.Index,
+		"method":    cand.MethodLabel,
+		"transport": cand.Transport,
+		"direction": cand.Direction,
+		"sni":       cand.SNI,
+		"port":      sandboxPort + cand.Index,
+	}).Info("[Benchmark] >>> Starting candidate benchmark")
+
 	originRTT := measureOriginTCPHandshake(cand.OriginIP, 443, 1200*time.Millisecond)
 
 	direction := cand.Direction
@@ -515,8 +529,22 @@ func (c *TunnelController) evaluateCandidate(
 
 		if sandboxEngine.Stats.PoolIdleConnections.Load() > 0 {
 			sample, _ = telemetry.RunBandwidthProbe(sandboxEngine.ClaimReverseStream, sandboxEngine.Stats, 1200*time.Millisecond)
+		} else {
+			c.logger.WithFields(log.Fields{
+				"tunnel_id": t.Id,
+				"idx":       cand.Index,
+				"transport": cand.Transport,
+				"timeout":   waitTimeout,
+			}).Warn("[Benchmark] Candidate failed to establish warm reverse connection (exit did not check in)")
 		}
 		_ = sandboxEngine.Close()
+	} else {
+		c.logger.WithFields(log.Fields{
+			"tunnel_id": t.Id,
+			"idx":       cand.Index,
+			"transport": cand.Transport,
+			"err":       err,
+		}).Warn("[Benchmark] Candidate sandbox engine failed to start")
 	}
 
 	if sample == nil && c.relayDriver != nil {
@@ -527,6 +555,11 @@ func (c *TunnelController) evaluateCandidate(
 	}
 
 	if sample == nil {
+		c.logger.WithFields(log.Fields{
+			"tunnel_id": t.Id,
+			"idx":       cand.Index,
+			"transport": cand.Transport,
+		}).Warn("[Benchmark] <<< Candidate benchmark failed (zero bandwidth/unreachable)")
 		return nil
 	}
 
@@ -543,6 +576,16 @@ func (c *TunnelController) evaluateCandidate(
 	uploadBps := int64(sample.UploadMbps * 1_000_000.0 / 8.0)
 	downloadBps := int64(sample.DownloadMbps * 1_000_000.0 / 8.0)
 	score := ComputeBenchmarkScore(uploadBps, downloadBps, latencyMs, sample.PacketLoss)
+
+	c.logger.WithFields(log.Fields{
+		"tunnel_id": t.Id,
+		"idx":       cand.Index,
+		"method":    cand.MethodLabel,
+		"downMbps":  sample.DownloadMbps,
+		"upMbps":    sample.UploadMbps,
+		"rttMs":     latencyMs,
+		"score":     score,
+	}).Info("[Benchmark] <<< Candidate benchmark SUCCESS")
 
 	return &panel.ScanResultItem{
 		ProtocolNumber: cand.Index,
@@ -650,6 +693,13 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 
 		// Start all candidate sandbox engines concurrently on their dedicated port (sandboxPort + cand.Index)
 		// so Entry and Exit never suffer from 30-second config poll clock skew.
+		c.logger.WithFields(log.Fields{
+			"tunnel_id":  t.Id,
+			"candidates": len(candidates),
+			"basePort":   sandboxPort,
+			"entryIP":    entryIP,
+		}).Info("[Benchmark] Exit node starting parallel candidate sandbox engines")
+
 		for _, cand := range candidates {
 			select {
 			case <-ctx.Done():

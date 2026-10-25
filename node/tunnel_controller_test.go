@@ -119,8 +119,16 @@ func TestBuildBenchmarkCandidates(t *testing.T) {
 	if len(methodCandidates) == 0 {
 		t.Fatal("expected method benchmark candidates")
 	}
-	if methodCandidates[0].SNI != "dynamic.hospital.ir" {
-		t.Errorf("expected dynamic.hospital.ir base SNI, got %s", methodCandidates[0].SNI)
+	// Verify candidates that need SNI (like Reality, WSS, WS) receive the base SNI, while Stealth (Noise) has empty SNI
+	var foundRealitySNI bool
+	for _, c := range methodCandidates {
+		if c.Transport == "reverse-reality" && c.SNI == "dynamic.hospital.ir" {
+			foundRealitySNI = true
+			break
+		}
+	}
+	if !foundRealitySNI {
+		t.Errorf("expected reverse-reality candidate with dynamic.hospital.ir SNI")
 	}
 }
 
