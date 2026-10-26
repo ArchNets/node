@@ -78,9 +78,20 @@ type RelayTunnelConfig struct {
 	L3Iface          string   `json:"l3_iface,omitempty"`
 	L3MTU            int      `json:"l3_mtu,omitempty"`
 	SpoofSrcIP       string   `json:"spoof_src_ip,omitempty"`
+	SpoofSrcPool     []string `json:"spoof_src_pool,omitempty"`
+	SpoofPeerSrcIP   string   `json:"spoof_peer_src_ip,omitempty"`
 	SpoofProfile     string   `json:"spoof_profile,omitempty"`
+	SpoofUplink      string   `json:"spoof_uplink,omitempty"`
+	SpoofDownlink    string   `json:"spoof_downlink,omitempty"`
+	SpoofFakeTLS     bool     `json:"spoof_fake_tls,omitempty"`
+	SpoofTTLJitter   bool     `json:"spoof_ttl_jitter,omitempty"`
+	SpoofRandomDSCP  bool     `json:"spoof_random_dscp,omitempty"`
+	SpoofPortMin     int      `json:"spoof_port_min,omitempty"`
+	SpoofPortMax     int      `json:"spoof_port_max,omitempty"`
 	SpoofPadding     bool     `json:"spoof_padding,omitempty"`
+	SpoofPaddingMax  int      `json:"spoof_padding_max,omitempty"`
 	SpoofShufflePort bool     `json:"spoof_shuffle_port,omitempty"`
+	SpoofInterface   string   `json:"spoof_interface,omitempty"`
 }
 
 // TunnelInfo represents a single tunnel configuration

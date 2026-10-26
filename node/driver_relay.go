@@ -237,7 +237,13 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	var l3LocalIP, l3PeerIP, l3Iface string
 	var l3MTU int
 	var spoofSrcIP, spoofProfile string
+	var spoofSrcPool []string
+	var spoofPeerSrcIP string
+	var spoofUplink, spoofDownlink string
+	var spoofFakeTLS, spoofTTLJitter, spoofRandomDSCP bool
+	var spoofPortMin, spoofPortMax, spoofPaddingMax int
 	var spoofPadding, spoofShufflePort bool
+	var spoofInterface string
 
 	if rc != nil {
 		if rc.Preset != "" {
@@ -256,9 +262,20 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		l3Iface = rc.L3Iface
 		l3MTU = rc.L3MTU
 		spoofSrcIP = rc.SpoofSrcIP
+		spoofSrcPool = rc.SpoofSrcPool
+		spoofPeerSrcIP = rc.SpoofPeerSrcIP
 		spoofProfile = rc.SpoofProfile
+		spoofUplink = rc.SpoofUplink
+		spoofDownlink = rc.SpoofDownlink
+		spoofFakeTLS = rc.SpoofFakeTLS
+		spoofTTLJitter = rc.SpoofTTLJitter
+		spoofRandomDSCP = rc.SpoofRandomDSCP
+		spoofPortMin = rc.SpoofPortMin
+		spoofPortMax = rc.SpoofPortMax
 		spoofPadding = rc.SpoofPadding
+		spoofPaddingMax = rc.SpoofPaddingMax
 		spoofShufflePort = rc.SpoofShufflePort
+		spoofInterface = rc.SpoofInterface
 	}
 
 	cfg := relay.Config{
@@ -298,9 +315,20 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		L3Iface:            l3Iface,
 		L3MTU:              l3MTU,
 		SpoofSrcIP:         spoofSrcIP,
+		SpoofSrcPool:       spoofSrcPool,
+		SpoofPeerSrcIP:     spoofPeerSrcIP,
 		SpoofProfile:       spoofProfile,
+		SpoofUplink:        spoofUplink,
+		SpoofDownlink:      spoofDownlink,
+		SpoofFakeTLS:       spoofFakeTLS,
+		SpoofTTLJitter:     spoofTTLJitter,
+		SpoofRandomDSCP:    spoofRandomDSCP,
+		SpoofPortMin:       spoofPortMin,
+		SpoofPortMax:       spoofPortMax,
 		SpoofPadding:       spoofPadding,
+		SpoofPaddingMax:    spoofPaddingMax,
 		SpoofShufflePort:   spoofShufflePort,
+		SpoofInterface:     spoofInterface,
 		Forwarders:         forwarderRules,
 		Logger:             d.logger,
 		OnProbeSample:      d.QueueProbeSample,

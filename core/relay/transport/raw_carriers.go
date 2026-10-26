@@ -616,6 +616,211 @@ func DialGRECarrier(ctx context.Context, addr, password string) (net.Conn, error
 	return DialUDPCarrier(ctx, addr, password, true)
 }
 
+// SpoofOptions contains all tuning parameters for raw IP spoofing and evasion.
+type SpoofOptions struct {
+	SrcIP       string
+	SrcPool     []string
+	PeerSrcIP   string
+	Profile     string // udp, tcp, icmp
+	Uplink      string
+	Downlink    string
+	FakeTLS     bool
+	TTLJitter   bool
+	RandomDSCP  bool
+	ShufflePort bool
+	PortMin     uint16
+	PortMax     uint16
+	Padding     bool
+	PaddingMax  uint8
+	Interface   string
+}
+
+type spoofPacketConn struct {
+	net.PacketConn
+	opts       SpoofOptions
+	isServer   bool
+	srcCursor  atomic.Uint64
+	tag        [4]byte
+	closeOnce  sync.Once
+}
+
+func newSpoofPacketConn(pc net.PacketConn, opts SpoofOptions, isServer bool, tag [4]byte) *spoofPacketConn {
+	if opts.PortMin == 0 {
+		opts.PortMin = 20000
+	}
+	if opts.PortMax == 0 || opts.PortMax <= opts.PortMin {
+		opts.PortMax = 60000
+	}
+	if opts.PaddingMax == 0 {
+		opts.PaddingMax = 64
+	}
+	return &spoofPacketConn{
+		PacketConn: pc,
+		opts:       opts,
+		isServer:   isServer,
+		tag:        tag,
+	}
+}
+
+func (c *spoofPacketConn) pickSrcIP() string {
+	if len(c.opts.SrcPool) > 0 {
+		idx := c.srcCursor.Add(1)
+		cleanPool := make([]string, 0, len(c.opts.SrcPool))
+		for _, s := range c.opts.SrcPool {
+			t := strings.TrimSpace(s)
+			if t != "" {
+				cleanPool = append(cleanPool, t)
+			}
+		}
+		if len(cleanPool) > 0 {
+			return cleanPool[idx%uint64(len(cleanPool))]
+		}
+	}
+	return strings.TrimSpace(c.opts.SrcIP)
+}
+
+func (c *spoofPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	data := p
+
+	// 1. Self-describing padding
+	if c.opts.Padding {
+		maxPad := int(c.opts.PaddingMax)
+		if maxPad <= 0 || maxPad > 255 {
+			maxPad = 64
+		}
+		var rndByte [1]byte
+		_, _ = rand.Read(rndByte[:])
+		padLen := (int(rndByte[0]) % maxPad) + 1 // 1..maxPad
+		padded := make([]byte, len(data)+padLen)
+		copy(padded, data)
+		_, _ = rand.Read(padded[len(data) : len(padded)-1])
+		padded[len(padded)-1] = byte(padLen)
+		data = padded
+	}
+
+	// 2. Fake TLS 1.2 ApplicationData record header
+	if c.opts.FakeTLS && (c.opts.Profile == "tcp" || c.opts.Uplink == "tcp" || c.opts.Downlink == "tcp") {
+		fake := make([]byte, 5+len(data))
+		fake[0] = 0x17             // ApplicationData
+		fake[1], fake[2] = 0x03, 0x03 // TLS 1.2
+		binary.BigEndian.PutUint16(fake[3:5], uint16(len(data)))
+		copy(fake[5:], data)
+		data = fake
+	}
+
+	return c.PacketConn.WriteTo(data, addr)
+}
+
+func (c *spoofPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	buf := make([]byte, 65535)
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+
+		// Verify expected incoming peer source if set
+		if c.opts.PeerSrcIP != "" {
+			host := addr.String()
+			if h, _, sErr := net.SplitHostPort(host); sErr == nil {
+				host = h
+			}
+			if host != c.opts.PeerSrcIP {
+				continue // Drop unexpected source
+			}
+		}
+
+		data := buf[:n]
+
+		// Strip fake TLS header if present
+		if c.opts.FakeTLS && len(data) >= 5 && data[0] == 0x17 && data[1] == 0x03 && data[2] == 0x03 {
+			data = data[5:]
+		}
+
+		// Strip self-describing padding if configured
+		if c.opts.Padding && len(data) > 0 {
+			padLen := int(data[len(data)-1])
+			if padLen > 0 && padLen <= len(data) {
+				data = data[:len(data)-padLen]
+			}
+		}
+
+		copied := copy(p, data)
+		return copied, addr, nil
+	}
+}
+
+// ListenSpoofCarrier starts an advanced raw IP spoofing carrier listener.
+func ListenSpoofCarrier(addr, password string, opts SpoofOptions) (*UDPCarrierListener, *net.UDPConn, error) {
+	proto := byte(17) // default UDP
+	prof := strings.ToLower(strings.TrimSpace(opts.Profile))
+	if opts.Downlink != "" {
+		prof = strings.ToLower(strings.TrimSpace(opts.Downlink))
+	}
+	switch prof {
+	case "tcp":
+		proto = 6
+	case "icmp":
+		proto = 1
+	case "bip":
+		proto = 58
+	case "ipip":
+		proto = 4
+	case "gre":
+		proto = 47
+	}
+
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "0.0.0.0"
+	}
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		protoStr := fmt.Sprintf("ip4:%d", proto)
+		if rawConn, rErr := net.ListenPacket(protoStr, host); rErr == nil {
+			_ = attachSocketBPFProtocolFilter(rawConn, proto)
+			wrapped := newSpoofPacketConn(rawConn, opts, true, deriveXDITag(password))
+			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+		}
+	}
+	return ListenUDPCarrier(addr, password, true)
+}
+
+// DialSpoofCarrier dials an advanced raw IP spoofing carrier session.
+func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOptions) (net.Conn, error) {
+	proto := byte(17) // default UDP
+	prof := strings.ToLower(strings.TrimSpace(opts.Profile))
+	if opts.Uplink != "" {
+		prof = strings.ToLower(strings.TrimSpace(opts.Uplink))
+	}
+	switch prof {
+	case "tcp":
+		proto = 6
+	case "icmp":
+		proto = 1
+	case "bip":
+		proto = 58
+	case "ipip":
+		proto = 4
+	case "gre":
+		proto = 47
+	}
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	port, _ := strconv.Atoi(portStr)
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		protoStr := fmt.Sprintf("ip4:%d", proto)
+		if rawConn, rErr := net.ListenPacket(protoStr, "0.0.0.0"); rErr == nil {
+			wrapped := newSpoofPacketConn(rawConn, opts, false, deriveXDITag(password))
+			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+		}
+	}
+	return DialUDPCarrier(ctx, addr, password, true)
+}
+
 // CheckRPFilterStatus checks /proc/sys/net/ipv4/conf/all/rp_filter on Linux (matching BackPack's ctStrictRPFilter).
 func CheckRPFilterStatus() string {
 	b, err := os.ReadFile("/proc/sys/net/ipv4/conf/all/rp_filter")

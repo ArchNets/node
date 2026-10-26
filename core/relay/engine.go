@@ -59,9 +59,20 @@ type Config struct {
 	L3Iface            string
 	L3MTU              int
 	SpoofSrcIP         string
+	SpoofSrcPool       []string
+	SpoofPeerSrcIP     string
 	SpoofProfile       string
+	SpoofUplink        string
+	SpoofDownlink      string
+	SpoofFakeTLS       bool
+	SpoofTTLJitter     bool
+	SpoofRandomDSCP    bool
+	SpoofPortMin       int
+	SpoofPortMax       int
 	SpoofPadding       bool
+	SpoofPaddingMax    int
 	SpoofShufflePort   bool
+	SpoofInterface     string
 	Forwarders         []routing.ForwarderRule
 	Logger             *log.Entry
 	OnProbeSample      func(tunnelID int, sample *telemetry.BandwidthSample)
@@ -408,6 +419,25 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 			uLn, uConn, err = transport.ListenIPIPCarrier(carrierAddr, e.cfg.Password)
 		case "l3-gre":
 			uLn, uConn, err = transport.ListenGRECarrier(carrierAddr, e.cfg.Password)
+		case "spoof":
+			spoofOpts := transport.SpoofOptions{
+				SrcIP:       e.cfg.SpoofSrcIP,
+				SrcPool:     e.cfg.SpoofSrcPool,
+				PeerSrcIP:   e.cfg.SpoofPeerSrcIP,
+				Profile:     e.cfg.SpoofProfile,
+				Uplink:      e.cfg.SpoofUplink,
+				Downlink:    e.cfg.SpoofDownlink,
+				FakeTLS:     e.cfg.SpoofFakeTLS,
+				TTLJitter:   e.cfg.SpoofTTLJitter,
+				RandomDSCP:  e.cfg.SpoofRandomDSCP,
+				ShufflePort: e.cfg.SpoofShufflePort,
+				PortMin:     uint16(e.cfg.SpoofPortMin),
+				PortMax:     uint16(e.cfg.SpoofPortMax),
+				Padding:     e.cfg.SpoofPadding,
+				PaddingMax:  uint8(e.cfg.SpoofPaddingMax),
+				Interface:   e.cfg.SpoofInterface,
+			}
+			uLn, uConn, err = transport.ListenSpoofCarrier(carrierAddr, e.cfg.Password, spoofOpts)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			uLn, uConn, err = transport.ListenUDPCarrier(carrierAddr, e.cfg.Password, useFEC)
@@ -1083,6 +1113,25 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 			return transport.DialIPIPCarrier(e.ctx, addr, e.cfg.Password)
 		case "l3-gre":
 			return transport.DialGRECarrier(e.ctx, addr, e.cfg.Password)
+		case "spoof":
+			spoofOpts := transport.SpoofOptions{
+				SrcIP:       e.cfg.SpoofSrcIP,
+				SrcPool:     e.cfg.SpoofSrcPool,
+				PeerSrcIP:   e.cfg.SpoofPeerSrcIP,
+				Profile:     e.cfg.SpoofProfile,
+				Uplink:      e.cfg.SpoofUplink,
+				Downlink:    e.cfg.SpoofDownlink,
+				FakeTLS:     e.cfg.SpoofFakeTLS,
+				TTLJitter:   e.cfg.SpoofTTLJitter,
+				RandomDSCP:  e.cfg.SpoofRandomDSCP,
+				ShufflePort: e.cfg.SpoofShufflePort,
+				PortMin:     uint16(e.cfg.SpoofPortMin),
+				PortMax:     uint16(e.cfg.SpoofPortMax),
+				Padding:     e.cfg.SpoofPadding,
+				PaddingMax:  uint8(e.cfg.SpoofPaddingMax),
+				Interface:   e.cfg.SpoofInterface,
+			}
+			return transport.DialSpoofCarrier(e.ctx, addr, e.cfg.Password, spoofOpts)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			return transport.DialUDPCarrier(e.ctx, addr, e.cfg.Password, useFEC)
