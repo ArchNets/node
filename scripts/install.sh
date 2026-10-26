@@ -606,7 +606,7 @@ EOF
 resolve_version() {
     local version="$1"
     if [[ -n "$version" ]]; then
-        echo "$version"
+        echo "v${version#v}"
         return 0
     fi
     curl -fsSL --max-time 30 "https://api.github.com/repos/${REPO}/releases/latest" |

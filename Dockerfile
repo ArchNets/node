@@ -1,5 +1,5 @@
 # Build go
-FROM golang:1.26.1-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 ARG VERSION=docker
 WORKDIR /app
 COPY . .
