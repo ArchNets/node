@@ -453,6 +453,136 @@ func DialPCKCarrier(ctx context.Context, addr, password string) (net.Conn, error
  return DialUDPCarrier(ctx, addr, password, true)
 }
 
+// newRawProtoPacketConn wraps an IPv4 raw packet connection (for Protocol 58 BIP or Protocol 4 IPIP).
+func newRawProtoPacketConn(pc net.PacketConn, proto byte, isServer bool, tag [4]byte) *rawProtoPacketConn {
+	return &rawProtoPacketConn{
+		PacketConn: pc,
+		proto:      proto,
+		isServer:   isServer,
+		tag:        tag,
+	}
+}
+
+type rawProtoPacketConn struct {
+	net.PacketConn
+	proto     byte
+	isServer  bool
+	tag       [4]byte
+	closeOnce sync.Once
+}
+
+func (c *rawProtoPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	host := addr.String()
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ipAddr, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return 0, err
+	}
+	dirByte := byte(0x01)
+	if c.isServer {
+		dirByte = byte(0x02)
+	}
+	frame := make([]byte, 5+len(p))
+	copy(frame[0:4], c.tag[:])
+	frame[4] = dirByte
+	copy(frame[5:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, ipAddr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *rawProtoPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	buf := make([]byte, 65535)
+	expectedDir := byte(0x02)
+	if c.isServer {
+		expectedDir = byte(0x01)
+	}
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < 5 {
+			continue
+		}
+		if !bytes.Equal(buf[0:4], c.tag[:]) || buf[4] != expectedDir {
+			continue
+		}
+		copied := copy(p, buf[5:n])
+		return copied, addr, nil
+	}
+}
+
+// ListenBIPCarrier starts a raw IPv4 Protocol 58 (BIP / IPv6-ICMP on IPv4) carrier listener.
+func ListenBIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "0.0.0.0"
+	}
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := net.ListenPacket("ip4:58", host); rErr == nil {
+			_ = attachSocketBPFProtocolFilter(rawConn, 58)
+			wrapped := newRawProtoPacketConn(rawConn, 58, true, deriveXDITag(password))
+			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+		}
+	}
+	return ListenUDPCarrier(addr, password, true)
+}
+
+// DialBIPCarrier dials a raw IPv4 Protocol 58 (BIP) carrier session.
+func DialBIPCarrier(ctx context.Context, addr, password string) (net.Conn, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	port, _ := strconv.Atoi(portStr)
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := net.ListenPacket("ip4:58", "0.0.0.0"); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 58, false, deriveXDITag(password))
+			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+		}
+	}
+	return DialUDPCarrier(ctx, addr, password, true)
+}
+
+// ListenIPIPCarrier starts a raw IPv4 Protocol 4 (IPIP) carrier listener.
+func ListenIPIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "0.0.0.0"
+	}
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := net.ListenPacket("ip4:4", host); rErr == nil {
+			_ = attachSocketBPFProtocolFilter(rawConn, 4)
+			wrapped := newRawProtoPacketConn(rawConn, 4, true, deriveXDITag(password))
+			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+		}
+	}
+	return ListenUDPCarrier(addr, password, true)
+}
+
+// DialIPIPCarrier dials a raw IPv4 Protocol 4 (IPIP) carrier session.
+func DialIPIPCarrier(ctx context.Context, addr, password string) (net.Conn, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	port, _ := strconv.Atoi(portStr)
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := net.ListenPacket("ip4:4", "0.0.0.0"); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 4, false, deriveXDITag(password))
+			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+		}
+	}
+	return DialUDPCarrier(ctx, addr, password, true)
+}
+
 // CheckRPFilterStatus checks /proc/sys/net/ipv4/conf/all/rp_filter on Linux (matching BackPack's ctStrictRPFilter).
 func CheckRPFilterStatus() string {
 	b, err := os.ReadFile("/proc/sys/net/ipv4/conf/all/rp_filter")

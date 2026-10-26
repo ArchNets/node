@@ -3,7 +3,10 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -399,6 +402,10 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 			uLn, uConn, err = transport.ListenXDICarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "pck", "l3-pck", "l3-sni":
 			uLn, uConn, err = transport.ListenPCKCarrier(carrierAddr, e.cfg.Password)
+		case "l3-bip":
+			uLn, uConn, err = transport.ListenBIPCarrier(carrierAddr, e.cfg.Password)
+		case "l3-ipip":
+			uLn, uConn, err = transport.ListenIPIPCarrier(carrierAddr, e.cfg.Password)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			uLn, uConn, err = transport.ListenUDPCarrier(carrierAddr, e.cfg.Password, useFEC)
@@ -516,6 +523,57 @@ func (e *Engine) bindL3TUNDuplex(conn net.Conn) {
 	})
 }
 
+func (e *Engine) bindL3TCPDuplex(conn net.Conn) {
+	e.mu.Lock()
+	tunDev := e.l3TunDev
+	e.mu.Unlock()
+	if tunDev == nil {
+		_ = conn.Close()
+		return
+	}
+	e.activeStreams.Store(conn, struct{}{})
+
+	e.wg.Add(2)
+	// TCP carrier stream -> TUN device
+	go func() {
+		defer e.wg.Done()
+		defer conn.Close()
+		defer e.activeStreams.Delete(conn)
+		var lenBuf [2]byte
+		for {
+			if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+				return
+			}
+			pktLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+			if pktLen <= 0 || pktLen > 65535 {
+				return
+			}
+			wire := make([]byte, pktLen)
+			if _, err := io.ReadFull(conn, wire); err != nil {
+				return
+			}
+			e.Stats.AddDownload(int64(pktLen))
+			_ = tunDev.InjectWirePacket(wire)
+		}
+	}()
+	// TUN device -> TCP carrier stream
+	go func() {
+		defer e.wg.Done()
+		defer conn.Close()
+		tunDev.SetSender(func(wire []byte) error {
+			if len(wire) > 65535 {
+				return errors.New("l3-tcp: packet exceeds max frame size")
+			}
+			frame := make([]byte, 2+len(wire))
+			binary.BigEndian.PutUint16(frame[:2], uint16(len(wire)))
+			copy(frame[2:], wire)
+			e.Stats.AddUpload(int64(len(wire)))
+			_, err := conn.Write(frame)
+			return err
+		})
+	}()
+}
+
 func (e *Engine) serveMuxSession(rawConn net.Conn) {
 	e.bindL3TUNDuplex(rawConn)
 	muxSess := transport.NewMuxSession(rawConn, false)
@@ -595,12 +653,16 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		}
 		carrierConn = inspectedConn
 
-	case "tcp", "tcpmux":
+	case "tcp", "tcpmux", "l3-tcp":
 		action, inspectedConn, err := transport.InspectTCPTraffic(rawConn, e.cfg.Password, hasUserFwd)
 		if err != nil || action != transport.ActionReverseCarrier {
 			if action == transport.ActionUserClient && inspectedConn != nil {
 				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
 			}
+			return
+		}
+		if e.cfg.Transport == "l3-tcp" {
+			e.bindL3TCPDuplex(inspectedConn)
 			return
 		}
 		carrierConn = inspectedConn
@@ -873,6 +935,10 @@ func (e *Engine) exitPoolLoop() {
 				return
 			default:
 			}
+			if e.cfg.Transport == "l3-tcp" {
+				e.bindL3TCPDuplex(stream)
+				return
+			}
 			if e.isDirect() {
 				e.pushIdleStream(stream)
 			} else {
@@ -1009,6 +1075,10 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 			return transport.DialXDICarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "pck", "l3-pck", "l3-sni":
 			return transport.DialPCKCarrier(e.ctx, addr, e.cfg.Password)
+		case "l3-bip":
+			return transport.DialBIPCarrier(e.ctx, addr, e.cfg.Password)
+		case "l3-ipip":
+			return transport.DialIPIPCarrier(e.ctx, addr, e.cfg.Password)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			return transport.DialUDPCarrier(e.ctx, addr, e.cfg.Password, useFEC)
@@ -1031,7 +1101,7 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 	switch e.cfg.Transport {
 	case "tls-reverse":
 		return transport.DialTLSReverseCarrier(rawDial, e.cfg.SNI, e.cfg.Password)
-	case "tcp", "tcpmux":
+	case "tcp", "tcpmux", "l3-tcp":
 		return transport.DialTCPCarrier(rawDial, e.cfg.Password)
 	case "stealth":
 		return transport.DialStealthCarrier(rawDial, e.cfg.Password)

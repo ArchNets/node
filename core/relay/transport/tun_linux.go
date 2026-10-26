@@ -34,17 +34,18 @@ type ifreqFlags struct {
 // L3TUNDevice manages a Linux Layer-3 TUN interface (/dev/net/tun with IFF_TUN | IFF_NO_PI),
 // GRE encapsulation, ChaCha20-Poly1305 AEAD encryption, fq_codel qdisc, and TCPMSS clamping.
 type L3TUNDevice struct {
-	file      *os.File
-	name      string
-	localIP   string
-	peerIP    string
-	mtu       int
-	mss       int
-	aead      cipher.AEAD
-	txCounter atomic.Uint64
-	closed    atomic.Bool
-	closeOnce sync.Once
-	txHook    atomic.Pointer[func([]byte) error]
+	file        *os.File
+	name        string
+	localIP     string
+	peerIP      string
+	mtu         int
+	mss         int
+	aead        cipher.AEAD
+	reassembler *L3FragmentReassembler
+	txCounter   atomic.Uint64
+	closed      atomic.Bool
+	closeOnce   sync.Once
+	txHook      atomic.Pointer[func([]byte) error]
 }
 
 // OpenL3TUN creates and configures a Linux Layer-3 TUN interface (/dev/net/tun).
@@ -106,13 +107,14 @@ func OpenL3TUNWithSubnet(tunnelID int, role, password string, mtu int, customIfa
 
 	tunFile := os.NewFile(uintptr(fd), "/dev/net/tun")
 	dev := &L3TUNDevice{
-		file:    tunFile,
-		name:    actualName,
-		localIP: localCIDR,
-		peerIP:  peerIP,
-		mtu:     mtu,
-		mss:     mss,
-		aead:    aead,
+		file:        tunFile,
+		name:        actualName,
+		localIP:     localCIDR,
+		peerIP:      peerIP,
+		mtu:         mtu,
+		mss:         mss,
+		aead:        aead,
+		reassembler: NewL3FragmentReassembler(),
 	}
 
 	if err := dev.configureKernelInterface(); err != nil {
@@ -133,14 +135,18 @@ func (d *L3TUNDevice) SetSender(fn func([]byte) error) {
 	d.txHook.Store(&fn)
 }
 
-// InjectWirePacket decrypts an incoming L3 GRE wire frame from the carrier and writes the IP packet to the TUN device.
+// InjectWirePacket decrypts an incoming L3 GRE wire frame (or reassembles userspace fragments)
+// and writes the complete IP packet to the TUN device.
 func (d *L3TUNDevice) InjectWirePacket(wire []byte) error {
 	if d.closed.Load() {
 		return os.ErrClosed
 	}
-	ipPkt, err := OpenL3GREPacket(d.aead, wire)
+	ipPkt, err := d.reassembler.ProcessFrame(d.aead, wire)
 	if err != nil {
 		return err
+	}
+	if ipPkt == nil {
+		return nil // Fragment buffered, waiting for remaining chunks
 	}
 	_, err = d.file.Write(ipPkt)
 	return err
@@ -164,9 +170,11 @@ func (d *L3TUNDevice) readPumpLoop() {
 			continue
 		}
 		seq := d.txCounter.Add(1)
-		wire, sErr := SealL3GREPacket(d.aead, seq, buf[:n])
+		frames, sErr := SealL3GREFragments(d.aead, seq, buf[:n])
 		if sErr == nil {
-			_ = (*hook)(wire)
+			for _, frame := range frames {
+				_ = (*hook)(frame)
+			}
 		}
 	}
 }

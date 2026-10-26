@@ -93,10 +93,13 @@ var (
 		{"reverse", "xdi"},
 		{"reverse", "tls-reverse"},
 		{"reverse", "reverse-reality"},
-		// L3 TUN (direct, requires root + open UDP/ICMP firewall on Exit)
+		// L3 TUN (requires root / Linux TUN)
 		{"direct", "l3-udp"},
 		{"direct", "l3-pck"},
 		{"direct", "l3-xdi"},
+		{"direct", "l3-bip"},
+		{"direct", "l3-ipip"},
+		{"reverse", "l3-tcp"},
 		// Direct overlay transports
 		{"direct", "stealth"},
 		{"direct", "quic-reverse"},

@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -14,6 +16,10 @@ const (
 	greHeaderLen = 4
 	l3HeaderLen  = 9 // [1B version=0x01][8B counter nonce]
 	ifnamSize    = 16
+
+	maxL3OuterPayload = 1380 // Safe ceiling so outer packets never exceed Ethernet 1500 MTU (zero kernel IP fragmentation)
+	l3FragVersion     = 0x02
+	l3FragHeaderLen   = 13 // [1B 0x02][8B counter][2B fragIdx][2B totalFrags]
 )
 
 // DeriveL3Subnet returns the deterministic /30 point-to-point tunnel IPs for a tunnel ID.
@@ -124,4 +130,140 @@ func OpenL3GREPacket(aead cipher.AEAD, wire []byte) ([]byte, error) {
 		return nil, fmt.Errorf("l3: unexpected GRE protocol 0x%04x", etherType)
 	}
 	return plain[greHeaderLen:], nil
+}
+
+// L3FragmentReassembler caches and reconstructs userspace-fragmented L3 packets.
+type L3FragmentReassembler struct {
+	mu      sync.Mutex
+	entries map[uint64]*l3FragEntry
+	lastGC  time.Time
+}
+
+type l3FragEntry struct {
+	total   int
+	chunks  [][]byte
+	arrived int
+	created time.Time
+}
+
+// NewL3FragmentReassembler creates a new userspace reassembly cache.
+func NewL3FragmentReassembler() *L3FragmentReassembler {
+	return &L3FragmentReassembler{
+		entries: make(map[uint64]*l3FragEntry),
+		lastGC:  time.Now(),
+	}
+}
+
+// ProcessFrame processes an incoming L3 wire frame.
+// If the frame is unfragmented (0x01), it decrypts and returns the raw IP packet immediately.
+// If the frame is a fragment (0x02), it buffers the chunk and returns the complete IP packet
+// once all chunks have arrived, or nil if more fragments are pending.
+func (r *L3FragmentReassembler) ProcessFrame(aead cipher.AEAD, frame []byte) ([]byte, error) {
+	if len(frame) < 1 {
+		return nil, errors.New("l3: empty frame")
+	}
+
+	// 1. Unfragmented standard packet (0x01)
+	if frame[0] == 0x01 {
+		return OpenL3GREPacket(aead, frame)
+	}
+
+	// 2. Userspace Fragmented frame (0x02): [1B 0x02][8B counter][2B idx][2B total][chunk]
+	if frame[0] == l3FragVersion {
+		if len(frame) < l3FragHeaderLen {
+			return nil, errors.New("l3: fragment header too short")
+		}
+		counter := binary.BigEndian.Uint64(frame[1:9])
+		idx := int(binary.BigEndian.Uint16(frame[9:11]))
+		total := int(binary.BigEndian.Uint16(frame[11:13]))
+		if total <= 1 || idx >= total || total > 16 {
+			return nil, errors.New("l3: invalid fragment bounds")
+		}
+		chunk := frame[l3FragHeaderLen:]
+
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		// Periodic expiry cleanup (every 5 seconds)
+		now := time.Now()
+		if now.Sub(r.lastGC) > 5*time.Second {
+			for k, entry := range r.entries {
+				if now.Sub(entry.created) > 5*time.Second {
+					delete(r.entries, k)
+				}
+			}
+			r.lastGC = now
+		}
+
+		entry, exists := r.entries[counter]
+		if !exists {
+			entry = &l3FragEntry{
+				total:   total,
+				chunks:  make([][]byte, total),
+				created: now,
+			}
+			r.entries[counter] = entry
+		}
+
+		if entry.chunks[idx] == nil {
+			entry.chunks[idx] = chunk
+			entry.arrived++
+		}
+
+		if entry.arrived == entry.total {
+			delete(r.entries, counter)
+			// Reassemble full wire packet
+			totalWireLen := 0
+			for _, c := range entry.chunks {
+				totalWireLen += len(c)
+			}
+			fullWire := make([]byte, totalWireLen)
+			pos := 0
+			for _, c := range entry.chunks {
+				copy(fullWire[pos:], c)
+				pos += len(c)
+			}
+			return OpenL3GREPacket(aead, fullWire)
+		}
+		return nil, nil // Waiting for remaining fragments
+	}
+
+	return nil, fmt.Errorf("l3: unknown frame version 0x%02x", frame[0])
+}
+
+// SealL3GREFragments seals a raw IP packet and, if the resulting wire packet exceeds
+// maxL3OuterPayload (1380 bytes), splits it into userspace fragments so outer packets
+// fit within standard 1500-byte Ethernet MTU without triggering kernel IP fragmentation.
+func SealL3GREFragments(aead cipher.AEAD, counter uint64, rawIP []byte) ([][]byte, error) {
+	fullWire, err := SealL3GREPacket(aead, counter, rawIP)
+	if err != nil {
+		return nil, err
+	}
+	if len(fullWire) <= maxL3OuterPayload {
+		return [][]byte{fullWire}, nil
+	}
+
+	// Fragment into chunks
+	const chunkSize = 1200
+	chunks := make([][]byte, 0, (len(fullWire)+chunkSize-1)/chunkSize)
+	for pos := 0; pos < len(fullWire); pos += chunkSize {
+		end := pos + chunkSize
+		if end > len(fullWire) {
+			end = len(fullWire)
+		}
+		chunks = append(chunks, fullWire[pos:end])
+	}
+
+	total := uint16(len(chunks))
+	frames := make([][]byte, len(chunks))
+	for i, chunk := range chunks {
+		f := make([]byte, l3FragHeaderLen+len(chunk))
+		f[0] = l3FragVersion
+		binary.BigEndian.PutUint64(f[1:9], counter)
+		binary.BigEndian.PutUint16(f[9:11], uint16(i))
+		binary.BigEndian.PutUint16(f[11:13], total)
+		copy(f[l3FragHeaderLen:], chunk)
+		frames[i] = f
+	}
+	return frames, nil
 }

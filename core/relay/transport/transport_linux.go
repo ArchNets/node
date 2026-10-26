@@ -17,7 +17,37 @@ var (
 	configuredMTU  atomic.Int32
 )
 
-// SetConfiguredMTU sets the per-server tunnel MTU (used to clamp TCP_MAXSEG when < 1500).
+// attachSocketBPFProtocolFilter attaches an in-kernel Classic BPF filter to a raw PacketConn.
+// The filter drops all packets whose IPv4 protocol byte (offset 9) does not match proto directly
+// inside the Linux network driver before Go allocates buffers or memory.
+func attachSocketBPFProtocolFilter(pc net.PacketConn, proto byte) error {
+	sc, ok := pc.(syscall.Conn)
+	if !ok {
+		return nil
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var sockErr error
+	err = raw.Control(func(fd uintptr) {
+		filter := []unix.SockFilter{
+			{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 9},
+			{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: uint32(proto)},
+			{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+			{Code: unix.BPF_RET | unix.BPF_K, K: 65535},
+		}
+		prog := unix.SockFprog{
+			Len:    uint16(len(filter)),
+			Filter: &filter[0],
+		}
+		sockErr = unix.SetsockoptSockFprog(int(fd), unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &prog)
+	})
+	if err != nil {
+		return err
+	}
+	return sockErr
+}
 func SetConfiguredMTU(mtu int) {
 	if mtu >= 576 && mtu <= 9000 {
 		configuredMTU.Store(int32(mtu))

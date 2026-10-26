@@ -977,3 +977,79 @@ func TestEnginePeerIPGating(t *testing.T) {
 		t.Fatal("expected unauthorized scanner IP to be rejected")
 	}
 }
+
+func TestL3UserspaceFragmentationAndReassembly(t *testing.T) {
+	aead, err := transport.NewL3PacketCodec("frag-test-password-123")
+	if err != nil {
+		t.Fatalf("NewL3PacketCodec failed: %v", err)
+	}
+
+	// Create a large 2500-byte IPv4 packet (exceeds single MTU 1380 bytes)
+	largeIPv4 := make([]byte, 2500)
+	largeIPv4[0] = 0x45
+	for i := 20; i < len(largeIPv4); i++ {
+		largeIPv4[i] = byte(i % 256)
+	}
+
+	frames, err := transport.SealL3GREFragments(aead, 99999, largeIPv4)
+	if err != nil {
+		t.Fatalf("SealL3GREFragments failed: %v", err)
+	}
+
+	if len(frames) < 2 {
+		t.Fatalf("expected at least 2 userspace fragments, got %d", len(frames))
+	}
+
+	for idx, frame := range frames {
+		if len(frame) > 1380 {
+			t.Fatalf("fragment %d wire length %d exceeds maxL3OuterPayload 1380", idx, len(frame))
+		}
+	}
+
+	reassembler := transport.NewL3FragmentReassembler()
+
+	// Process first fragment (should buffer and return nil)
+	first, err := reassembler.ProcessFrame(aead, frames[0])
+	if err != nil {
+		t.Fatalf("ProcessFrame frame 0 failed: %v", err)
+	}
+	if first != nil {
+		t.Fatalf("expected nil while waiting for remaining fragments, got %d bytes", len(first))
+	}
+
+	// Process remaining fragments
+	var finalPacket []byte
+	for i := 1; i < len(frames); i++ {
+		p, pErr := reassembler.ProcessFrame(aead, frames[i])
+		if pErr != nil {
+			t.Fatalf("ProcessFrame frame %d failed: %v", i, pErr)
+		}
+		if p != nil {
+			finalPacket = p
+		}
+	}
+
+	if finalPacket == nil {
+		t.Fatal("expected complete reassembled packet, got nil")
+	}
+	if !bytes.Equal(finalPacket, largeIPv4) {
+		t.Fatalf("reassembled packet content mismatch: len %d vs %d", len(finalPacket), len(largeIPv4))
+	}
+}
+
+func TestL3NewTransportsCatalog(t *testing.T) {
+	bipSpec := transport.GetTransportSpec("l3-bip")
+	if !bipSpec.IsL3 || !bipSpec.IsPacket {
+		t.Fatalf("expected l3-bip to be L3 packet transport, got %+v", bipSpec)
+	}
+
+	ipipSpec := transport.GetTransportSpec("l3-ipip")
+	if !ipipSpec.IsL3 || !ipipSpec.IsPacket {
+		t.Fatalf("expected l3-ipip to be L3 packet transport, got %+v", ipipSpec)
+	}
+
+	tcpSpec := transport.GetTransportSpec("l3-tcp")
+	if !tcpSpec.IsL3 || tcpSpec.IsPacket {
+		t.Fatalf("expected l3-tcp to be L3 stream transport, got %+v", tcpSpec)
+	}
+}
