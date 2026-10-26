@@ -265,6 +265,52 @@ func VerifyRealityToken(key [32]byte, token []byte, expectedMagic string) bool {
 	return diff <= realityClockSkew
 }
 
+var (
+	realityReplayMu    sync.Mutex
+	realityReplayCache = make(map[[12]byte]int64)
+	realityLastPrune   int64
+)
+
+// CheckAndRecordRealityNonce validates that the 12-byte token nonce has not been observed
+// before within the validity window, preventing replay and A/B differential probe attacks.
+// Returns true if the nonce is fresh, or false if it is a replayed packet.
+func CheckAndRecordRealityNonce(nonce []byte) bool {
+	if len(nonce) < 12 {
+		return false
+	}
+	var n [12]byte
+	copy(n[:], nonce[:12])
+
+	now := time.Now().Unix()
+	realityReplayMu.Lock()
+	defer realityReplayMu.Unlock()
+
+	// Periodically prune expired nonces (older than 60s) every 30s
+	if now-realityLastPrune > 30 {
+		cutoff := now - 60
+		for k, ts := range realityReplayCache {
+			if ts < cutoff {
+				delete(realityReplayCache, k)
+			}
+		}
+		realityLastPrune = now
+	}
+
+	if _, exists := realityReplayCache[n]; exists {
+		return false // Replay detected!
+	}
+	realityReplayCache[n] = now
+	return true
+}
+
+// ResetRealityReplayCache clears the anti-replay cache (used by unit tests).
+func ResetRealityReplayCache() {
+	realityReplayMu.Lock()
+	defer realityReplayMu.Unlock()
+	realityReplayCache = make(map[[12]byte]int64)
+	realityLastPrune = time.Now().Unix()
+}
+
 // buildTLS13ServerFlight constructs a genuine TLS 1.3 ServerHello (0x16) +
 // ChangeCipherSpec (0x14) + Encrypted Handshake ApplicationData (0x17) flight.
 // This ensures stateful DPI middleboxes observe a complete RFC 8446 TLS 1.3 handshake
@@ -438,10 +484,10 @@ const (
 
 // InspectRealityTraffic inspects incoming TCP connections on the carrier port.
 // It supports single-port multiplexing:
-// 1. Authenticated Kharej peers -> ActionReverseCarrier (enters reverse idle pool)
+// 1. Authenticated & Peer-gated Kharej peers -> ActionReverseCarrier (enters reverse idle pool)
 // 2. Unauthenticated clients -> ActionUserClient (if user forwarder is enabled on this port)
-// 3. Camouflage SNI probes -> ActionDPIProbe (spliced to camouflage origin)
-func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder bool) (InspectAction, net.Conn, error) {
+// 3. Camouflage SNI probes or unauthorized peers -> ActionDPIProbe (spliced to camouflage origin)
+func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder bool, isAllowedPeer bool) (InspectAction, net.Conn, error) {
 	TuneTCPConn(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
@@ -475,10 +521,14 @@ func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder
 	copy(captured[0:5], hdr[:])
 	copy(captured[5:], body)
 
-	// Check if genuine Reality ClientHello from Kharej
-	if body[0] == 0x01 && len(body) >= 38 {
+	// Check if genuine Reality ClientHello from authorized Kharej peer.
+	// We require:
+	// 1. isAllowedPeer: peer IP must be the expected Exit/Entry node (deflects arbitrary active scanners to origin)
+	// 2. Valid ChaCha20-Poly1305 authentication token in ClientRandom (body[6:38])
+	// 3. Single-use nonce freshness: prevents on-path MitM from capturing and replaying the ClientHello for A/B probing
+	if isAllowedPeer && body[0] == 0x01 && len(body) >= 38 {
 		key, keyErr := DeriveRealityKey(password, sni)
-		if keyErr == nil && VerifyRealityToken(key, body[6:38], realityMagic) {
+		if keyErr == nil && VerifyRealityToken(key, body[6:38], realityMagic) && CheckAndRecordRealityNonce(body[6:18]) {
 			ackToken, ackErr := GenerateRealityToken(key, realityAckMagic)
 			if ackErr != nil {
 				_ = conn.Close()

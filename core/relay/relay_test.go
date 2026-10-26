@@ -927,3 +927,53 @@ func TestL3GRECodecAndSubnet(t *testing.T) {
 		t.Fatalf("decrypted packet mismatch: got %x, want %x", dec, rawIPv4)
 	}
 }
+
+func TestRealityAntiReplayNonce(t *testing.T) {
+	transport.ResetRealityReplayCache()
+
+	nonce1 := make([]byte, 12)
+	copy(nonce1, []byte("NONCE1_ABCDE"))
+
+	if !transport.CheckAndRecordRealityNonce(nonce1) {
+		t.Fatal("expected fresh nonce to be accepted")
+	}
+
+	// Replay attempt with same nonce must be rejected
+	if transport.CheckAndRecordRealityNonce(nonce1) {
+		t.Fatal("expected replayed nonce to be rejected")
+	}
+
+	nonce2 := make([]byte, 12)
+	copy(nonce2, []byte("NONCE2_WXYZ0"))
+
+	if !transport.CheckAndRecordRealityNonce(nonce2) {
+		t.Fatal("expected second distinct nonce to be accepted")
+	}
+}
+
+func TestEnginePeerIPGating(t *testing.T) {
+	eng := &Engine{
+		cfg: Config{
+			ExitServerIP: "198.51.100.5",
+			FloatingIPs:  []string{"198.51.100.6"},
+		},
+	}
+
+	exitAddr, _ := net.ResolveTCPAddr("tcp", "198.51.100.5:44321")
+	floatAddr, _ := net.ResolveTCPAddr("tcp", "198.51.100.6:44322")
+	loopbackAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:44323")
+	scannerAddr, _ := net.ResolveTCPAddr("tcp", "203.0.113.99:54321")
+
+	if !eng.isAllowedCarrierPeer(exitAddr) {
+		t.Fatal("expected exit IP to be allowed")
+	}
+	if !eng.isAllowedCarrierPeer(floatAddr) {
+		t.Fatal("expected floating IP to be allowed")
+	}
+	if !eng.isAllowedCarrierPeer(loopbackAddr) {
+		t.Fatal("expected loopback to be allowed")
+	}
+	if eng.isAllowedCarrierPeer(scannerAddr) {
+		t.Fatal("expected unauthorized scanner IP to be rejected")
+	}
+}

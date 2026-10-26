@@ -616,7 +616,8 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		carrierConn = inspectedConn
 
 	default: // "reverse-reality"
-		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		isAllowedPeer := e.isAllowedCarrierPeer(rawConn.RemoteAddr())
+		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd, isAllowedPeer)
 		if err != nil {
 			return
 		}
@@ -1068,6 +1069,38 @@ func (e *Engine) targetEntryIPs() []string {
 		}
 	}
 	return ips
+}
+
+// isAllowedCarrierPeer checks whether the connecting peer IP matches the authorized peer server.
+// For Reverse mode (Entry listener), it ensures only the Kharej Exit node can authenticate into
+// the reverse carrier pool; any other IP (active DPI scanner, probe) is deflected to the decoy origin.
+func (e *Engine) isAllowedCarrierPeer(remoteAddr net.Addr) bool {
+	if remoteAddr == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		host = remoteAddr.String()
+	}
+	if host == "127.0.0.1" || host == "::1" || host == "localhost" {
+		return true
+	}
+	expectedIP := e.cfg.ExitServerIP
+	if e.isDirect() {
+		expectedIP = e.cfg.EntryServerIP
+	}
+	if expectedIP == "" && len(e.cfg.FloatingIPs) == 0 {
+		return true
+	}
+	if expectedIP != "" && host == expectedIP {
+		return true
+	}
+	for _, fip := range e.cfg.FloatingIPs {
+		if strings.TrimSpace(fip) == host {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) serveExitStream(stream net.Conn) {
