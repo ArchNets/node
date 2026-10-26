@@ -583,6 +583,39 @@ func DialIPIPCarrier(ctx context.Context, addr, password string) (net.Conn, erro
 	return DialUDPCarrier(ctx, addr, password, true)
 }
 
+// ListenGRECarrier starts a raw IPv4 Protocol 47 (GRE) carrier listener.
+func ListenGRECarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "0.0.0.0"
+	}
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := net.ListenPacket("ip4:47", host); rErr == nil {
+			_ = attachSocketBPFProtocolFilter(rawConn, 47)
+			wrapped := newRawProtoPacketConn(rawConn, 47, true, deriveXDITag(password))
+			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+		}
+	}
+	return ListenUDPCarrier(addr, password, true)
+}
+
+// DialGRECarrier dials a raw IPv4 Protocol 47 (GRE) carrier session.
+func DialGRECarrier(ctx context.Context, addr, password string) (net.Conn, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	port, _ := strconv.Atoi(portStr)
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := net.ListenPacket("ip4:47", "0.0.0.0"); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 47, false, deriveXDITag(password))
+			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+		}
+	}
+	return DialUDPCarrier(ctx, addr, password, true)
+}
+
 // CheckRPFilterStatus checks /proc/sys/net/ipv4/conf/all/rp_filter on Linux (matching BackPack's ctStrictRPFilter).
 func CheckRPFilterStatus() string {
 	b, err := os.ReadFile("/proc/sys/net/ipv4/conf/all/rp_filter")

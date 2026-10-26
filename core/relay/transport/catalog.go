@@ -39,6 +39,7 @@ var transportCatalog = []TransportSpec{
 	{ID: "l3-sni", Label: "L3 TUN • SNI Spoofed Packet", IsPacket: true, IsMux: true, IsL3: true, NeedsSNI: true},
 	{ID: "l3-bip", Label: "L3 TUN • BIP (Protocol 58 Raw)", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-ipip", Label: "L3 TUN • IPIP (Protocol 4 Raw)", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-gre", Label: "L3 TUN • GRE (Protocol 47 Raw)", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-tcp", Label: "L3 TUN • Reliable TCP Stream", IsL3: true, DefaultHalfDuplex: true},
 	{ID: "spoof", Label: "IP Spoofing Carrier", IsPacket: true, IsMux: true, IsL3: true},
 }

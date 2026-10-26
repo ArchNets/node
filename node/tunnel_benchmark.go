@@ -99,6 +99,7 @@ var (
 		{"direct", "l3-xdi"},
 		{"direct", "l3-bip"},
 		{"direct", "l3-ipip"},
+		{"direct", "l3-gre"},
 		{"reverse", "l3-tcp"},
 		// Direct overlay transports
 		{"direct", "stealth"},

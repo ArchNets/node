@@ -406,6 +406,8 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 			uLn, uConn, err = transport.ListenBIPCarrier(carrierAddr, e.cfg.Password)
 		case "l3-ipip":
 			uLn, uConn, err = transport.ListenIPIPCarrier(carrierAddr, e.cfg.Password)
+		case "l3-gre":
+			uLn, uConn, err = transport.ListenGRECarrier(carrierAddr, e.cfg.Password)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			uLn, uConn, err = transport.ListenUDPCarrier(carrierAddr, e.cfg.Password, useFEC)
@@ -1079,6 +1081,8 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 			return transport.DialBIPCarrier(e.ctx, addr, e.cfg.Password)
 		case "l3-ipip":
 			return transport.DialIPIPCarrier(e.ctx, addr, e.cfg.Password)
+		case "l3-gre":
+			return transport.DialGRECarrier(e.ctx, addr, e.cfg.Password)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			return transport.DialUDPCarrier(e.ctx, addr, e.cfg.Password, useFEC)

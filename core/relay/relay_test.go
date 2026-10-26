@@ -1048,6 +1048,11 @@ func TestL3NewTransportsCatalog(t *testing.T) {
 		t.Fatalf("expected l3-ipip to be L3 packet transport, got %+v", ipipSpec)
 	}
 
+	greSpec := transport.GetTransportSpec("l3-gre")
+	if !greSpec.IsL3 || !greSpec.IsPacket {
+		t.Fatalf("expected l3-gre to be L3 packet transport, got %+v", greSpec)
+	}
+
 	tcpSpec := transport.GetTransportSpec("l3-tcp")
 	if !tcpSpec.IsL3 || tcpSpec.IsPacket {
 		t.Fatalf("expected l3-tcp to be L3 stream transport, got %+v", tcpSpec)
