@@ -256,15 +256,27 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	if nodeInfo.Protocol.Encryption != "" && nodeInfo.Protocol.Encryption != "none" {
 		switch nodeInfo.Protocol.Encryption {
 		case "mlkem768x25519plus":
+			mode := strings.TrimSpace(nodeInfo.Protocol.EncryptionMode)
+			if mode == "" {
+				mode = "native"
+			}
+			ticket := strings.TrimSpace(strings.TrimSuffix(nodeInfo.Protocol.EncryptionTicket, "s"))
+			if ticket == "" {
+				ticket = "600"
+			}
+			privKey := strings.TrimSpace(nodeInfo.Protocol.EncryptionPrivateKey)
+			if privKey == "" {
+				return fmt.Errorf("vless encryption private key is required for mlkem768x25519plus")
+			}
 			parts := []string{
 				"mlkem768x25519plus",
-				nodeInfo.Protocol.EncryptionMode,
-				nodeInfo.Protocol.EncryptionTicket + "s",
+				mode,
+				ticket + "s",
 			}
 			if nodeInfo.Protocol.EncryptionServerPadding != "" {
-				parts = append(parts, nodeInfo.Protocol.EncryptionServerPadding)
+				parts = append(parts, strings.TrimSpace(nodeInfo.Protocol.EncryptionServerPadding))
 			}
-			parts = append(parts, nodeInfo.Protocol.EncryptionPrivateKey)
+			parts = append(parts, privKey)
 			decryption = strings.Join(parts, ".")
 		default:
 			return fmt.Errorf("vless decryption method %s is not support", nodeInfo.Protocol.Encryption)
@@ -714,7 +726,7 @@ func mapSockopt(s *panel.Sockopt) *coreConf.SocketConfig {
 				parts := strings.Split(line, ",")
 				if len(parts) >= 4 {
 					cfg.CustomSockopt = append(cfg.CustomSockopt, &coreConf.CustomSockoptConfig{
-						Syetem:  "all",
+						System:  "all",
 						Network: "all",
 						Level:   strings.TrimSpace(parts[0]),
 						Type:    strings.TrimSpace(parts[1]),
