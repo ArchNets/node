@@ -28,3 +28,5 @@ func IsStreamAlive(c net.Conn) bool {
 func attachSocketBPFProtocolFilter(pc net.PacketConn, proto byte) error {
 	return nil
 }
+
+func SetSocketQoS(conn any) {}

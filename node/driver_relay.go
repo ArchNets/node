@@ -103,6 +103,15 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 
 	var forwarderRules []routing.ForwarderRule
 	for _, f := range t.Forwarders {
+		gaming := false
+		if f.Config != "" {
+			var fwdCfg struct {
+				Gaming bool `json:"gaming"`
+			}
+			if json.Unmarshal([]byte(f.Config), &fwdCfg) == nil {
+				gaming = fwdCfg.Gaming
+			}
+		}
 		forwarderRules = append(forwarderRules, routing.ForwarderRule{
 			ID:         f.Id,
 			Protocol:   f.Protocol,
@@ -111,6 +120,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 			TargetIP:   f.TargetIP,
 			TargetPort: f.TargetPort,
 			PortRange:  f.PortRange,
+			GamingMode: gaming,
 		})
 	}
 

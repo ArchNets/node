@@ -348,7 +348,7 @@ func (e *Engine) startEntry() error {
 					}).Warn("[Relay] User UDP forwarder matches UDP carrier port; skipped duplicate socket bind on entry")
 					continue
 				}
-				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort); err != nil {
+				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort, rule.GamingMode); err != nil {
 					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start UDP forwarder listener")
 				}
 			}
@@ -870,7 +870,7 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 	return nil
 }
 
-func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPort int) error {
+func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPort int, gamingMode bool) error {
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
@@ -893,7 +893,7 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 	e.udpListeners = append(e.udpListeners, udpConn)
 	e.mu.Unlock()
 
-	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats)
+	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats, gamingMode)
 	return nil
 }
 
@@ -1284,7 +1284,9 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 	case routing.RouteProtoTCP:
 		routing.HandleExitTCPForward(stream, e.cfg.TargetIP, targetPort, e.Stats)
 	case routing.RouteProtoUDP:
-		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats)
+		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, false)
+	case routing.RouteProtoUDPGaming:
+		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, true)
 	case routing.RouteProtoProbe:
 		telemetry.HandleExitProbeStream(stream, e.Stats)
 	default:

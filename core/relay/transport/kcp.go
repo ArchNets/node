@@ -61,6 +61,7 @@ type UDPSessionConn struct {
 	fecGroups      map[uint16]*fecBlockGroup
 	gapSince       time.Time
 	tunPacketHook  atomic.Pointer[func([]byte)]
+	gamingMode     bool
 }
 
 func newUDPSessionConn(pconn net.PacketConn, remote net.Addr, sessionID uint32, ownsConn, useFEC bool) *UDPSessionConn {
@@ -78,6 +79,13 @@ func newUDPSessionConn(pconn net.PacketConn, remote net.Addr, sessionID uint32, 
 	}
 	u.readDeadline.Store(time.Time{})
 	return u
+}
+
+// SetGamingMode enables aggressive low-latency tuning:
+// - Fast retransmit: Immediate NACK if gap >= 2 packets
+// - Shorter gap deadline (15ms vs 80ms) to prevent queuing latency
+func (u *UDPSessionConn) SetGamingMode(enabled bool) {
+	u.gamingMode = enabled
 }
 
 // SetTUNPacketHandler registers a callback for incoming Layer-3 TUN (udpPktTUN) datagrams.
@@ -191,15 +199,23 @@ func (u *UDPSessionConn) handleDataLocked(seq uint16, payload []byte) {
 	if _, exists := u.reorderBuf[seq]; !exists {
 		u.reorderBuf[seq] = payload
 	}
-	if u.gapSince.IsZero() {
+	gapTimeout := 80 * time.Millisecond
+	fastRetransmit := false
+	if u.gamingMode {
+		gapTimeout = 15 * time.Millisecond
+		if int(seq-u.nextRxSeq) >= 2 {
+			fastRetransmit = true
+		}
+	}
+	if u.gapSince.IsZero() || fastRetransmit {
 		u.gapSince = time.Now()
 		var nack [9]byte
 		nack[0] = udpPktNACK
 		binary.BigEndian.PutUint32(nack[1:5], u.sessionID)
 		binary.BigEndian.PutUint16(nack[5:7], u.nextRxSeq)
 		_, _ = u.pconn.WriteTo(nack[:], u.remoteAddr)
-	} else if time.Since(u.gapSince) > 80*time.Millisecond {
-		// Advance past unrecoverable gap after 80ms so stream never deadlocks
+	} else if time.Since(u.gapSince) > gapTimeout {
+		// Advance past unrecoverable gap after deadline so stream never deadlocks
 		for len(u.reorderBuf) > 0 && u.reorderBuf[u.nextRxSeq] == nil {
 			u.nextRxSeq++
 		}

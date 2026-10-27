@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	RouteProtoTCP   = protocol.RouteProtoTCP
-	RouteProtoUDP   = protocol.RouteProtoUDP
-	RouteProtoProbe = protocol.RouteProtoProbe
-	MaxUDPFrameSize = protocol.MaxUDPFrameSize
+	RouteProtoTCP       = protocol.RouteProtoTCP
+	RouteProtoUDP       = protocol.RouteProtoUDP
+	RouteProtoUDPGaming = protocol.RouteProtoUDPGaming
+	RouteProtoProbe     = protocol.RouteProtoProbe
+	MaxUDPFrameSize     = protocol.MaxUDPFrameSize
 )
 
 var (
@@ -28,6 +29,7 @@ type ForwarderRule struct {
 	TargetIP   string `json:"target_ip"`
 	TargetPort int    `json:"target_port"`
 	PortRange  string `json:"port_range,omitempty"`
+	GamingMode bool   `json:"gaming_mode,omitempty"`
 }
 
 // ExpandPortRange expands a rule with optional "start-end" PortRange into concrete [listenPort, targetPort] pairs.

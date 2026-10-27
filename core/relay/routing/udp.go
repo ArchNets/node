@@ -10,8 +10,33 @@ import (
 	"time"
 
 	"github.com/archnets/node/core/relay/telemetry"
+	"github.com/archnets/node/core/relay/transport"
 	log "github.com/sirupsen/logrus"
 )
+
+// udpFramePool manages reusable buffers (up to 2048 bytes) for low-latency game packets,
+// preventing garbage collector pauses during high-frequency 128-tick game traffic.
+var udpFramePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 2048)
+		return &b
+	},
+}
+
+func getUDPFrameBuffer(needed int) []byte {
+	if needed <= 2048 {
+		bufPtr := udpFramePool.Get().(*[]byte)
+		return (*bufPtr)[:needed]
+	}
+	return make([]byte, needed)
+}
+
+func putUDPFrameBuffer(b []byte) {
+	if cap(b) >= 2048 {
+		b = b[:2048]
+		udpFramePool.Put(&b)
+	}
+}
 
 const (
 	UDPSessionIdleTime = 60 * time.Second
@@ -31,7 +56,13 @@ func StartUDPListenerLoop(
 	targetPort int,
 	claimStreamFn func(timeout time.Duration) (net.Conn, error),
 	stats *telemetry.Stats,
+	gamingMode bool,
 ) {
+	if gamingMode {
+		_ = udpConn.SetReadBuffer(4 * 1024 * 1024)
+		_ = udpConn.SetWriteBuffer(4 * 1024 * 1024)
+		transport.SetSocketQoS(udpConn)
+	}
 	var sessionsMu sync.Mutex
 	sessions := make(map[string]*UDPSession)
 
@@ -96,7 +127,11 @@ func StartUDPListenerLoop(
 					continue
 				}
 				_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
-				if err := WriteRoutingHeader(stream, RouteProtoUDP, uint16(targetPort)); err != nil {
+				proto := RouteProtoUDP
+				if gamingMode {
+					proto = RouteProtoUDPGaming
+				}
+				if err := WriteRoutingHeader(stream, proto, uint16(targetPort)); err != nil {
 					_ = stream.Close()
 					continue
 				}
@@ -148,7 +183,7 @@ func StartUDPListenerLoop(
 				}(key, sess)
 			}
 
-			frame := make([]byte, 2+n)
+			frame := getUDPFrameBuffer(2 + n)
 			binary.BigEndian.PutUint16(frame[0:2], uint16(n))
 			copy(frame[2:], buf[:n])
 
@@ -158,6 +193,7 @@ func StartUDPListenerLoop(
 			_, wErr := sess.Stream.Write(frame)
 			_ = sess.Stream.SetWriteDeadline(time.Time{})
 			sess.WriteMu.Unlock()
+			putUDPFrameBuffer(frame)
 
 			if wErr != nil {
 				_ = sess.Stream.Close()
@@ -174,7 +210,7 @@ func StartUDPListenerLoop(
 }
 
 // HandleExitUDPForward handles exit UDP stream by un-framing datagrams to target UDP socket.
-func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats) {
+func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats, gamingMode bool) {
 	defer stream.Close()
 
 	if targetIP == "" {
@@ -189,6 +225,12 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		return
 	}
 	defer udpConn.Close()
+
+	if gamingMode {
+		_ = udpConn.SetReadBuffer(4 * 1024 * 1024)
+		_ = udpConn.SetWriteBuffer(4 * 1024 * 1024)
+		transport.SetSocketQoS(udpConn)
+	}
 
 	if stats != nil {
 		stats.ActiveConnections.Add(1)
@@ -232,9 +274,13 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 			if n <= 0 || n > MaxUDPFrameSize {
 				continue
 			}
-			binary.BigEndian.PutUint16(buf[0:2], uint16(n))
+			frame := getUDPFrameBuffer(2 + n)
+			binary.BigEndian.PutUint16(frame[0:2], uint16(n))
+			copy(frame[2:], buf[2:2+n])
 			_ = stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if _, err := stream.Write(buf[:2+n]); err != nil {
+			_, wErr := stream.Write(frame)
+			putUDPFrameBuffer(frame)
+			if wErr != nil {
 				return
 			}
 			if stats != nil {

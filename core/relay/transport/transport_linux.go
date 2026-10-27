@@ -48,6 +48,17 @@ func attachSocketBPFProtocolFilter(pc net.PacketConn, proto byte) error {
 	}
 	return sockErr
 }
+// SetSocketQoS marks IP_TOS = 0xB8 (DSCP 46 Expedited Forwarding) on Linux to prioritize game datagrams.
+func SetSocketQoS(conn any) {
+	if sc, ok := conn.(syscall.Conn); ok {
+		if raw, err := sc.SyscallConn(); err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TOS, 0xB8)
+			})
+		}
+	}
+}
+
 func SetConfiguredMTU(mtu int) {
 	if mtu >= 576 && mtu <= 9000 {
 		configuredMTU.Store(int32(mtu))

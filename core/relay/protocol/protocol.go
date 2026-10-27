@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	RouteProtoTCP   byte = 0x01
-	RouteProtoUDP   byte = 0x02
-	RouteProtoProbe byte = 0xFF
+	RouteProtoTCP       byte = 0x01
+	RouteProtoUDP       byte = 0x02
+	RouteProtoUDPGaming byte = 0x03 // Low-latency gaming UDP with QoS + zero-alloc buffer pooling
+	RouteProtoProbe     byte = 0xFF
 
 	MaxUDPFrameSize = 65505
 
