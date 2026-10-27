@@ -989,16 +989,22 @@ func (e *Engine) exitPoolLoop() {
 		case <-ticker.C:
 		}
 
-		// Active stream liveness sweep: on Exit node, actively check if any of our idle reverse
-		// connections have died (e.g., Entry server restarted or border network dropped).
-		// Closing dead connections immediately triggers the replenish loop instead of waiting
-		// for read deadlines to expire.
+		// Active stream liveness sweep & 30-minute anti-throttling rotation:
+		// 1. Actively check if any idle reverse connection has died (closing it triggers redial immediately).
+		// 2. Rotate connections older than 30 minutes so Iranian DPI firewalls never observe an
+		// indefinitely long-lived flow and apply traffic-shaping or rate-limiting.
 		if !e.isDirect() {
-			e.idleStreams.Range(func(key, _ any) bool {
+			now := time.Now()
+			e.idleStreams.Range(func(key, val any) bool {
 				conn, ok := key.(net.Conn)
-				if ok && !transport.IsStreamAlive(conn) {
-					_ = conn.Close()
-					e.idleStreams.Delete(key)
+				created, cOk := val.(time.Time)
+				if ok {
+					isDead := !transport.IsStreamAlive(conn)
+					isAged := cOk && now.Sub(created) > 30*time.Minute
+					if isDead || isAged {
+						_ = conn.Close()
+						e.idleStreams.Delete(key)
+					}
 				}
 				return true
 			})
@@ -1245,8 +1251,9 @@ func (e *Engine) isAllowedCarrierPeer(remoteAddr net.Addr) bool {
 func (e *Engine) serveExitStream(stream net.Conn) {
 	defer e.wg.Done()
 
+	now := time.Now()
 	e.activeStreams.Store(stream, struct{}{})
-	e.idleStreams.Store(stream, struct{}{})
+	e.idleStreams.Store(stream, now)
 	defer e.activeStreams.Delete(stream)
 	defer e.idleStreams.Delete(stream)
 

@@ -81,14 +81,18 @@ func socketPreHandshakeControl(network, address string, c syscall.RawConn) error
 }
 
 // ensureLinuxKernelTCPTuning applies best-effort high-BDP sysctl parameters when running with root privileges.
-// Matches WaterWall's 16 MiB buffer ceilings, enables RFC 4821 tcp_mtu_probing, and disables slow-start-after-idle.
+// Matches WaterWall 1.5.2's 128 MiB buffer ceilings, 250k backlog, and sets tcp_no_metrics_save=1 so temporary
+// border congestion does not degrade TCP throughput permanently.
 func ensureLinuxKernelTCPTuning() {
 	kernelTuneOnce.Do(func() {
 		sysctls := map[string]string{
-			"/proc/sys/net/core/rmem_max":                  "16777216",
-			"/proc/sys/net/core/wmem_max":                  "16777216",
-			"/proc/sys/net/ipv4/tcp_rmem":                  "4096 262144 16777216",
-			"/proc/sys/net/ipv4/tcp_wmem":                  "4096 262144 16777216",
+			"/proc/sys/net/core/rmem_max":                  "134217728",
+			"/proc/sys/net/core/wmem_max":                  "134217728",
+			"/proc/sys/net/ipv4/tcp_rmem":                  "4096 87380 134217728",
+			"/proc/sys/net/ipv4/tcp_wmem":                  "4096 87380 134217728",
+			"/proc/sys/net/core/netdev_max_backlog":         "250000",
+			"/proc/sys/net/core/somaxconn":                 "65535",
+			"/proc/sys/net/ipv4/tcp_no_metrics_save":        "1",
 			"/proc/sys/net/ipv4/tcp_slow_start_after_idle": "0",
 			"/proc/sys/net/ipv4/tcp_window_scaling":        "1",
 			"/proc/sys/net/ipv4/tcp_mtu_probing":           "1",
