@@ -693,7 +693,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 			}
 			return
 		}
-		if e.cfg.Transport == "l3-tcp" {
+		if e.cfg.Transport == "l3-tcp" && e.cfg.TunnelID < 1000 {
 			e.bindL3TCPDuplex(inspectedConn)
 			return
 		}
@@ -967,7 +967,7 @@ func (e *Engine) exitPoolLoop() {
 				return
 			default:
 			}
-			if e.cfg.Transport == "l3-tcp" {
+			if e.cfg.Transport == "l3-tcp" && e.cfg.TunnelID < 1000 {
 				e.bindL3TCPDuplex(stream)
 				return
 			}

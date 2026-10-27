@@ -70,11 +70,12 @@ var (
 	reverseBenchmarkTransports = []string{
 		"stealth", "tcpmux", "tcp", "ws-reverse", "wsmux",
 		"wss-reverse", "wssmux", "quic-reverse", "kcp",
-		"pck", "xdi", "tls-reverse", "reverse-reality",
+		"pck", "xdi", "tls-reverse", "reverse-reality", "l3-tcp",
 	}
 	directBenchmarkTransports = []string{
 		"stealth", "tcpmux", "wssmux", "quic-reverse", "kcp",
 		"l3-udp", "l3-quic", "l3-pck", "l3-xdi", "l3-sni",
+		"l3-bip", "l3-ipip", "l3-gre", "spoof",
 	}
 	allRouteBenchmarkTransports = []struct {
 		direction string
