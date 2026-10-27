@@ -65,6 +65,9 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 	}
 	info.UUIDtoUID = uuidmap
 	limitLock.Lock()
+	if limiter == nil {
+		limiter = make(map[string]*Limiter)
+	}
 	limiter[tag] = info
 	limitLock.Unlock()
 	return info

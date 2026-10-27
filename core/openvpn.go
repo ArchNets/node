@@ -30,6 +30,7 @@ import (
 // auth decisions, and traffic accounting.
 type OpenVPNCore struct {
 	Tag           string
+	LimiterTag    string // Base node tag used for limiter lookup (e.g. "openvpn-1-1194")
 	Port          int
 	Proto         string // "udp" or "tcp"
 	Subnet        string // client pool in CIDR notation
@@ -292,12 +293,13 @@ func (o *OpenVPNCore) eventLoop() {
 }
 
 func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent) {
-	// management-client-auth defers username/password auth to this handler.
-	// The client profile includes <cert>/<key> to satisfy mobile/Windows apps
-	// that prompt when no cert is present, but actual auth is username-based:
-	// the UUID is sent as username via auth-user-pass, and username-as-common-name
-	// maps it to common_name on the server side.
+	// management-client-auth defers auth to this handler.
+	// Users connect either with client certificates (CN = user UUID) or
+	// with UUID sent as username. Check username first, then fallback to common_name.
 	username := ev.env["username"]
+	if username == "" {
+		username = ev.env["common_name"]
+	}
 	ip := extractIP(ev.env["untrusted_ip"])
 	if ip == "" {
 		ip = extractIP(ev.env["trusted_ip"])
@@ -315,10 +317,14 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent) {
 	}
 
 	if o.limiterRef != nil {
-		tagUUID := format.UserTag(o.Tag, username)
+		limiterTag := o.Tag
+		if o.LimiterTag != "" {
+			limiterTag = o.LimiterTag
+		}
+		tagUUID := format.UserTag(limiterTag, username)
 		_, reject := o.limiterRef.CheckLimit(tagUUID, ip, true)
 		if reject {
-			log.WithFields(log.Fields{"tag": o.Tag, "uid": uid, "ip": ip}).
+			log.WithFields(log.Fields{"tag": o.Tag, "limiter_tag": limiterTag, "uid": uid, "ip": ip}).
 				Warn("OpenVPN auth rejected: device limit exceeded")
 			_ = o.mgmt.denyClient(ev.cid, ev.kid, "device limit exceeded")
 			return
@@ -516,10 +522,10 @@ key %s
 dh none
 tls-crypt %s
 
-# Client profiles include <cert>/<key> to satisfy OpenVPN Connect apps
-# (Windows/Android/iOS) that prompt when no cert is present. The server
-# does NOT verify those certs — auth is username-based via management.
-verify-client-cert none
+# Client profiles include <cert>/<key> signed by CA (CN = user UUID).
+# verify-client-cert optional verifies client certs when presented,
+# setting common_name to the user's UUID.
+verify-client-cert optional
 username-as-common-name
 
 # Every device authenticates with the same UUID-as-username, so OpenVPN

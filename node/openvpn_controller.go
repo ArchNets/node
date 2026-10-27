@@ -95,10 +95,10 @@ func (c *OpenVPNController) Start() error {
 
 	proto := strings.ToLower(strings.TrimSpace(c.info.Protocol.OpenVPNProto))
 	if proto == "" {
-		proto = "both"
+		proto = "udp"
 	}
 
-	baseSubnet := "10.9.0.0/24"
+	baseSubnet := "10.9.0.0/16"
 	if c.info.Protocol.OpenVPNSubnet != "" {
 		baseSubnet = c.info.Protocol.OpenVPNSubnet
 	}
@@ -121,12 +121,12 @@ func (c *OpenVPNController) Start() error {
 	case "tcp":
 		instances = append(instances, instanceConfig{proto: "tcp", port: tcpPort, subnet: baseSubnet})
 	case "both":
-		fallthrough
-	default:
 		instances = append(instances,
 			instanceConfig{proto: "udp", port: c.info.Protocol.Port, subnet: udpSubnet},
 			instanceConfig{proto: "tcp", port: tcpPort, subnet: tcpSubnet},
 		)
+	default:
+		instances = append(instances, instanceConfig{proto: "udp", port: c.info.Protocol.Port, subnet: baseSubnet})
 	}
 
 	// Route OpenVPN client traffic through Xray's routing engine via TPROXY if enabled.
@@ -162,12 +162,17 @@ func (c *OpenVPNController) Start() error {
 			return err
 		}
 
+		openvpnCore.LimiterTag = c.tag
 		openvpnCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
 
 		if c.tproxyEnabled {
+			tproxySubnet := inst.subnet
+			if c.info.Protocol.TProxySubnet != "" && proto != "both" {
+				tproxySubnet = c.info.Protocol.TProxySubnet
+			}
 			openvpnCore.SetTProxyConfig(
 				tproxyPort,
-				c.info.Protocol.TProxySubnet,
+				tproxySubnet,
 				c.info.Protocol.TProxyBypassUDP,
 				c.info.Protocol.DropICMPUnreachable,
 			)
@@ -373,13 +378,20 @@ func (c *OpenVPNController) getIndexedProtocolName() string {
 
 func deriveSubnets(baseSubnet string) (udpSubnet, tcpSubnet string) {
 	if baseSubnet == "" {
-		baseSubnet = "10.9.0.0/24"
+		baseSubnet = "10.9.0.0/16"
 	}
 	ip, pool, err := net.ParseCIDR(baseSubnet)
 	if err != nil || ip.To4() == nil {
-		return "10.9.1.0/24", "10.9.2.0/24"
+		return "10.9.0.0/17", "10.9.128.0/17"
 	}
 	ipv4 := ip.To4()
+	ones, _ := pool.Mask.Size()
+	if ones <= 16 {
+		udpSubnet = fmt.Sprintf("%d.%d.0.0/17", ipv4[0], ipv4[1])
+		tcpSubnet = fmt.Sprintf("%d.%d.128.0/17", ipv4[0], ipv4[1])
+		return udpSubnet, tcpSubnet
+	}
+	// For /24 or smaller, use non-overlapping /24 blocks
 	udpSubnet = pool.String()
 	third := int(ipv4[2]) + 1
 	if third > 254 {

@@ -110,3 +110,30 @@ func TestOpenVPNCoreTrafficDelta(t *testing.T) {
 		t.Errorf("expected delta download 150, got %d", t2.Download)
 	}
 }
+
+func TestOpenVPNHandleClientConnectAuth(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ovpn-test-auth")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	core, err := NewOpenVPNCore("test-ovpn-auth-udp", 1194, "udp", "10.9.0.0/24", tmpDir, "", "", "test-key")
+	if err != nil {
+		t.Fatalf("failed to create core: %v", err)
+	}
+	core.LimiterTag = "test-ovpn-base"
+
+	users := []panel.UserInfo{
+		{Id: 10, Uuid: "uuid-user-10"},
+	}
+	core.AddUsers(users)
+
+	// Fallback to common_name when username is empty (standard client certificate mode)
+	core.users.mu.RLock()
+	uid, ok := core.users.uuidToID["uuid-user-10"]
+	core.users.mu.RUnlock()
+	if !ok || uid != 10 {
+		t.Errorf("expected user ID 10 for uuid-user-10, got %d, ok=%v", uid, ok)
+	}
+}
