@@ -769,9 +769,8 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 		}
 
 		exitBindIP := "0.0.0.0"
-		if t.LocalIP != "" {
-		 exitBindIP = t.LocalIP
-		}
+		// Always bind 0.0.0.0 on Exit node because cloud VPS instances (Hetzner, AWS, etc.)
+		// use internal private IPs with 1:1 NAT; binding t.LocalIP fails with EADDRNOTAVAIL.
 
 		// Start all candidate sandbox engines concurrently on their dedicated port (sandboxPort + cand.Index)
 		// so Entry and Exit never suffer from 30-second config poll clock skew.

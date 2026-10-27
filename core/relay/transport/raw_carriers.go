@@ -525,7 +525,6 @@ func ListenBIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn,
 	}
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		if rawConn, rErr := net.ListenPacket("ip4:58", host); rErr == nil {
-			_ = attachSocketBPFProtocolFilter(rawConn, 58)
 			wrapped := newRawProtoPacketConn(rawConn, 58, true, deriveXDITag(password))
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
@@ -558,7 +557,6 @@ func ListenIPIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn
 	}
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		if rawConn, rErr := net.ListenPacket("ip4:4", host); rErr == nil {
-			_ = attachSocketBPFProtocolFilter(rawConn, 4)
 			wrapped := newRawProtoPacketConn(rawConn, 4, true, deriveXDITag(password))
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
@@ -591,7 +589,6 @@ func ListenGRECarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn,
 	}
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		if rawConn, rErr := net.ListenPacket("ip4:47", host); rErr == nil {
-			_ = attachSocketBPFProtocolFilter(rawConn, 47)
 			wrapped := newRawProtoPacketConn(rawConn, 47, true, deriveXDITag(password))
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
@@ -777,7 +774,6 @@ func ListenSpoofCarrier(addr, password string, opts SpoofOptions) (*UDPCarrierLi
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		protoStr := fmt.Sprintf("ip4:%d", proto)
 		if rawConn, rErr := net.ListenPacket(protoStr, host); rErr == nil {
-			_ = attachSocketBPFProtocolFilter(rawConn, proto)
 			wrapped := newSpoofPacketConn(rawConn, opts, true, deriveXDITag(password))
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}

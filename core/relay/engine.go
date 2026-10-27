@@ -105,6 +105,7 @@ type Engine struct {
 	idlePool      chan pooledStream
 	replenishCh   chan struct{}
 	idleWaiters   atomic.Int64
+	idleStreams   sync.Map // Tracks net.Conn -> struct{}{} currently waiting for routing header on Exit
 	activeStreams sync.Map
 	alive         atomic.Bool
 	lastDialLog   atomic.Int64
@@ -195,7 +196,7 @@ func (e *Engine) Start() error {
 
 	e.alive.Store(true)
 
-	if transport.GetTransportSpec(e.cfg.Transport).IsL3 {
+	if transport.GetTransportSpec(e.cfg.Transport).IsL3 && e.cfg.TunnelID < 1000 {
 		mtu := e.cfg.L3MTU
 		if mtu <= 0 {
 			mtu = transport.GetConfiguredMTU()
@@ -988,6 +989,21 @@ func (e *Engine) exitPoolLoop() {
 		case <-ticker.C:
 		}
 
+		// Active stream liveness sweep: on Exit node, actively check if any of our idle reverse
+		// connections have died (e.g., Entry server restarted or border network dropped).
+		// Closing dead connections immediately triggers the replenish loop instead of waiting
+		// for read deadlines to expire.
+		if !e.isDirect() {
+			e.idleStreams.Range(func(key, _ any) bool {
+				conn, ok := key.(net.Conn)
+				if ok && !transport.IsStreamAlive(conn) {
+					_ = conn.Close()
+					e.idleStreams.Delete(key)
+				}
+				return true
+			})
+		}
+
 		minHeld := int64(e.cfg.MinHeldConnections)
 		var current int64
 		if e.isDirect() {
@@ -1230,7 +1246,9 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 	defer e.wg.Done()
 
 	e.activeStreams.Store(stream, struct{}{})
+	e.idleStreams.Store(stream, struct{}{})
 	defer e.activeStreams.Delete(stream)
+	defer e.idleStreams.Delete(stream)
 
 	e.idleWaiters.Add(1)
 	idleCount := e.Stats.PoolIdleConnections.Add(1)
@@ -1241,10 +1259,11 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 		}).Info("[Relay] Exit reverse carrier connected and warm connections ready in pool")
 	}
 
-	_ = stream.SetReadDeadline(time.Now().Add(4 * time.Minute))
+	_ = stream.SetReadDeadline(time.Now().Add(60 * time.Second))
 	proto, targetPort, err := routing.ReadRoutingHeader(stream)
 	_ = stream.SetReadDeadline(time.Time{})
 
+	e.idleStreams.Delete(stream)
 	e.idleWaiters.Add(-1)
 	e.Stats.PoolIdleConnections.Add(-1)
 	e.triggerReplenish()
