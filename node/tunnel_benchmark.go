@@ -70,11 +70,13 @@ var (
 	reverseBenchmarkTransports = []string{
 		"stealth", "tcpmux", "tcp", "ws-reverse", "wsmux",
 		"wss-reverse", "wssmux", "quic-reverse", "kcp",
-		"pck", "xdi", "tls-reverse", "reverse-reality", "l3-tcp",
+		"pck", "xdi", "tls-reverse", "reverse-reality",
+		"l3-tcp", "l3-udp", "l3-quic", "l3-pck", "l3-xdi",
+		"l3-bip", "l3-ipip", "l3-gre", "spoof",
 	}
 	directBenchmarkTransports = []string{
 		"stealth", "tcpmux", "wssmux", "quic-reverse", "kcp",
-		"l3-udp", "l3-quic", "l3-pck", "l3-xdi", "l3-sni",
+		"l3-tcp", "l3-udp", "l3-quic", "l3-pck", "l3-xdi",
 		"l3-bip", "l3-ipip", "l3-gre", "spoof",
 	}
 	allRouteBenchmarkTransports = []struct {
@@ -94,19 +96,20 @@ var (
 		{"reverse", "xdi"},
 		{"reverse", "tls-reverse"},
 		{"reverse", "reverse-reality"},
-		// L3 TUN (requires root / Linux TUN)
-		{"direct", "l3-udp"},
-		{"direct", "l3-pck"},
-		{"direct", "l3-xdi"},
-		{"direct", "l3-bip"},
-		{"direct", "l3-ipip"},
-		{"direct", "l3-gre"},
-		{"direct", "spoof"},
+		// Layer-3 TUN Transports (Reverse: Kharej Dials Iran)
 		{"reverse", "l3-tcp"},
-		// Direct overlay transports
+		{"reverse", "l3-udp"},
+		{"reverse", "l3-quic"},
+		{"reverse", "l3-pck"},
+		{"reverse", "l3-xdi"},
+		{"reverse", "l3-bip"},
+		{"reverse", "l3-ipip"},
+		{"reverse", "l3-gre"},
+		{"reverse", "spoof"},
+		// Direct overlay transports (Iran Dials Kharej)
 		{"direct", "stealth"},
-		{"direct", "quic-reverse"},
 		{"direct", "kcp"},
+		{"direct", "l3-tcp"},
 	}
 )
 
@@ -549,7 +552,7 @@ func (c *TunnelController) evaluateCandidate(
 
 	candPort := sandboxPort + cand.Index
 	certMode := ""
-	if spec.NeedsTLSServerCfg {
+	if spec.NeedsTLSServerCfg || spec.IsQuic {
 		certMode = "self"
 	}
 
@@ -797,7 +800,8 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 			// For Direct mode, Exit is the Listener, so ListenIP is exitBindIP
 			// For Reverse mode, Exit dials Entry, so EntryServerIP is entryIP
 			exitCertMode := ""
-			if transport.GetTransportSpec(cand.Transport).NeedsTLSServerCfg {
+			spec := transport.GetTransportSpec(cand.Transport)
+			if spec.NeedsTLSServerCfg || spec.IsQuic {
 				exitCertMode = "self"
 			}
 
