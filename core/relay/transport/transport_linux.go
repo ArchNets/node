@@ -235,11 +235,18 @@ func isTCPConnAlive(tc *net.TCPConn) bool {
 	return alive
 }
 
+type StreamAliveChecker interface {
+	IsAlive() bool
+}
+
 // IsStreamAlive performs a zero-cost non-blocking check (MSG_PEEK | MSG_DONTWAIT)
 // to verify that a pooled reverse connection has not received FIN (EOF) or RST from the peer.
 func IsStreamAlive(c net.Conn) bool {
 	if c == nil {
 		return false
+	}
+	if ac, ok := c.(StreamAliveChecker); ok {
+		return ac.IsAlive()
 	}
 	if tc, ok := c.(*net.TCPConn); ok {
 		return isTCPConnAlive(tc)

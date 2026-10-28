@@ -95,9 +95,13 @@ type Engine struct {
 	quicLn         *quic.Listener
 	quicUDPConn    *net.UDPConn
 	udpCarrierLn   *transport.UDPCarrierListener
-	activeQuicConn *quic.Conn
-	activeMuxSess  *transport.MuxSession
-	l3TunDev       *transport.L3TUNDevice
+	activeQuicConn   *quic.Conn
+	activeMuxSess    *transport.MuxSession
+	acceptedMuxSess  sync.Map // *transport.MuxSession -> struct{}{}
+	acceptedQuicConn sync.Map // *quic.Conn -> struct{}{}
+	tcpForwarderMap  sync.Map // int (listenPort) -> net.Listener
+	udpForwarderMap  sync.Map // int (listenPort) -> *net.UDPConn
+	l3TunDev         *transport.L3TUNDevice
 	tcpListeners   []net.Listener
 	udpListeners  []*net.UDPConn
 	hdMatcher     *transport.HalfDuplexMatcher
@@ -236,6 +240,11 @@ func (e *Engine) IsAlive() bool {
 	return e.alive.Load()
 }
 
+// Config returns the engine's configuration.
+func (e *Engine) Config() Config {
+	return e.cfg
+}
+
 func (e *Engine) isDirect() bool {
 	return strings.ToLower(e.cfg.Direction) == "direct"
 }
@@ -245,7 +254,32 @@ func (e *Engine) Close() error {
 	e.alive.Store(false)
 	e.cancel()
 
+	// 1. Explicitly notify and close accepted server sessions (QUIC and Mux) so
+	// remote dialers (Kharej) immediately receive the close and redial without waiting.
+	e.acceptedQuicConn.Range(func(key, _ any) bool {
+		if qc, ok := key.(*quic.Conn); ok && qc != nil {
+			_ = qc.CloseWithError(0, "engine closed")
+		}
+		e.acceptedQuicConn.Delete(key)
+		return true
+	})
+	e.acceptedMuxSess.Range(func(key, _ any) bool {
+		if ms, ok := key.(*transport.MuxSession); ok && ms != nil {
+			_ = ms.Close()
+		}
+		e.acceptedMuxSess.Delete(key)
+		return true
+	})
+
 	e.mu.Lock()
+	if e.activeQuicConn != nil {
+		_ = e.activeQuicConn.CloseWithError(0, "engine closed")
+		e.activeQuicConn = nil
+	}
+	if e.activeMuxSess != nil {
+		_ = e.activeMuxSess.Close()
+		e.activeMuxSess = nil
+	}
 	if e.carrierLn != nil {
 		_ = e.carrierLn.Close()
 	}
@@ -257,12 +291,6 @@ func (e *Engine) Close() error {
 	}
 	if e.udpCarrierLn != nil {
 		_ = e.udpCarrierLn.Close()
-	}
-	if e.activeQuicConn != nil {
-		_ = e.activeQuicConn.CloseWithError(0, "engine closed")
-	}
-	if e.activeMuxSess != nil {
-		_ = e.activeMuxSess.Close()
 	}
 	if e.l3TunDev != nil {
 		_ = e.l3TunDev.Close()
@@ -276,6 +304,20 @@ func (e *Engine) Close() error {
 		_ = uln.Close()
 	}
 	e.udpListeners = nil
+	e.tcpForwarderMap.Range(func(key, val any) bool {
+		if ln, ok := val.(net.Listener); ok {
+			_ = ln.Close()
+		}
+		e.tcpForwarderMap.Delete(key)
+		return true
+	})
+	e.udpForwarderMap.Range(func(key, val any) bool {
+		if uln, ok := val.(*net.UDPConn); ok {
+			_ = uln.Close()
+		}
+		e.udpForwarderMap.Delete(key)
+		return true
+	})
 	if e.hdMatcher != nil {
 		e.hdMatcher.Close()
 	}
@@ -300,7 +342,18 @@ drained:
 		return true
 	})
 
-	e.wg.Wait()
+	// Bounded wait: never block the process shutdown if an OS socket read hangs
+	waitCh := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(waitCh)
+	}()
+	select {
+	case <-waitCh:
+	case <-time.After(3 * time.Second):
+		e.logger.Warn("[Relay] Engine Close WaitGroup timed out after 3s; proceeding with teardown")
+	}
+
 	return nil
 }
 
@@ -503,7 +556,9 @@ func (e *Engine) quicAcceptLoop(ln *quic.Listener) {
 				continue
 			}
 		}
+		e.acceptedQuicConn.Store(qConn, struct{}{})
 		go func(conn *quic.Conn) {
+			defer e.acceptedQuicConn.Delete(conn)
 			for {
 				stream, err := conn.AcceptStream(e.ctx)
 				if err != nil {
@@ -566,12 +621,26 @@ func (e *Engine) bindL3TCPDuplex(conn net.Conn) {
 	}
 	e.activeStreams.Store(conn, struct{}{})
 
-	e.wg.Add(2)
+	// Configure TUN -> TCP carrier sender hook
+	tunDev.SetSender(func(wire []byte) error {
+		if len(wire) > 65535 {
+			return errors.New("l3-tcp: packet exceeds max frame size")
+		}
+		frame := make([]byte, 2+len(wire))
+		binary.BigEndian.PutUint16(frame[:2], uint16(len(wire)))
+		copy(frame[2:], wire)
+		e.Stats.AddUpload(int64(len(wire)))
+		_, err := conn.Write(frame)
+		return err
+	})
+
+	e.wg.Add(1)
 	// TCP carrier stream -> TUN device
 	go func() {
 		defer e.wg.Done()
 		defer conn.Close()
 		defer e.activeStreams.Delete(conn)
+		defer tunDev.SetSender(nil)
 		var lenBuf [2]byte
 		for {
 			if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
@@ -589,31 +658,23 @@ func (e *Engine) bindL3TCPDuplex(conn net.Conn) {
 			_ = tunDev.InjectWirePacket(wire)
 		}
 	}()
-	// TUN device -> TCP carrier stream
-	go func() {
-		defer e.wg.Done()
-		defer conn.Close()
-		tunDev.SetSender(func(wire []byte) error {
-			if len(wire) > 65535 {
-				return errors.New("l3-tcp: packet exceeds max frame size")
-			}
-			frame := make([]byte, 2+len(wire))
-			binary.BigEndian.PutUint16(frame[:2], uint16(len(wire)))
-			copy(frame[2:], wire)
-			e.Stats.AddUpload(int64(len(wire)))
-			_, err := conn.Write(frame)
-			return err
-		})
-	}()
 }
 
 func (e *Engine) serveMuxSession(rawConn net.Conn) {
 	e.bindL3TUNDuplex(rawConn)
 	muxSess := transport.NewMuxSession(rawConn, false)
-	defer muxSess.Close()
+	e.acceptedMuxSess.Store(muxSess, struct{}{})
+	defer func() {
+		e.acceptedMuxSess.Delete(muxSess)
+		_ = muxSess.Close()
+	}()
 	for {
 		stream, err := muxSess.AcceptStream()
 		if err != nil {
+			return
+		}
+		if !e.alive.Load() {
+			_ = stream.Close()
 			return
 		}
 		if e.isDirect() {
@@ -846,13 +907,15 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 		return conflictErr
 	}
 
-	e.mu.Lock()
-	e.tcpListeners = append(e.tcpListeners, ln)
-	e.mu.Unlock()
+	e.tcpForwarderMap.Store(listenPort, ln)
 
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
+		defer func() {
+			_ = ln.Close()
+			e.tcpForwarderMap.Delete(listenPort)
+		}()
 		for {
 			clientConn, err := ln.Accept()
 			if err != nil {
@@ -889,11 +952,84 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 		return conflictErr
 	}
 
-	e.mu.Lock()
-	e.udpListeners = append(e.udpListeners, udpConn)
-	e.mu.Unlock()
+	e.udpForwarderMap.Store(listenPort, udpConn)
 
 	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats, gamingMode)
+	return nil
+}
+
+// UpdateForwarders updates active forwarder listeners in-place without restarting carrier listeners or pools.
+func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
+	if !e.alive.Load() {
+		return errors.New("cannot update forwarders on stopped engine")
+	}
+
+	desiredTCP := make(map[int]int) // listenPort -> targetPort
+	desiredUDP := make(map[int]struct {
+		targetPort int
+		gamingMode bool
+		listenIP   string
+	})
+
+	for _, rule := range newRules {
+		pairs := routing.ExpandPortRange(rule)
+		for _, pair := range pairs {
+			lPort := pair[0]
+			tPort := pair[1]
+			proto := strings.ToLower(rule.Protocol)
+			if proto == "tcp" || proto == "tcp,udp" || proto == "both" || proto == "" {
+				desiredTCP[lPort] = tPort
+			}
+			if proto == "udp" || proto == "tcp,udp" || proto == "both" {
+				desiredUDP[lPort] = struct {
+					targetPort int
+					gamingMode bool
+					listenIP   string
+				}{
+					targetPort: tPort,
+					gamingMode: rule.GamingMode,
+					listenIP:   rule.ListenIP,
+				}
+			}
+		}
+	}
+
+	// 1. Reconcile TCP listeners
+	e.tcpForwarderMap.Range(func(key, val any) bool {
+		port := key.(int)
+		ln := val.(net.Listener)
+		if _, exists := desiredTCP[port]; !exists {
+			e.logger.WithField("port", port).Info("[Relay] Closing removed TCP forwarder listener")
+			_ = ln.Close()
+			e.tcpForwarderMap.Delete(port)
+		}
+		return true
+	})
+	for lPort, tPort := range desiredTCP {
+		if _, exists := e.tcpForwarderMap.Load(lPort); !exists {
+			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": tPort}).Info("[Relay] Binding new TCP forwarder listener")
+			_ = e.startTCPForwarderListener("0.0.0.0", lPort, tPort)
+		}
+	}
+
+	// 2. Reconcile UDP listeners
+	e.udpForwarderMap.Range(func(key, val any) bool {
+		port := key.(int)
+		uConn := val.(*net.UDPConn)
+		if _, exists := desiredUDP[port]; !exists {
+			e.logger.WithField("port", port).Info("[Relay] Closing removed UDP forwarder listener")
+			_ = uConn.Close()
+			e.udpForwarderMap.Delete(port)
+		}
+		return true
+	})
+	for lPort, cfg := range desiredUDP {
+		if _, exists := e.udpForwarderMap.Load(lPort); !exists {
+			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": cfg.targetPort, "gaming": cfg.gamingMode}).Info("[Relay] Binding new UDP forwarder listener")
+			_ = e.startUDPForwarderListener(cfg.listenIP, lPort, cfg.targetPort, cfg.gamingMode)
+		}
+	}
+
 	return nil
 }
 
@@ -967,6 +1103,10 @@ func (e *Engine) exitPoolLoop() {
 				_ = stream.Close()
 				return
 			default:
+			}
+			if !e.alive.Load() {
+				_ = stream.Close()
+				return
 			}
 			if e.cfg.Transport == "l3-tcp" && e.cfg.TunnelID < 1000 {
 				e.bindL3TCPDuplex(stream)
@@ -1226,6 +1366,11 @@ func (e *Engine) isAllowedCarrierPeer(remoteAddr net.Addr) bool {
 	host, _, err := net.SplitHostPort(remoteAddr.String())
 	if err != nil {
 		host = remoteAddr.String()
+	}
+	if parsedIP := net.ParseIP(host); parsedIP != nil {
+		if v4 := parsedIP.To4(); v4 != nil {
+			host = v4.String()
+		}
 	}
 	if host == "127.0.0.1" || host == "::1" || host == "localhost" {
 		return true

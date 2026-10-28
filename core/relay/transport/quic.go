@@ -20,6 +20,7 @@ const (
 // QuicStreamConn adapts a *quic.Stream into a full net.Conn with directional CloseWrite() support.
 type QuicStreamConn struct {
 	*quic.Stream
+	parentConn *quic.Conn
 	localAddr  net.Addr
 	remoteAddr net.Addr
 }
@@ -27,9 +28,18 @@ type QuicStreamConn struct {
 func NewQuicStreamConn(stream *quic.Stream, conn *quic.Conn) *QuicStreamConn {
 	return &QuicStreamConn{
 		Stream:     stream,
+		parentConn: conn,
 		localAddr:  conn.LocalAddr(),
 		remoteAddr: conn.RemoteAddr(),
 	}
+}
+
+// IsAlive reports whether the underlying QUIC connection is still healthy.
+func (q *QuicStreamConn) IsAlive() bool {
+	if q.parentConn == nil {
+		return false
+	}
+	return q.parentConn.Context().Err() == nil
 }
 
 func (q *QuicStreamConn) LocalAddr() net.Addr  { return q.localAddr }

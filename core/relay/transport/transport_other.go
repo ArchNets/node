@@ -21,8 +21,18 @@ func ConfigureDontFragmentProbe(c net.Conn, testMTU int) {}
 
 func InspectKernelPMTU(c net.Conn) (int, int) { return 1500, 1460 }
 
+type StreamAliveChecker interface {
+	IsAlive() bool
+}
+
 func IsStreamAlive(c net.Conn) bool {
-	return c != nil
+	if c == nil {
+		return false
+	}
+	if ac, ok := c.(StreamAliveChecker); ok {
+		return ac.IsAlive()
+	}
+	return true
 }
 
 func attachSocketBPFProtocolFilter(pc net.PacketConn, proto byte) error {

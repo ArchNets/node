@@ -79,6 +79,9 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 		_, _ = telemetry.SpliceCopy(clientConn, stream, counter)
 	}()
 	<-done
+	// Force-close both ends so the opposite direction's read loop unblocks immediately
+	_ = stream.Close()
+	_ = clientConn.Close()
 	<-done
 }
 
@@ -134,5 +137,8 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		_, _ = telemetry.SpliceCopy(stream, targetConn, counter)
 	}()
 	<-done
+	// Force-close both ends so the opposite direction's read loop unblocks immediately
+	_ = stream.Close()
+	_ = targetConn.Close()
 	<-done
 }

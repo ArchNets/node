@@ -120,6 +120,7 @@ func NewMuxSession(conn net.Conn, isClient bool) *MuxSession {
 	}
 	if isClient {
 		s.nextID.Store(1)
+		go s.pingLoop()
 	} else {
 		s.nextID.Store(2)
 	}
@@ -127,6 +128,26 @@ func NewMuxSession(conn net.Conn, isClient bool) *MuxSession {
 	return s
 }
 
+func (s *MuxSession) pingLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.closeCh:
+			return
+		case <-ticker.C:
+			if s.IsClosed() {
+				return
+			}
+			if err := s.writeFrame(muxCmdPING, 0, nil); err != nil {
+				_ = s.Close()
+				return
+			}
+		}
+	}
+}
+
+// IsClosed reports whether the session has been closed.
 func (s *MuxSession) IsClosed() bool {
 	return s.closed.Load()
 }
@@ -387,6 +408,11 @@ func (m *MuxStream) CloseWrite() error {
 func (m *MuxStream) CloseRead() error {
 	m.remoteFIN()
 	return nil
+}
+
+// IsAlive reports whether the virtual stream and its parent carrier session are healthy.
+func (m *MuxStream) IsAlive() bool {
+	return !m.fullClosed.Load() && !m.sess.IsClosed()
 }
 
 func (m *MuxStream) Close() error {

@@ -41,6 +41,14 @@ func NewRealityRecordConn(c net.Conn) *RealityRecordConn {
 	return &RealityRecordConn{Conn: c}
 }
 
+func (c *RealityRecordConn) Underlying() net.Conn {
+	return c.Conn
+}
+
+func (c *RealityRecordConn) IsAlive() bool {
+	return IsStreamAlive(c.Conn)
+}
+
 func (c *RealityRecordConn) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil

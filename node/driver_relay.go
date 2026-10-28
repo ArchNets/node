@@ -94,13 +94,6 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Stop existing instance if running, harvesting any unsent traffic delta first
-	if old, ok := d.engines[t.Id]; ok && old != nil {
-		d.harvestUnsentLocked(t.Id, old)
-		_ = old.Close()
-		delete(d.engines, t.Id)
-	}
-
 	var forwarderRules []routing.ForwarderRule
 	for _, f := range t.Forwarders {
 		gaming := false
@@ -344,6 +337,26 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		OnProbeSample:      d.QueueProbeSample,
 	}
 
+	// If existing engine is running and carrier settings are identical, update forwarders in-place without restarting
+	if old, ok := d.engines[t.Id]; ok && old != nil && old.IsAlive() && carrierSettingsEqual(old.Config(), cfg) {
+		d.logger.WithFields(log.Fields{
+			"tunnelId": t.Id,
+			"role":     t.Role,
+		}).Info("[Relay] Carrier configuration unchanged; updating forwarders in-place with zero downtime")
+		if err := old.UpdateForwarders(forwarderRules); err != nil {
+			d.logger.WithField("err", err).Warn("[Relay] In-place forwarder update failed, falling back to full restart")
+		} else {
+			return nil
+		}
+	}
+
+	// Stop existing instance if running, harvesting any unsent traffic delta first
+	if old, ok := d.engines[t.Id]; ok && old != nil {
+		d.harvestUnsentLocked(t.Id, old)
+		_ = old.Close()
+		delete(d.engines, t.Id)
+	}
+
 	eng := relay.NewEngine(cfg)
 	if err := eng.Start(); err != nil {
 		d.lastErrors[t.Id] = err.Error()
@@ -361,6 +374,49 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		"carrier":   carrierPort,
 	}).Info("[Relay] Native Go Relay Engine started")
 	return nil
+}
+
+func carrierSettingsEqual(a, b relay.Config) bool {
+	return a.Transport == b.Transport &&
+		a.CarrierPort == b.CarrierPort &&
+		a.Password == b.Password &&
+		a.SNI == b.SNI &&
+		a.OriginIP == b.OriginIP &&
+		a.Direction == b.Direction &&
+		a.Role == b.Role &&
+		a.EntryServerIP == b.EntryServerIP &&
+		a.ExitServerIP == b.ExitServerIP &&
+		a.UseHalfDuplex == b.UseHalfDuplex &&
+		a.UseFisher == b.UseFisher &&
+		a.FisherConnections == b.FisherConnections &&
+		a.MinHeldConnections == b.MinHeldConnections &&
+		a.CertMode == b.CertMode &&
+		a.CertFile == b.CertFile &&
+		a.KeyFile == b.KeyFile &&
+		a.EdgeIP == b.EdgeIP &&
+		a.WSPath == b.WSPath &&
+		a.SimpleAuth == b.SimpleAuth &&
+		a.KCPDataShards == b.KCPDataShards &&
+		a.KCPParityShards == b.KCPParityShards &&
+		a.KCPMTU == b.KCPMTU &&
+		a.L3LocalIP == b.L3LocalIP &&
+		a.L3PeerIP == b.L3PeerIP &&
+		a.L3Iface == b.L3Iface &&
+		a.L3MTU == b.L3MTU &&
+		a.SpoofSrcIP == b.SpoofSrcIP &&
+		a.SpoofPeerSrcIP == b.SpoofPeerSrcIP &&
+		a.SpoofProfile == b.SpoofProfile &&
+		a.SpoofUplink == b.SpoofUplink &&
+		a.SpoofDownlink == b.SpoofDownlink &&
+		a.SpoofFakeTLS == b.SpoofFakeTLS &&
+		a.SpoofTTLJitter == b.SpoofTTLJitter &&
+		a.SpoofRandomDSCP == b.SpoofRandomDSCP &&
+		a.SpoofPortMin == b.SpoofPortMin &&
+		a.SpoofPortMax == b.SpoofPortMax &&
+		a.SpoofPadding == b.SpoofPadding &&
+		a.SpoofPaddingMax == b.SpoofPaddingMax &&
+		a.SpoofShufflePort == b.SpoofShufflePort &&
+		a.SpoofInterface == b.SpoofInterface
 }
 
 func (d *RelayDriver) Stop(tunnelId int) error {

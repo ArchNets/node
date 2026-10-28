@@ -305,7 +305,11 @@ func (c *TunnelController) configMonitor() error {
 		if restartTs > 0 && restartTs != c.lastRestartTs[t.Id] {
 			c.lastRestartTs[t.Id] = restartTs
 			forceReload = true
+			if drv := GetTunnelDriver(t.Method); drv != nil {
+				_ = drv.Stop(t.Id)
+			}
 		}
+		t.RestartTimestamp = 0
 		t.ScanCommand = nil
 		cleanTunnels[i] = t
 	}
@@ -512,15 +516,29 @@ func (c *TunnelController) applyConfig(data *panel.TunnelData) error {
 		telemetry.SetDynamicSNIOrigins(presets)
 	}
 
-	// Stop existing processes and drivers
+	// Find which tunnels were removed in the new config
+	newTunnelIDs := make(map[int]bool)
+	for _, t := range data.Tunnels {
+		newTunnelIDs[t.Id] = true
+	}
+
+	// Stop only removed tunnels from registered drivers
 	driversMu.RLock()
 	for _, drv := range drivers {
-		drv.StopAll()
+		for _, prev := range c.tunnels {
+			if !newTunnelIDs[prev.Id] {
+				_ = drv.Stop(prev.Id)
+			}
+		}
 	}
 	driversMu.RUnlock()
 
-	c.stopAllForwarders()
-	c.stopAllXrayInstances()
+	// Stop only removed Xray instances
+	for _, prev := range c.tunnels {
+		if !newTunnelIDs[prev.Id] {
+			c.stopXrayInstance(prev.Id)
+		}
+	}
 
 	var unhandledTunnels []panel.TunnelInfo
 	var xrayTunnels []panel.TunnelInfo
@@ -1149,6 +1167,15 @@ func buildXrayStreamSettings(cfg *panel.XrayTunnelProtocol, isServer bool) map[s
 	}
 
 	return ss
+}
+
+func (c *TunnelController) stopXrayInstance(id int) {
+	c.xrayMu.Lock()
+	defer c.xrayMu.Unlock()
+	if instance, ok := c.xrayInstances[id]; ok && instance != nil {
+		_ = instance.Close()
+		delete(c.xrayInstances, id)
+	}
 }
 
 func (c *TunnelController) stopAllXrayInstances() {
