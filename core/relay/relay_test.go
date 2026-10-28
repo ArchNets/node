@@ -1058,3 +1058,85 @@ func TestL3NewTransportsCatalog(t *testing.T) {
 		t.Fatalf("expected l3-tcp to be L3 stream transport, got %+v", tcpSpec)
 	}
 }
+
+func TestInPlaceUpdateForwarders(t *testing.T) {
+	eng := NewEngine(Config{
+		Role:        "entry",
+		CarrierPort: 48991,
+		Transport:   "reverse-reality",
+		SNI:         "divar.ir",
+	})
+	if err := eng.Start(); err != nil {
+		t.Fatalf("failed to start engine: %v", err)
+	}
+	defer eng.Close()
+
+	// Initial forwarders
+	f1 := []routing.ForwarderRule{
+		{
+			Protocol:   "tcp",
+			ListenPort: 49101,
+			TargetPort: 49201,
+		},
+	}
+	if err := eng.UpdateForwarders(f1); err != nil {
+		t.Fatalf("UpdateForwarders failed: %v", err)
+	}
+
+	// Verify port 49101 is listening
+	conn1, err := net.Dial("tcp", "127.0.0.1:49101")
+	if err != nil {
+		t.Fatalf("failed to connect to forwarder port 49101: %v", err)
+	}
+	_ = conn1.Close()
+
+	// Update forwarders: add 49102, remove 49101
+	f2 := []routing.ForwarderRule{
+		{
+			Protocol:   "tcp",
+			ListenPort: 49102,
+			TargetPort: 49202,
+		},
+	}
+	if err := eng.UpdateForwarders(f2); err != nil {
+		t.Fatalf("UpdateForwarders second call failed: %v", err)
+	}
+
+	// Port 49102 should now be listening
+	conn2, err := net.Dial("tcp", "127.0.0.1:49102")
+	if err != nil {
+		t.Fatalf("failed to connect to new forwarder port 49102: %v", err)
+	}
+	_ = conn2.Close()
+
+	// Port 49101 should be closed
+	time.Sleep(50 * time.Millisecond)
+	connOld, err := net.DialTimeout("tcp", "127.0.0.1:49101", 100*time.Millisecond)
+	if err == nil {
+		_ = connOld.Close()
+		t.Fatal("expected old port 49101 to be closed after in-place update")
+	}
+}
+
+func TestMuxStreamAliveChecker(t *testing.T) {
+	c1, c2 := net.Pipe()
+	sess1 := transport.NewMuxSession(c1, true)
+	sess2 := transport.NewMuxSession(c2, false)
+	defer sess1.Close()
+	defer sess2.Close()
+
+	st1, err := sess1.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	defer st1.Close()
+
+	if !transport.IsStreamAlive(st1) {
+		t.Fatal("expected live mux stream to report IsStreamAlive true")
+	}
+
+	_ = sess1.Close()
+	if transport.IsStreamAlive(st1) {
+		t.Fatal("expected closed mux stream to report IsStreamAlive false")
+	}
+}
