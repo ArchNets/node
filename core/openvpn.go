@@ -142,6 +142,11 @@ func (o *OpenVPNCore) Start() error {
 
 	_ = os.Remove(o.socketPath) // stale socket from a previous run
 
+	// Clean up any stale interface left from a previous crash or unclean stop
+	_ = execCommand(fmt.Sprintf("ip link set %s down", o.InterfaceName))
+	_ = execCommand(fmt.Sprintf("ip tuntap del mode tun dev %s", o.InterfaceName))
+	_ = execCommand(fmt.Sprintf("ip link delete %s", o.InterfaceName))
+
 	o.cmd = exec.Command("openvpn", "--config", confPath)
 	o.cmd.Stdout = log.StandardLogger().WriterLevel(log.DebugLevel)
 	o.cmd.Stderr = log.StandardLogger().WriterLevel(log.WarnLevel)
@@ -548,10 +553,6 @@ auth SHA256
 
 user nobody
 group nogroup
-# Keep key material and the tun device across SIGUSR1/ping-restart
-# soft restarts; after the privilege drop, re-opening them would fail.
-persist-key
-persist-tun
 
 verb 3
 `, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask)
