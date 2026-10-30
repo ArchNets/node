@@ -12,6 +12,7 @@ type TransportSpec struct {
 	IsL3              bool
 	NeedsSNI          bool
 	NeedsTLSServerCfg bool
+	NoCarrierPort     bool
 	DefaultHalfDuplex bool
 	DefaultFisher     bool
 }
@@ -29,17 +30,17 @@ var transportCatalog = []TransportSpec{
 	{ID: "kcp", Label: "KCP (UDP + FEC)", IsPacket: true, IsMux: true},
 	{ID: "udp", Label: "UDP Datagram Pool", IsPacket: true, IsMux: true},
 	{ID: "pck", Label: "PCK (Stateless Packet TCP)", IsPacket: true, IsMux: true},
-	{ID: "xdi", Label: "XDI (ICMP Echo Tunnel)", IsPacket: true, IsMux: true},
+	{ID: "xdi", Label: "XDI (ICMP Echo Tunnel)", IsPacket: true, IsMux: true, NoCarrierPort: true},
 	{ID: "tls-reverse", Label: "TLS 1.3", NeedsTLSServerCfg: true, DefaultHalfDuplex: true},
 	{ID: "reverse-reality", Label: "Reality (TLS 1.3 Camouflage)", NeedsSNI: true, DefaultHalfDuplex: true, DefaultFisher: true},
 	{ID: "l3-udp", Label: "L3 TUN • UDP Datagram", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-quic", Label: "L3 TUN • QUIC Datagram", IsQuic: true, IsL3: true},
 	{ID: "l3-pck", Label: "L3 TUN • PCK (Stateless Packet)", IsPacket: true, IsMux: true, IsL3: true},
-	{ID: "l3-xdi", Label: "L3 TUN • XDI (ICMP Echo)", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-xdi", Label: "L3 TUN • XDI (ICMP Echo)", IsPacket: true, IsMux: true, IsL3: true, NoCarrierPort: true},
 	{ID: "l3-sni", Label: "L3 TUN • SNI Spoofed Packet", IsPacket: true, IsMux: true, IsL3: true, NeedsSNI: true},
-	{ID: "l3-bip", Label: "L3 TUN • BIP (Protocol 58 Raw)", IsPacket: true, IsMux: true, IsL3: true},
-	{ID: "l3-ipip", Label: "L3 TUN • IPIP (Protocol 4 Raw)", IsPacket: true, IsMux: true, IsL3: true},
-	{ID: "l3-gre", Label: "L3 TUN • GRE (Protocol 47 Raw)", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-bip", Label: "L3 TUN • BIP (Protocol 58 Raw)", IsPacket: true, IsMux: true, IsL3: true, NoCarrierPort: true},
+	{ID: "l3-ipip", Label: "L3 TUN • IPIP (Protocol 4 Raw)", IsPacket: true, IsMux: true, IsL3: true, NoCarrierPort: true},
+	{ID: "l3-gre", Label: "L3 TUN • GRE (Protocol 47 Raw)", IsPacket: true, IsMux: true, IsL3: true, NoCarrierPort: true},
 	{ID: "l3-tcp", Label: "L3 TUN • Reliable TCP Stream", IsL3: true, DefaultHalfDuplex: true},
 	{ID: "spoof", Label: "IP Spoofing Carrier", IsPacket: true, IsMux: true, IsL3: true},
 }
@@ -58,6 +59,12 @@ func GetTransportSpec(id string) TransportSpec {
 		DefaultHalfDuplex: true,
 		DefaultFisher:     true,
 	}
+}
+
+// IsPortFreeTransport reports whether the given transport operates purely at the raw IP layer
+// without requiring a Layer 4 TCP or UDP carrier port.
+func IsPortFreeTransport(id string) bool {
+	return GetTransportSpec(id).NoCarrierPort
 }
 
 // AllRelayDriverMethods returns all tunnel method strings handled by RelayDriver.

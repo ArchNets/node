@@ -232,6 +232,9 @@ func (e *Engine) CarrierAddr() string {
 	if e.carrierLn != nil {
 		return e.carrierLn.Addr().String()
 	}
+	if e.cfg.CarrierPort > 0 {
+		return net.JoinHostPort(e.cfg.ListenIP, strconv.Itoa(e.cfg.CarrierPort))
+	}
 	return ""
 }
 
@@ -270,6 +273,8 @@ func (e *Engine) Close() error {
 		e.acceptedMuxSess.Delete(key)
 		return true
 	})
+
+	UnregisterSharedCarrier(e.cfg.TunnelID, e.cfg.CarrierPort)
 
 	e.mu.Lock()
 	if e.activeQuicConn != nil {
@@ -512,35 +517,25 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 		return nil
 	}
 
-	ln, err := transport.ListenTCP(e.ctx, carrierAddr)
+	err := RegisterSharedCarrier(
+		e.ctx,
+		listenIP,
+		e.cfg,
+		e.handleIncomingCarrier,
+		func(c net.Conn, targetPort uint16) {
+			go routing.HandleEntryTCPClient(c, targetPort, e.ClaimReverseStream, e.Stats)
+		},
+	)
 	if err != nil {
-		if transport.ReclaimPortIfOrphanedNode(e.cfg.CarrierPort) {
-			e.logger.WithField("port", e.cfg.CarrierPort).Warn("[Relay] Terminated orphaned node process holding carrier port, retrying bind...")
-			time.Sleep(300 * time.Millisecond)
-			ln, err = transport.ListenTCP(e.ctx, carrierAddr)
-		}
+		return err
 	}
-	if err != nil {
-		conflictErr := transport.FormatPortConflictError(e.cfg.CarrierPort, err)
-		e.logger.WithFields(log.Fields{
-			"port": e.cfg.CarrierPort,
-			"addr": carrierAddr,
-			"err":  conflictErr,
-		}).Error("[Relay] Relay carrier port bind failed. Another process is occupying this port!")
-		return conflictErr
-	}
-	e.mu.Lock()
-	e.carrierLn = ln
-	e.mu.Unlock()
 
 	e.logger.WithFields(log.Fields{
 		"carrierPort": e.cfg.CarrierPort,
 		"sni":         e.cfg.SNI,
 		"transport":   e.cfg.Transport,
-	}).Info("[Relay] Carrier listener started successfully")
+	}).Info("[Relay] Shared Carrier port demultiplexer active")
 
-	e.wg.Add(1)
-	go e.entryAcceptLoop(ln)
 	return nil
 }
 

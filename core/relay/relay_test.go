@@ -1140,3 +1140,85 @@ func TestMuxStreamAliveChecker(t *testing.T) {
 		t.Fatal("expected closed mux stream to report IsStreamAlive false")
 	}
 }
+
+func TestSharedCarrierPortMultiplexing(t *testing.T) {
+	sharedPort := 48443
+
+	eng1 := NewEngine(Config{
+		TunnelID:     501,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		Transport:    "reverse-reality",
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "198.51.100.1",
+		SNI:          "shariati.tums.ac.ir",
+		Password:     "pass-tunnel-1",
+	})
+	if err := eng1.Start(); err != nil {
+		t.Fatalf("eng1 failed to start on shared port %d: %v", sharedPort, err)
+	}
+
+	// Start second engine on the exact same carrier port
+	eng2 := NewEngine(Config{
+		TunnelID:     502,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		Transport:    "reverse-reality",
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "198.51.100.2",
+		SNI:          "rhc.ac.ir",
+		Password:     "pass-tunnel-2",
+	})
+	if err := eng2.Start(); err != nil {
+		_ = eng1.Close()
+		t.Fatalf("eng2 failed to attach to shared carrier port %d: %v", sharedPort, err)
+	}
+
+	// Verify demuxer state
+	sharedMultiMu.Lock()
+	demuxer, exists := sharedListeners[sharedPort]
+	if !exists {
+		sharedMultiMu.Unlock()
+		_ = eng1.Close()
+		_ = eng2.Close()
+		t.Fatalf("expected demuxer to exist for port %d", sharedPort)
+	}
+	demuxer.mu.RLock()
+	targetCount := len(demuxer.targets)
+	demuxer.mu.RUnlock()
+	sharedMultiMu.Unlock()
+
+	if targetCount != 2 {
+		t.Fatalf("expected 2 targets registered on shared port %d, got %d", sharedPort, targetCount)
+	}
+
+	// Close eng1; eng2 must remain active and port must remain open
+	_ = eng1.Close()
+
+	sharedMultiMu.Lock()
+	demuxer, exists = sharedListeners[sharedPort]
+	if !exists {
+		sharedMultiMu.Unlock()
+		_ = eng2.Close()
+		t.Fatalf("demuxer was prematurely closed while eng2 was still active")
+	}
+	demuxer.mu.RLock()
+	targetCount = len(demuxer.targets)
+	demuxer.mu.RUnlock()
+	sharedMultiMu.Unlock()
+
+	if targetCount != 1 {
+		t.Fatalf("expected 1 target remaining on shared port %d, got %d", sharedPort, targetCount)
+	}
+
+	// Close eng2; port must now be cleanly deregistered and closed
+	_ = eng2.Close()
+
+	sharedMultiMu.Lock()
+	_, exists = sharedListeners[sharedPort]
+	sharedMultiMu.Unlock()
+
+	if exists {
+		t.Fatalf("expected demuxer for port %d to be cleanly removed after all engines closed", sharedPort)
+	}
+}
