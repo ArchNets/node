@@ -1399,3 +1399,83 @@ func TestLiveMultiKharejSharedPortEndToEnd(t *testing.T) {
 	}
 	t.Logf("✓ Tunnel 2 Verified: Client -> Iran:48090 -> SharedCarrier:%d -> Kharej B: %s", sharedPort, respB)
 }
+
+func TestRawCarriersAndL3TransportsEndToEnd(t *testing.T) {
+	transportsToTest := []string{"l3-bip", "l3-ipip", "l3-gre", "xdi", "pck", "spoof"}
+	for _, tr := range transportsToTest {
+		t.Run(tr, func(t *testing.T) {
+			carrierPort := getFreeUDPPort(t)
+			targetPort := getFreeTCPPort(t)
+			fwdPort := getFreeTCPPort(t)
+
+			startMockTCPEchoServer(t, targetPort)
+
+			entry := NewEngine(Config{
+				TunnelID:           420,
+				Role:               "entry",
+				Transport:          tr,
+				CarrierPort:        carrierPort,
+				ListenIP:           "127.0.0.1",
+				Password:           "raw-carrier-secret-420",
+				UseHalfDuplex:      false,
+				UseFisher:          false,
+				MinHeldConnections: 4,
+				Forwarders: []routing.ForwarderRule{
+					{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+				},
+			})
+			if err := entry.Start(); err != nil {
+				t.Fatalf("failed to start %s entry: %v", tr, err)
+			}
+			defer entry.Close()
+
+			exit := NewEngine(Config{
+				TunnelID:           420,
+				Role:               "exit",
+				Transport:          tr,
+				CarrierPort:        carrierPort,
+				EntryServerIP:      "127.0.0.1",
+				TargetIP:           "127.0.0.1",
+				Password:           "raw-carrier-secret-420",
+				UseHalfDuplex:      false,
+				UseFisher:          false,
+				MinHeldConnections: 4,
+			})
+			if err := exit.Start(); err != nil {
+				t.Fatalf("failed to start %s exit: %v", tr, err)
+			}
+			defer exit.Close()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if entry.Stats.PoolIdleConnections.Load() >= 2 {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+
+			if entry.Stats.PoolIdleConnections.Load() < 1 {
+				t.Fatalf("%s failed to establish reverse pool connections within timeout", tr)
+			}
+
+			clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 3*time.Second)
+			if err != nil {
+				t.Fatalf("client dial failed for %s: %v", tr, err)
+			}
+			defer clientConn.Close()
+
+			testMsg := "RAW-CARRIER-TEST-" + tr
+			if _, err := clientConn.Write([]byte(testMsg)); err != nil {
+				t.Fatalf("write failed: %v", err)
+			}
+			resp := make([]byte, len(testMsg))
+			if _, err := io.ReadFull(clientConn, resp); err != nil {
+				t.Fatalf("read failed: %v", err)
+			}
+			if string(resp) != testMsg {
+				t.Fatalf("expected %s, got %s", testMsg, string(resp))
+			}
+			t.Logf("✓ %s End-To-End Splicing Verified", tr)
+		})
+	}
+}

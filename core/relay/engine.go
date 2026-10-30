@@ -472,13 +472,13 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 		case "xdi", "l3-xdi":
 			uLn, uConn, err = transport.ListenXDICarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "pck", "l3-pck", "l3-sni":
-			uLn, uConn, err = transport.ListenPCKCarrier(carrierAddr, e.cfg.Password)
+			uLn, uConn, err = transport.ListenPCKCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-bip":
-			uLn, uConn, err = transport.ListenBIPCarrier(carrierAddr, e.cfg.Password)
+			uLn, uConn, err = transport.ListenBIPCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-ipip":
-			uLn, uConn, err = transport.ListenIPIPCarrier(carrierAddr, e.cfg.Password)
+			uLn, uConn, err = transport.ListenIPIPCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-gre":
-			uLn, uConn, err = transport.ListenGRECarrier(carrierAddr, e.cfg.Password)
+			uLn, uConn, err = transport.ListenGRECarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "spoof":
 			spoofOpts := transport.SpoofOptions{
 				SrcIP:       e.cfg.SpoofSrcIP,
@@ -497,7 +497,7 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 				PaddingMax:  uint8(e.cfg.SpoofPaddingMax),
 				Interface:   e.cfg.SpoofInterface,
 			}
-			uLn, uConn, err = transport.ListenSpoofCarrier(carrierAddr, e.cfg.Password, spoofOpts)
+			uLn, uConn, err = transport.ListenSpoofCarrier(carrierAddr, e.cfg.Password, spoofOpts, e.cfg.CarrierPort)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			uLn, uConn, err = transport.ListenUDPCarrier(carrierAddr, e.cfg.Password, useFEC)
@@ -1077,8 +1077,8 @@ func (e *Engine) exitPoolLoop() {
 	defer e.wg.Done()
 	tickDuration := 500 * time.Millisecond
 	if e.cfg.TunnelID >= 1000 {
-		// Benchmark sandbox instances: gentle 2s ticker, no aggressive hammering
-		tickDuration = 2 * time.Second
+		// Benchmark sandbox instances: fast 250ms ticker so probe phases never starve
+		tickDuration = 250 * time.Millisecond
 	}
 	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
@@ -1264,13 +1264,13 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 		case "xdi", "l3-xdi":
 			return transport.DialXDICarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "pck", "l3-pck", "l3-sni":
-			return transport.DialPCKCarrier(e.ctx, addr, e.cfg.Password)
+			return transport.DialPCKCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-bip":
-			return transport.DialBIPCarrier(e.ctx, addr, e.cfg.Password)
+			return transport.DialBIPCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-ipip":
-			return transport.DialIPIPCarrier(e.ctx, addr, e.cfg.Password)
+			return transport.DialIPIPCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-gre":
-			return transport.DialGRECarrier(e.ctx, addr, e.cfg.Password)
+			return transport.DialGRECarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "spoof":
 			spoofOpts := transport.SpoofOptions{
 				SrcIP:       e.cfg.SpoofSrcIP,
@@ -1289,7 +1289,7 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 				PaddingMax:  uint8(e.cfg.SpoofPaddingMax),
 				Interface:   e.cfg.SpoofInterface,
 			}
-			return transport.DialSpoofCarrier(e.ctx, addr, e.cfg.Password, spoofOpts)
+			return transport.DialSpoofCarrier(e.ctx, addr, e.cfg.Password, spoofOpts, e.cfg.CarrierPort)
 		default:
 			useFEC := e.cfg.Transport == "kcp"
 			return transport.DialUDPCarrier(e.ctx, addr, e.cfg.Password, useFEC)

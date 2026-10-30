@@ -28,12 +28,66 @@ const (
 
 // deriveXDITag derives a deterministic 4-byte tunnel tag from the shared token.
 func deriveXDITag(token string) [4]byte {
+	return deriveScopedTag(token, 0, 0)
+}
+
+// deriveScopedTag derives a deterministic 4-byte tunnel tag scoped by password, protocol, and port.
+// Scoping by port ensures multiple concurrent benchmark sandboxes on raw IP protocols (58, 4, 47, 1)
+// never steal or misroute each other's packets.
+func deriveScopedTag(token string, proto byte, port int) [4]byte {
 	mac := hmac.New(sha256.New, []byte("archnet-xdi-tag-salt"))
 	mac.Write([]byte(token))
+	if proto != 0 || port > 0 {
+		var meta [3]byte
+		meta[0] = proto
+		binary.BigEndian.PutUint16(meta[1:3], uint16(port&0xFFFF))
+		mac.Write(meta[:])
+	}
 	sum := mac.Sum(nil)
 	var tag [4]byte
 	copy(tag[:], sum[:4])
 	return tag
+}
+
+// udpIPv4Checksum computes the RFC 768 UDP checksum over the IPv4 pseudo-header and UDP datagram.
+func udpIPv4Checksum(srcIP, dstIP net.IP, udpPkt []byte) uint16 {
+	src4 := srcIP.To4()
+	dst4 := dstIP.To4()
+	if src4 == nil || dst4 == nil {
+		return 0
+	}
+	var sum uint32
+	sum += uint32(binary.BigEndian.Uint16(src4[0:2]))
+	sum += uint32(binary.BigEndian.Uint16(src4[2:4]))
+	sum += uint32(binary.BigEndian.Uint16(dst4[0:2]))
+	sum += uint32(binary.BigEndian.Uint16(dst4[2:4]))
+	sum += uint32(17) // IPPROTO_UDP
+	sum += uint32(len(udpPkt))
+
+	length := len(udpPkt)
+	for i := 0; i+1 < length; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(udpPkt[i : i+2]))
+	}
+	if length%2 == 1 {
+		sum += uint32(udpPkt[length-1]) << 8
+	}
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	csum := ^uint16(sum)
+	if csum == 0 {
+		return 0xFFFF
+	}
+	return csum
+}
+
+// openBestRawConn attempts to open a Backhaul IPX-grade AF_PACKET + IP_HDRINCL raw socket pair
+// first, falling back to standard net.ListenPacket(network, host) when unavailable.
+func openBestRawConn(proto byte, network, host, ifaceHint string) (net.PacketConn, error) {
+	if pc, err := openPlatformRawIPv4Conn(proto, host, ifaceHint); err == nil && pc != nil {
+		return pc, nil
+	}
+	return net.ListenPacket(network, host)
 }
 
 // internetChecksum computes the RFC 1071 16-bit one's complement checksum.
@@ -199,13 +253,14 @@ type pckPacketConn struct {
 	isServer  bool
 	localPort uint16
 	peerPort  uint16
+	tag       [4]byte
 	seq       atomic.Uint32
 	ack       atomic.Uint32
 	closeOnce sync.Once
 	guardPort uint16
 }
 
-func newPCKPacketConn(rawConn net.PacketConn, isServer bool, localPort, peerPort uint16) *pckPacketConn {
+func newPCKPacketConn(rawConn net.PacketConn, isServer bool, localPort, peerPort uint16, tag [4]byte) *pckPacketConn {
 	var seed [4]byte
 	_, _ = rand.Read(seed[:])
 	p := &pckPacketConn{
@@ -213,6 +268,7 @@ func newPCKPacketConn(rawConn net.PacketConn, isServer bool, localPort, peerPort
 		isServer:   isServer,
 		localPort:  localPort,
 		peerPort:   peerPort,
+		tag:        tag,
 		guardPort:  localPort,
 	}
 	p.seq.Store(binary.BigEndian.Uint32(seed[:]) | 0x10000)
@@ -373,84 +429,94 @@ func discoverLocalIPv4For(dst net.IP) net.IP {
 // ListenXDICarrier starts an XDI (ICMP Echo) listener. If the process has CAP_NET_RAW / root,
 // it binds a raw "ip4:icmp" socket with direction-tag filtering and iptables echo guard.
 func ListenXDICarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
- host, _, err := net.SplitHostPort(addr)
- if err != nil || host == "" {
-  host = "0.0.0.0"
- }
- if os.Geteuid() == 0 && host != "127.0.0.1" {
-  if rawConn, rErr := net.ListenPacket("ip4:icmp", host); rErr == nil {
-   ident := uint16(port & 0xFFFF)
-   wrapped := &icmpPacketConn{
-    PacketConn: rawConn,
-    isServer:   true,
-    ident:      ident,
-    tag:        deriveXDITag(password),
-    echoRule:   installXDIEchoGuard(ident),
-   }
-   return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
-  }
- }
- return ListenUDPCarrier(addr, password, true)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "0.0.0.0"
+	}
+	tag := deriveScopedTag(password, 1, port)
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := openBestRawConn(1, "ip4:icmp", host, ""); rErr == nil {
+			ident := uint16(port & 0xFFFF)
+			wrapped := &icmpPacketConn{
+				PacketConn: rawConn,
+				isServer:   true,
+				ident:      ident,
+				tag:        tag,
+				echoRule:   installXDIEchoGuard(ident),
+			}
+			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+		}
+	}
+	return ListenUDPCarrier(addr, password, true)
 }
 
 // DialXDICarrier dials an XDI (ICMP Echo) session to addr.
 func DialXDICarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
- host, _, err := net.SplitHostPort(addr)
- if err != nil {
-  host = addr
- }
- if os.Geteuid() == 0 && host != "127.0.0.1" {
-  if rawConn, rErr := net.ListenPacket("ip4:icmp", "0.0.0.0"); rErr == nil {
-   ident := uint16(port & 0xFFFF)
-   wrapped := &icmpPacketConn{
-    PacketConn: rawConn,
-    isServer:   false,
-    ident:      ident,
-    tag:        deriveXDITag(password),
-   }
-   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
-   return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
-  }
- }
- return DialUDPCarrier(ctx, addr, password, true)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	tag := deriveScopedTag(password, 1, port)
+	if os.Geteuid() == 0 && host != "127.0.0.1" {
+		if rawConn, rErr := openBestRawConn(1, "ip4:icmp", "0.0.0.0", ""); rErr == nil {
+			ident := uint16(port & 0xFFFF)
+			wrapped := &icmpPacketConn{
+				PacketConn: rawConn,
+				isServer:   false,
+				ident:      ident,
+				tag:        tag,
+			}
+			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+		}
+	}
+	return DialUDPCarrier(ctx, addr, password, true)
 }
 
 // ListenPCKCarrier starts a PCK (Stateless Raw TCP Packet + KCP/FEC) carrier listener.
-func ListenPCKCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
- host, portStr, err := net.SplitHostPort(addr)
- if err != nil || host == "" {
-  host = "0.0.0.0"
- }
- pNum, pErr := strconv.ParseUint(portStr, 10, 16)
- if os.Geteuid() == 0 && pErr == nil && pNum > 0 && pNum <= 65535 && host != "127.0.0.1" {
-  port := uint16(pNum)
-  if rawConn, rErr := net.ListenPacket("ip4:tcp", host); rErr == nil {
-   wrapped := newPCKPacketConn(rawConn, true, port, 0)
-   return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
-  }
- }
- return ListenUDPCarrier(addr, password, true)
+func ListenPCKCarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "0.0.0.0"
+	}
+	pNum, pErr := strconv.ParseUint(portStr, 10, 16)
+	if port <= 0 && pErr == nil {
+		port = int(pNum)
+	}
+	tag := deriveScopedTag(password, 6, port)
+	if os.Geteuid() == 0 && port > 0 && port <= 65535 && host != "127.0.0.1" {
+		p16 := uint16(port)
+		if rawConn, rErr := openBestRawConn(6, "ip4:tcp", host, ""); rErr == nil {
+			wrapped := newPCKPacketConn(rawConn, true, p16, 0, tag)
+			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
+		}
+	}
+	return ListenUDPCarrier(addr, password, true)
 }
 
 // DialPCKCarrier dials a PCK (Stateless Raw TCP Packet + KCP/FEC) carrier session.
-func DialPCKCarrier(ctx context.Context, addr, password string) (net.Conn, error) {
- host, portStr, err := net.SplitHostPort(addr)
- if err != nil {
-  host = addr
- }
- pNum, pErr := strconv.ParseUint(portStr, 10, 16)
- if os.Geteuid() == 0 && pErr == nil && pNum > 0 && pNum <= 65535 && host != "127.0.0.1" {
-  port := uint16(pNum)
-  if rawConn, rErr := net.ListenPacket("ip4:tcp", "0.0.0.0"); rErr == nil {
-   var rnd [2]byte
-   _, _ = rand.Read(rnd[:])
-   localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
-   wrapped := newPCKPacketConn(rawConn, false, localPort, port)
-   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: int(port)}
-   return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
-  }
- }
- return DialUDPCarrier(ctx, addr, password, true)
+func DialPCKCarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	pNum, pErr := strconv.ParseUint(portStr, 10, 16)
+	if port <= 0 && pErr == nil {
+		port = int(pNum)
+	}
+	tag := deriveScopedTag(password, 6, port)
+	if os.Geteuid() == 0 && port > 0 && port <= 65535 && host != "127.0.0.1" {
+		p16 := uint16(port)
+		if rawConn, rErr := openBestRawConn(6, "ip4:tcp", "0.0.0.0", ""); rErr == nil {
+			var rnd [2]byte
+			_, _ = rand.Read(rnd[:])
+			localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
+			wrapped := newPCKPacketConn(rawConn, false, localPort, p16, tag)
+			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
+		}
+	}
+	return DialUDPCarrier(ctx, addr, password, true)
 }
 
 // newRawProtoPacketConn wraps an IPv4 raw packet connection (for Protocol 58 BIP or Protocol 4 IPIP).
@@ -518,14 +584,15 @@ func (c *rawProtoPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 // ListenBIPCarrier starts a raw IPv4 Protocol 58 (BIP / IPv6-ICMP on IPv4) carrier listener.
-func ListenBIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
+func ListenBIPCarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
 		host = "0.0.0.0"
 	}
+	tag := deriveScopedTag(password, 58, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:58", host); rErr == nil {
-			wrapped := newRawProtoPacketConn(rawConn, 58, true, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(58, "ip4:58", host, ""); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 58, true, tag)
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
 	}
@@ -533,15 +600,18 @@ func ListenBIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn,
 }
 
 // DialBIPCarrier dials a raw IPv4 Protocol 58 (BIP) carrier session.
-func DialBIPCarrier(ctx context.Context, addr, password string) (net.Conn, error) {
+func DialBIPCarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
-	port, _ := strconv.Atoi(portStr)
+	if port <= 0 {
+		port, _ = strconv.Atoi(portStr)
+	}
+	tag := deriveScopedTag(password, 58, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:58", "0.0.0.0"); rErr == nil {
-			wrapped := newRawProtoPacketConn(rawConn, 58, false, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(58, "ip4:58", "0.0.0.0", ""); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 58, false, tag)
 			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
 			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
 		}
@@ -550,14 +620,15 @@ func DialBIPCarrier(ctx context.Context, addr, password string) (net.Conn, error
 }
 
 // ListenIPIPCarrier starts a raw IPv4 Protocol 4 (IPIP) carrier listener.
-func ListenIPIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
+func ListenIPIPCarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
 		host = "0.0.0.0"
 	}
+	tag := deriveScopedTag(password, 4, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:4", host); rErr == nil {
-			wrapped := newRawProtoPacketConn(rawConn, 4, true, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(4, "ip4:4", host, ""); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 4, true, tag)
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
 	}
@@ -565,15 +636,18 @@ func ListenIPIPCarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn
 }
 
 // DialIPIPCarrier dials a raw IPv4 Protocol 4 (IPIP) carrier session.
-func DialIPIPCarrier(ctx context.Context, addr, password string) (net.Conn, error) {
+func DialIPIPCarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
-	port, _ := strconv.Atoi(portStr)
+	if port <= 0 {
+		port, _ = strconv.Atoi(portStr)
+	}
+	tag := deriveScopedTag(password, 4, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:4", "0.0.0.0"); rErr == nil {
-			wrapped := newRawProtoPacketConn(rawConn, 4, false, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(4, "ip4:4", "0.0.0.0", ""); rErr == nil {
+			wrapped := newRawProtoPacketConn(rawConn, 4, false, tag)
 			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
 			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
 		}
@@ -581,36 +655,109 @@ func DialIPIPCarrier(ctx context.Context, addr, password string) (net.Conn, erro
 	return DialUDPCarrier(ctx, addr, password, true)
 }
 
-// ListenGRECarrier starts a raw IPv4 Protocol 47 (GRE) carrier listener.
-func ListenGRECarrier(addr, password string) (*UDPCarrierListener, *net.UDPConn, error) {
+// ListenGRECarrier starts a raw IPv4 Protocol 47 (GRE) carrier listener with RFC 2784 4-byte GRE header.
+func ListenGRECarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
 		host = "0.0.0.0"
 	}
+	tag := deriveScopedTag(password, 47, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:47", host); rErr == nil {
-			wrapped := newRawProtoPacketConn(rawConn, 47, true, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(47, "ip4:47", host, ""); rErr == nil {
+			wrapped := newGREProtoPacketConn(rawConn, true, tag)
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
 	}
 	return ListenUDPCarrier(addr, password, true)
 }
 
-// DialGRECarrier dials a raw IPv4 Protocol 47 (GRE) carrier session.
-func DialGRECarrier(ctx context.Context, addr, password string) (net.Conn, error) {
+// DialGRECarrier dials a raw IPv4 Protocol 47 (GRE) carrier session with RFC 2784 4-byte GRE header.
+func DialGRECarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
-	port, _ := strconv.Atoi(portStr)
+	if port <= 0 {
+		port, _ = strconv.Atoi(portStr)
+	}
+	tag := deriveScopedTag(password, 47, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := net.ListenPacket("ip4:47", "0.0.0.0"); rErr == nil {
-			wrapped := newRawProtoPacketConn(rawConn, 47, false, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(47, "ip4:47", "0.0.0.0", ""); rErr == nil {
+			wrapped := newGREProtoPacketConn(rawConn, false, tag)
 			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
 			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
 		}
 	}
 	return DialUDPCarrier(ctx, addr, password, true)
+}
+
+type greProtoPacketConn struct {
+	net.PacketConn
+	isServer bool
+	tag      [4]byte
+}
+
+func newGREProtoPacketConn(pc net.PacketConn, isServer bool, tag [4]byte) *greProtoPacketConn {
+	return &greProtoPacketConn{
+		PacketConn: pc,
+		isServer:   isServer,
+		tag:        tag,
+	}
+}
+
+func (c *greProtoPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	host := addr.String()
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ipAddr, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return 0, err
+	}
+	dirByte := byte(0x01)
+	if c.isServer {
+		dirByte = byte(0x02)
+	}
+	// 4B RFC 2784 GRE Header [0x00, 0x00, 0x08, 0x00] + 5B Tag/Dir + Payload
+	frame := make([]byte, 4+5+len(p))
+	frame[0] = 0x00
+	frame[1] = 0x00
+	frame[2] = 0x08
+	frame[3] = 0x00 // EtherType IPv4
+	copy(frame[4:8], c.tag[:])
+	frame[8] = dirByte
+	copy(frame[9:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, ipAddr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *greProtoPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	buf := make([]byte, 65535)
+	expectedDir := byte(0x02)
+	if c.isServer {
+		expectedDir = byte(0x01)
+	}
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < 9 {
+			continue
+		}
+		// Check GRE flags (0x0000) and EtherType (0x0800 IPv4)
+		if buf[0] != 0 || buf[1] != 0 || buf[2] != 0x08 || buf[3] != 0x00 {
+			continue
+		}
+		if !bytes.Equal(buf[4:8], c.tag[:]) || buf[8] != expectedDir {
+			continue
+		}
+		copied := copy(p, buf[9:n])
+		return copied, addr, nil
+	}
 }
 
 // SpoofOptions contains all tuning parameters for raw IP spoofing and evasion.
@@ -748,7 +895,7 @@ func (c *spoofPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 // ListenSpoofCarrier starts an advanced raw IP spoofing carrier listener.
-func ListenSpoofCarrier(addr, password string, opts SpoofOptions) (*UDPCarrierListener, *net.UDPConn, error) {
+func ListenSpoofCarrier(addr, password string, opts SpoofOptions, port int) (*UDPCarrierListener, *net.UDPConn, error) {
 	proto := byte(17) // default UDP
 	prof := strings.ToLower(strings.TrimSpace(opts.Profile))
 	if opts.Downlink != "" {
@@ -767,14 +914,18 @@ func ListenSpoofCarrier(addr, password string, opts SpoofOptions) (*UDPCarrierLi
 		proto = 47
 	}
 
-	host, _, err := net.SplitHostPort(addr)
+	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
 		host = "0.0.0.0"
 	}
+	if port <= 0 {
+		port, _ = strconv.Atoi(portStr)
+	}
+	tag := deriveScopedTag(password, proto, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		protoStr := fmt.Sprintf("ip4:%d", proto)
-		if rawConn, rErr := net.ListenPacket(protoStr, host); rErr == nil {
-			wrapped := newSpoofPacketConn(rawConn, opts, true, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(proto, protoStr, host, opts.Interface); rErr == nil {
+			wrapped := newSpoofPacketConn(rawConn, opts, true, tag)
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
 	}
@@ -782,7 +933,7 @@ func ListenSpoofCarrier(addr, password string, opts SpoofOptions) (*UDPCarrierLi
 }
 
 // DialSpoofCarrier dials an advanced raw IP spoofing carrier session.
-func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOptions) (net.Conn, error) {
+func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOptions, port int) (net.Conn, error) {
 	proto := byte(17) // default UDP
 	prof := strings.ToLower(strings.TrimSpace(opts.Profile))
 	if opts.Uplink != "" {
@@ -805,11 +956,14 @@ func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOpti
 	if err != nil {
 		host = addr
 	}
-	port, _ := strconv.Atoi(portStr)
+	if port <= 0 {
+		port, _ = strconv.Atoi(portStr)
+	}
+	tag := deriveScopedTag(password, proto, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		protoStr := fmt.Sprintf("ip4:%d", proto)
-		if rawConn, rErr := net.ListenPacket(protoStr, "0.0.0.0"); rErr == nil {
-			wrapped := newSpoofPacketConn(rawConn, opts, false, deriveXDITag(password))
+		if rawConn, rErr := openBestRawConn(proto, protoStr, "0.0.0.0", opts.Interface); rErr == nil {
+			wrapped := newSpoofPacketConn(rawConn, opts, false, tag)
 			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
 			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
 		}

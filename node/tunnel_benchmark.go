@@ -116,10 +116,12 @@ var (
 func buildTransportCandidate(idx int, direction, tr, baseSNI string) BenchmarkCandidate {
 	spec := transport.GetTransportSpec(tr)
 	prefix := "Reverse • "
-	if spec.IsL3 {
-		prefix = ""
-	} else if direction == "direct" {
+	if direction == "direct" {
 		prefix = "Direct • "
+	}
+	label := spec.Label
+	if spec.IsL3 && !strings.HasPrefix(label, "L3") {
+		label = "L3 TUN • " + label
 	}
 	sni := ""
 	if spec.NeedsSNI {
@@ -131,7 +133,7 @@ func buildTransportCandidate(idx int, direction, tr, baseSNI string) BenchmarkCa
 		SNI:           sni,
 		OriginIP:      "",
 		Transport:     tr,
-		MethodLabel:   prefix + spec.Label,
+		MethodLabel:   prefix + label,
 		UseHalfDuplex: spec.DefaultHalfDuplex,
 		UseFisher:     spec.DefaultFisher,
 	}
@@ -570,7 +572,7 @@ func (c *TunnelController) evaluateCandidate(
 		UseHalfDuplex:      cand.UseHalfDuplex,
 		UseFisher:          false,
 		FisherConnections:  1,
-		MinHeldConnections: 1,
+		MinHeldConnections: 6,
 		CertMode:           certMode,
 		Logger:             c.logger,
 	})
@@ -610,13 +612,6 @@ func (c *TunnelController) evaluateCandidate(
 			"transport": cand.Transport,
 			"err":       err,
 		}).Warn("[Benchmark] Candidate sandbox engine failed to start")
-	}
-
-	if sample == nil && c.relayDriver != nil {
-		activeEngine := c.relayDriver.GetEngine(t.Id)
-		if activeEngine != nil && activeEngine.Stats.PoolIdleConnections.Load() > 0 {
-			sample, _ = telemetry.RunBandwidthProbe(activeEngine.ClaimReverseStream, activeEngine.Stats, 1000*time.Millisecond)
-		}
 	}
 
 	if sample == nil {
@@ -819,7 +814,7 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				UseHalfDuplex:      cand.UseHalfDuplex,
 				UseFisher:          false,
 				FisherConnections:  1,
-				MinHeldConnections: 1,
+				MinHeldConnections: 6,
 				CertMode:           exitCertMode,
 				Logger:             c.logger,
 			})

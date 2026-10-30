@@ -199,23 +199,28 @@ func (u *UDPSessionConn) handleDataLocked(seq uint16, payload []byte) {
 	if _, exists := u.reorderBuf[seq]; !exists {
 		u.reorderBuf[seq] = payload
 	}
-	gapTimeout := 80 * time.Millisecond
+	nackInterval := 40 * time.Millisecond
+	gapTimeout := 2 * time.Second
 	fastRetransmit := false
 	if u.gamingMode {
-		gapTimeout = 15 * time.Millisecond
+		gapTimeout = 80 * time.Millisecond
+		nackInterval = 15 * time.Millisecond
 		if int(seq-u.nextRxSeq) >= 2 {
 			fastRetransmit = true
 		}
 	}
-	if u.gapSince.IsZero() || fastRetransmit {
-		u.gapSince = time.Now()
+	if u.gapSince.IsZero() || fastRetransmit || time.Since(u.gapSince) > nackInterval {
+		if u.gapSince.IsZero() {
+			u.gapSince = time.Now()
+		}
 		var nack [9]byte
 		nack[0] = udpPktNACK
 		binary.BigEndian.PutUint32(nack[1:5], u.sessionID)
 		binary.BigEndian.PutUint16(nack[5:7], u.nextRxSeq)
 		_, _ = u.pconn.WriteTo(nack[:], u.remoteAddr)
-	} else if time.Since(u.gapSince) > gapTimeout {
-		// Advance past unrecoverable gap after deadline so stream never deadlocks
+	}
+	if time.Since(u.gapSince) > gapTimeout {
+		// Only advance after persistent timeout (2s on reliable streams) so stream does not corrupt
 		for len(u.reorderBuf) > 0 && u.reorderBuf[u.nextRxSeq] == nil {
 			u.nextRxSeq++
 		}
