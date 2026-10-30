@@ -1222,3 +1222,180 @@ func TestSharedCarrierPortMultiplexing(t *testing.T) {
 		t.Fatalf("expected demuxer for port %d to be cleanly removed after all engines closed", sharedPort)
 	}
 }
+
+func TestLiveMultiKharejSharedPortEndToEnd(t *testing.T) {
+	sharedPort := 49443
+	svcPortA := 41001
+	svcPortB := 41002
+	fwdPortA := 48080
+	fwdPortB := 48090
+
+	// 1. Mock Backend Service A (on Kharej A)
+	lnA, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortA))
+	if err != nil {
+		t.Fatalf("failed to listen on service A port: %v", err)
+	}
+	defer lnA.Close()
+	go func() {
+		for {
+			c, err := lnA.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("RESPONSE_FROM_KHAREJ_A:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// 2. Mock Backend Service B (on Kharej B)
+	lnB, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortB))
+	if err != nil {
+		t.Fatalf("failed to listen on service B port: %v", err)
+	}
+	defer lnB.Close()
+	go func() {
+		for {
+			c, err := lnB.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("RESPONSE_FROM_KHAREJ_B:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// 3. Start Tunnel 1 on Iran (Entry)
+	engIran1 := NewEngine(Config{
+		TunnelID:     601,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "127.0.0.2",
+		Transport:    "reverse-reality",
+		SNI:          "shariati.tums.ac.ir",
+		Password:     "pass-kharej-a",
+		Forwarders: []routing.ForwarderRule{
+			{
+				Protocol:   "tcp",
+				ListenPort: fwdPortA,
+				TargetPort: svcPortA,
+			},
+		},
+	})
+	if err := engIran1.Start(); err != nil {
+		t.Fatalf("failed to start engIran1: %v", err)
+	}
+	defer engIran1.Close()
+
+	// 4. Start Tunnel 2 on Iran (Entry) - SHARES CARRIER PORT 49443!
+	engIran2 := NewEngine(Config{
+		TunnelID:     602,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "127.0.0.3",
+		Transport:    "reverse-reality",
+		SNI:          "rhc.ac.ir",
+		Password:     "pass-kharej-b",
+		Forwarders: []routing.ForwarderRule{
+			{
+				Protocol:   "tcp",
+				ListenPort: fwdPortB,
+				TargetPort: svcPortB,
+			},
+		},
+	})
+	if err := engIran2.Start(); err != nil {
+		t.Fatalf("failed to start engIran2 on shared carrier port %d: %v", sharedPort, err)
+	}
+	defer engIran2.Close()
+
+	// 5. Start Kharej A Exit Engine (dials 127.0.0.1:49443 from source 127.0.0.2)
+	engKharejA := NewEngine(Config{
+		TunnelID:      601,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		DialSourceIP:  "127.0.0.2",
+		TargetIP:      "127.0.0.1",
+		Transport:     "reverse-reality",
+		SNI:           "shariati.tums.ac.ir",
+		Password:      "pass-kharej-a",
+	})
+	if err := engKharejA.Start(); err != nil {
+		t.Fatalf("failed to start engKharejA: %v", err)
+	}
+	defer engKharejA.Close()
+
+	// 6. Start Kharej B Exit Engine (dials 127.0.0.1:49443 from source 127.0.0.3)
+	engKharejB := NewEngine(Config{
+		TunnelID:      602,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		DialSourceIP:  "127.0.0.3",
+		TargetIP:      "127.0.0.1",
+		Transport:     "reverse-reality",
+		SNI:           "rhc.ac.ir",
+		Password:      "pass-kharej-b",
+	})
+	if err := engKharejB.Start(); err != nil {
+		t.Fatalf("failed to start engKharejB: %v", err)
+	}
+	defer engKharejB.Close()
+
+	// Wait up to 3 seconds for reverse carrier connections to populate warm pools
+	time.Sleep(500 * time.Millisecond)
+
+	// 7. Test User Client -> Iran Forwarder A (48080) -> Tunnel 1 -> Kharej A -> Service A
+	clientConnA, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPortA), 3*time.Second)
+	if err != nil {
+		t.Fatalf("client failed to connect to Forwarder A: %v", err)
+	}
+	defer clientConnA.Close()
+
+	_, _ = clientConnA.Write([]byte("HELLO_FROM_CLIENT_1"))
+	respBufA := make([]byte, 1024)
+	_ = clientConnA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	nA, err := clientConnA.Read(respBufA)
+	if err != nil {
+		t.Fatalf("client failed to read response from Forwarder A: %v", err)
+	}
+	respA := string(respBufA[:nA])
+	if !strings.Contains(respA, "RESPONSE_FROM_KHAREJ_A:HELLO_FROM_CLIENT_1") {
+		t.Fatalf("unexpected response from Kharej A: %q", respA)
+	}
+	t.Logf("✓ Tunnel 1 Verified: Client -> Iran:48080 -> SharedCarrier:%d -> Kharej A: %s", sharedPort, respA)
+
+	// 8. Test User Client -> Iran Forwarder B (48090) -> Tunnel 2 -> Kharej B -> Service B
+	clientConnB, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPortB), 3*time.Second)
+	if err != nil {
+		t.Fatalf("client failed to connect to Forwarder B: %v", err)
+	}
+	defer clientConnB.Close()
+
+	_, _ = clientConnB.Write([]byte("HELLO_FROM_CLIENT_2"))
+	respBufB := make([]byte, 1024)
+	_ = clientConnB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	nB, err := clientConnB.Read(respBufB)
+	if err != nil {
+		t.Fatalf("client failed to read response from Forwarder B: %v", err)
+	}
+	respB := string(respBufB[:nB])
+	if !strings.Contains(respB, "RESPONSE_FROM_KHAREJ_B:HELLO_FROM_CLIENT_2") {
+		t.Fatalf("unexpected response from Kharej B: %q", respB)
+	}
+	t.Logf("✓ Tunnel 2 Verified: Client -> Iran:48090 -> SharedCarrier:%d -> Kharej B: %s", sharedPort, respB)
+}

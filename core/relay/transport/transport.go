@@ -28,9 +28,19 @@ func ListenTCP(ctx context.Context, addr string) (net.Listener, error) {
 // DialTCPContext dials a TCP connection with pre-handshake TCP_MAXSEG (MSS clamping) and BBR applied before connect(2).
 // Setting TCP_MAXSEG before connect(2) guarantees the kernel advertises the clamped MSS in the outgoing SYN packet.
 func DialTCPContext(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	return DialTCPContextWithLocal(ctx, "", addr, timeout)
+}
+
+// DialTCPContextWithLocal dials a TCP connection with optional local source address binding.
+func DialTCPContextWithLocal(ctx context.Context, localIP, addr string, timeout time.Duration) (net.Conn, error) {
 	d := net.Dialer{
 		Timeout: timeout,
 		Control: socketPreHandshakeControl,
+	}
+	if localIP != "" {
+		if ip := net.ParseIP(localIP); ip != nil {
+			d.LocalAddr = &net.TCPAddr{IP: ip}
+		}
 	}
 	return d.DialContext(ctx, "tcp", addr)
 }

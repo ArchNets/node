@@ -30,6 +30,7 @@ type Config struct {
 	Transport          string // "reverse-reality", "tls-reverse", etc.
 	CarrierPort        int    // Default: 443
 	ListenIP           string // Default: "0.0.0.0"
+	DialSourceIP       string // Optional source IP to bind when dialing (e.g. multi-IP server)
 	EntryServerIP      string // Entry public IP (dialed by Exit)
 	ExitServerIP       string // Optional Exit public IP (whitelist on Entry)
 	TargetIP           string // Default: "127.0.0.1" on Exit
@@ -1299,7 +1300,7 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 		dialTCP := func(ctx context.Context, idx int) (net.Conn, error) {
 			ip := candidates[idx%len(candidates)]
 			addr := net.JoinHostPort(ip, strconv.Itoa(e.cfg.CarrierPort))
-			return transport.DialTCPContext(ctx, addr, 4*time.Second)
+			return transport.DialTCPContextWithLocal(ctx, e.cfg.DialSourceIP, addr, 4*time.Second)
 		}
 		if e.cfg.UseFisher && e.cfg.FisherConnections > 1 {
 			fisher := transport.NewFisherDialer(e.cfg.FisherConnections)
