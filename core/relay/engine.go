@@ -105,7 +105,7 @@ type Engine struct {
 	udpForwarderMap  sync.Map // int (listenPort) -> *net.UDPConn
 	l3TunDev         *transport.L3TUNDevice
 	l3RawConn        net.PacketConn
-	l3PeerAddr       atomic.Value // net.Addr
+	l3PeerAddr       atomic.Pointer[net.UDPAddr]
 	tcpListeners   []net.Listener
 	udpListeners  []*net.UDPConn
 	hdMatcher     *transport.HalfDuplexMatcher
@@ -516,7 +516,7 @@ func (e *Engine) startL3RawPump() error {
 	}
 
 	e.l3TunDev.SetSender(func(wire []byte) error {
-		dst, _ := e.l3PeerAddr.Load().(net.Addr)
+		dst := e.l3PeerAddr.Load()
 		if dst == nil {
 			return errors.New("l3: peer public IP not yet known")
 		}
@@ -541,7 +541,28 @@ func (e *Engine) startL3RawPump() error {
 				if err := e.l3TunDev.InjectWirePacket(buf[:n]); err == nil {
 					e.Stats.AddDownload(int64(n))
 					if from != nil {
-						e.l3PeerAddr.Store(from)
+						switch a := from.(type) {
+						case *net.UDPAddr:
+							port := a.Port
+							if port <= 0 {
+								port = e.cfg.CarrierPort
+							}
+							e.l3PeerAddr.Store(&net.UDPAddr{IP: a.IP, Port: port})
+						case *net.IPAddr:
+							e.l3PeerAddr.Store(&net.UDPAddr{IP: a.IP, Port: e.cfg.CarrierPort})
+						default:
+							host, portStr, sErr := net.SplitHostPort(from.String())
+							if sErr != nil {
+								host = from.String()
+							}
+							port := e.cfg.CarrierPort
+							if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil && pNum > 0 {
+								port = int(pNum)
+							}
+							if ip := net.ParseIP(host); ip != nil {
+								e.l3PeerAddr.Store(&net.UDPAddr{IP: ip, Port: port})
+							}
+						}
 					}
 				}
 			}
