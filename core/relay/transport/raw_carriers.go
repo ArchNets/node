@@ -144,6 +144,7 @@ type icmpPacketConn struct {
 	ident     uint16
 	tag       [4]byte
 	seq       atomic.Uint32
+	peerIDSeq atomic.Uint32 // high 16 bits: last peer ident, low 16 bits: last peer seq
 	closeOnce sync.Once
 	echoRule  []string
 }
@@ -160,16 +161,21 @@ func (c *icmpPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 
 	icmpType := icmpEchoRequest
 	dirByte := xdiDirClientToServer
+	ident := c.ident
+	seq := uint16(c.seq.Add(1))
 	if c.isServer {
 		icmpType = icmpEchoReply
 		dirByte = xdiDirServerToClient
+		if packed := c.peerIDSeq.Load(); packed != 0 {
+			ident = uint16(packed >> 16)
+			seq = uint16(packed & 0xFFFF)
+		}
 	}
-	seq := uint16(c.seq.Add(1))
 
 	frame := make([]byte, 8+xdiMetaLen+len(p))
 	frame[0] = icmpType
 	frame[1] = 0
-	binary.BigEndian.PutUint16(frame[4:6], c.ident)
+	binary.BigEndian.PutUint16(frame[4:6], ident)
 	binary.BigEndian.PutUint16(frame[6:8], seq)
 	copy(frame[8:12], c.tag[:])
 	frame[12] = dirByte
@@ -204,12 +210,13 @@ func (c *icmpPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		if buf[0] != expectedType {
 			continue
 		}
-		ident := binary.BigEndian.Uint16(buf[4:6])
-		if ident != c.ident {
-			continue
-		}
 		if !bytes.Equal(buf[8:12], c.tag[:]) || buf[12] != expectedDir {
 			continue
+		}
+		if c.isServer {
+			peerIdent := uint32(binary.BigEndian.Uint16(buf[4:6]))
+			peerSeq := uint32(binary.BigEndian.Uint16(buf[6:8]))
+			c.peerIDSeq.Store((peerIdent << 16) | peerSeq)
 		}
 		copied := copy(p, buf[8+xdiMetaLen:n])
 		return copied, &net.UDPAddr{IP: net.ParseIP(addr.String()), Port: int(c.ident)}, nil
@@ -415,7 +422,7 @@ var (
 )
 
 func installRawProtoGuard(proto byte) {
-	if proto != 4 && proto != 47 {
+	if proto != 4 && proto != 47 && proto != 58 {
 		return
 	}
 	rawProtoGuardMu.Lock()
@@ -436,7 +443,7 @@ func installRawProtoGuard(proto byte) {
 }
 
 func removeRawProtoGuard(proto byte) {
-	if proto != 4 && proto != 47 {
+	if proto != 4 && proto != 47 && proto != 58 {
 		return
 	}
 	rawProtoGuardMu.Lock()
@@ -452,6 +459,28 @@ func removeRawProtoGuard(proto byte) {
 	pStr := strconv.Itoa(int(proto))
 	rule := []string{"INPUT", "-p", pStr, "-j", "DROP"}
 	sweepIptablesRule("filter", rule)
+}
+
+// AcquireBenchmarkRawGuards pre-installs kernel INPUT drop guards for raw IP protocols (4, 47, 58)
+// at the start of a benchmark sweep so the Entry node's kernel never replies with ICMP Protocol
+// Unreachable while earlier TCP/TLS candidates are being evaluated.
+func AcquireBenchmarkRawGuards() {
+	if os.Geteuid() != 0 {
+		return
+	}
+	installRawProtoGuard(4)
+	installRawProtoGuard(47)
+	installRawProtoGuard(58)
+}
+
+// ReleaseBenchmarkRawGuards releases the benchmark-wide raw protocol guards when the sweep finishes.
+func ReleaseBenchmarkRawGuards() {
+	if os.Geteuid() != 0 {
+		return
+	}
+	removeRawProtoGuard(4)
+	removeRawProtoGuard(47)
+	removeRawProtoGuard(58)
 }
 
 func installPCKPortGuard(port uint16) {

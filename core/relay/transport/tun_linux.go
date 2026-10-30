@@ -197,6 +197,10 @@ func (d *L3TUNDevice) configureKernelInterface() error {
 		_ = exec.Command("ip", "route", "replace", d.peerIP, "dev", d.name).Run()
 	}
 
+	// Enable IPv4 forwarding and loose rp_filter on the TUN device (instant in-memory procfs writes)
+	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
+	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", d.name), []byte("2\n"), 0644)
+
 	// Benchmark sandboxes (antbs...) need instant zero-lag setup without hundreds of synchronous iptables calls
 	if strings.HasPrefix(d.name, "antbs") {
 		return nil
@@ -204,10 +208,6 @@ func (d *L3TUNDevice) configureKernelInterface() error {
 
 	// Best-effort fq_codel queueing discipline to eliminate bufferbloat jitter (from BackPack tun_linux.go)
 	_ = exec.Command("tc", "qdisc", "replace", "dev", d.name, "root", "fq_codel").Run()
-
-	// Enable IPv4 forwarding and loose rp_filter on the TUN device
-	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
-	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", d.name), []byte("2\n"), 0644)
 
 	d.applyMSSClamp()
 	return nil

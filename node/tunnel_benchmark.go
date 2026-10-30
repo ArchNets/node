@@ -416,6 +416,8 @@ func (c *TunnelController) runImmediateBandwidthProbe(t panel.TunnelInfo) {
 }
 
 func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.TunnelInfo, sCtx *scanContext) {
+	transport.AcquireBenchmarkRawGuards()
+	defer transport.ReleaseBenchmarkRawGuards()
 	defer func() {
 		activeScansMu.Lock()
 		delete(activeScans, t.Id)
@@ -765,6 +767,8 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 	exitSandboxMu.Unlock()
 
 	go func() {
+		transport.AcquireBenchmarkRawGuards()
+		defer transport.ReleaseBenchmarkRawGuards()
 		defer c.stopEchoServers(t.Id)
 
 		candidates := BuildBenchmarkCandidates(cmd, t.RelayConfig)
