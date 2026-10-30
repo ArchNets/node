@@ -540,7 +540,7 @@ func (e *Engine) startL3RawPump() error {
 			if e.l3TunDev != nil {
 				if err := e.l3TunDev.InjectWirePacket(buf[:n]); err == nil {
 					e.Stats.AddDownload(int64(n))
-					if from != nil {
+					if from != nil && e.l3PeerAddr.Load() == nil {
 						switch a := from.(type) {
 						case *net.UDPAddr:
 							port := a.Port

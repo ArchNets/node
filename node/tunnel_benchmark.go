@@ -558,6 +558,23 @@ func (c *TunnelController) evaluateCandidate(
 		certMode = "self"
 	}
 
+	var spoofSrcIP, spoofPeerSrcIP, spoofInterface, spoofProfile string
+	if cand.Transport == "spoof" {
+		spoofProfile = "bip"
+		if t.RelayConfig != nil && t.RelayConfig.SpoofSrcIP != "" {
+			spoofSrcIP = t.RelayConfig.SpoofSrcIP
+			spoofPeerSrcIP = t.RelayConfig.SpoofPeerSrcIP
+			spoofInterface = t.RelayConfig.SpoofInterface
+			if t.RelayConfig.SpoofProfile != "" {
+				spoofProfile = t.RelayConfig.SpoofProfile
+			}
+		} else {
+			// Benchmark testing true forged-source IP capability between Entry and Exit
+			spoofSrcIP = "185.143.234.201"
+			spoofPeerSrcIP = "82.115.26.174"
+		}
+	}
+
 	sandboxEngine := relay.NewEngine(relay.Config{
 		TunnelID:           t.Id*1000 + cand.Index,
 		Role:               "entry",
@@ -574,6 +591,10 @@ func (c *TunnelController) evaluateCandidate(
 		FisherConnections:  1,
 		MinHeldConnections: 6,
 		CertMode:           certMode,
+		SpoofSrcIP:         spoofSrcIP,
+		SpoofPeerSrcIP:     spoofPeerSrcIP,
+		SpoofInterface:     spoofInterface,
+		SpoofProfile:       spoofProfile,
 		Logger:             c.logger,
 	})
 
@@ -800,6 +821,23 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				exitCertMode = "self"
 			}
 
+			var spoofSrcIP, spoofPeerSrcIP, spoofInterface, spoofProfile string
+			if cand.Transport == "spoof" {
+				spoofProfile = "bip"
+				if t.RelayConfig != nil && t.RelayConfig.SpoofPeerSrcIP != "" {
+					spoofSrcIP = t.RelayConfig.SpoofPeerSrcIP
+					spoofPeerSrcIP = t.RelayConfig.SpoofSrcIP
+					spoofInterface = t.RelayConfig.SpoofInterface
+					if t.RelayConfig.SpoofProfile != "" {
+						spoofProfile = t.RelayConfig.SpoofProfile
+					}
+				} else {
+					// Benchmark testing true forged-source IP capability between Entry and Exit
+					spoofSrcIP = "82.115.26.174"
+					spoofPeerSrcIP = "185.143.234.201"
+				}
+			}
+
 			eng := relay.NewEngine(relay.Config{
 				TunnelID:           t.Id*1000 + cand.Index,
 				Role:               "exit",
@@ -816,6 +854,10 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				FisherConnections:  1,
 				MinHeldConnections: 6,
 				CertMode:           exitCertMode,
+				SpoofSrcIP:         spoofSrcIP,
+				SpoofPeerSrcIP:     spoofPeerSrcIP,
+				SpoofInterface:     spoofInterface,
+				SpoofProfile:       spoofProfile,
 				Logger:             c.logger,
 			})
 			if err := eng.Start(); err == nil {

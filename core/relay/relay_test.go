@@ -1224,11 +1224,11 @@ func TestSharedCarrierPortMultiplexing(t *testing.T) {
 }
 
 func TestLiveMultiKharejSharedPortEndToEnd(t *testing.T) {
-	sharedPort := 49443
-	svcPortA := 41001
-	svcPortB := 41002
-	fwdPortA := 48080
-	fwdPortB := 48090
+	sharedPort := getFreeTCPPort(t)
+	svcPortA := getFreeTCPPort(t)
+	svcPortB := getFreeTCPPort(t)
+	fwdPortA := getFreeTCPPort(t)
+	fwdPortB := getFreeTCPPort(t)
 
 	// 1. Mock Backend Service A (on Kharej A)
 	lnA, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortA))
