@@ -115,6 +115,9 @@ func (u *UDPSessionConn) pushPacket(pkt []byte) {
 	if len(pkt) < 9 || u.closed.Load() {
 		return
 	}
+	if binary.BigEndian.Uint32(pkt[1:5]) != u.sessionID {
+		return
+	}
 	typ := pkt[0]
 	seq := binary.BigEndian.Uint16(pkt[5:7])
 	dataLen := int(binary.BigEndian.Uint16(pkt[7:9]))
@@ -548,7 +551,6 @@ func (l *UDPCarrierListener) readLoop() {
 
 		typ := buf[0]
 		sessID := binary.BigEndian.Uint32(buf[1:5])
-		rKey := remote.String()
 
 		if typ == udpPktSYN && n >= 9+32 {
 			if !VerifyRealityToken(key, buf[9:9+32], magic) {
@@ -559,25 +561,31 @@ func (l *UDPCarrierListener) readLoop() {
 			binary.BigEndian.PutUint32(ack[1:5], sessID)
 			_, _ = l.pconn.WriteTo(ack[:], remote)
 
-			if _, exists := l.sessions.Load(rKey); !exists {
+			if _, exists := l.sessions.Load(sessID); !exists {
 				sess := newUDPSessionConn(l.pconn, remote, sessID, false, l.useFEC)
-				l.sessions.Store(rKey, sess)
+				l.sessions.Store(sessID, sess)
 				select {
 				case l.acceptCh <- sess:
 				default:
 					_ = sess.Close()
-					l.sessions.Delete(rKey)
+					l.sessions.Delete(sessID)
 				}
 			}
 			continue
 		}
 
-		if val, ok := l.sessions.Load(rKey); ok {
+		if val, ok := l.sessions.Load(sessID); ok {
 			sess := val.(*UDPSessionConn)
 			sess.pushPacket(buf[:n])
 			if typ == udpPktFIN {
-				l.sessions.Delete(rKey)
+				l.sessions.Delete(sessID)
 			}
+		} else if typ == udpPktDATA || typ == udpPktTUN {
+			// Unknown session (e.g. server restarted): send FIN so peer immediately re-handshakes
+			var fin [9]byte
+			fin[0] = udpPktFIN
+			binary.BigEndian.PutUint32(fin[1:5], sessID)
+			_, _ = l.pconn.WriteTo(fin[:], remote)
 		}
 	}
 }
@@ -605,15 +613,40 @@ func dialPacketCarrier(ctx context.Context, pconn net.PacketConn, rAddr net.Addr
 	binary.BigEndian.PutUint32(synPkt[1:5], sessID)
 	copy(synPkt[9:], token[:])
 
-	_ = pconn.SetReadDeadline(time.Now().Add(4 * time.Second))
-	if _, err := pconn.WriteTo(synPkt, rAddr); err != nil {
-		_ = pconn.Close()
-		return nil, err
+	deadline := time.Now().Add(4 * time.Second)
+	var ack [65535]byte
+	handshakeOK := false
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			_ = pconn.Close()
+			return nil, ctx.Err()
+		default:
+		}
+		if _, err := pconn.WriteTo(synPkt, rAddr); err != nil {
+			_ = pconn.Close()
+			return nil, err
+		}
+		attemptWait := time.Now().Add(400 * time.Millisecond)
+		if attemptWait.After(deadline) {
+			attemptWait = deadline
+		}
+		_ = pconn.SetReadDeadline(attemptWait)
+		for time.Now().Before(attemptWait) {
+			n, _, rErr := pconn.ReadFrom(ack[:])
+			if rErr != nil {
+				break
+			}
+			if n >= 9 && ack[0] == udpPktACK && binary.BigEndian.Uint32(ack[1:5]) == sessID {
+				handshakeOK = true
+				break
+			}
+		}
+		if handshakeOK {
+			break
+		}
 	}
-
-	var ack [64]byte
-	n, _, err := pconn.ReadFrom(ack[:])
-	if err != nil || n < 9 || ack[0] != udpPktACK {
+	if !handshakeOK {
 		_ = pconn.Close()
 		return nil, errors.New("packet carrier handshake timed out")
 	}

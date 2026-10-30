@@ -92,6 +92,7 @@ type Engine struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 	mu            sync.Mutex
+	dialSessMu    sync.Mutex
 	carrierLn      net.Listener
 	quicLn         *quic.Listener
 	quicUDPConn    *net.UDPConn
@@ -182,36 +183,8 @@ func NewEngine(cfg Config) *Engine {
 	}
 }
 
-func (e *Engine) isLocalTest() bool {
-	return e.cfg.ListenIP == "127.0.0.1" || e.cfg.EntryServerIP == "127.0.0.1" || e.cfg.ExitServerIP == "127.0.0.1"
-}
-
 // Start launches the relay engine according to its role ("entry" or "exit").
 func (e *Engine) Start() error {
-	if isIPX, profile := isIPXTransport(e.cfg.Transport); isIPX && !e.isLocalTest() {
-		e.alive.Store(true)
-		e.wg.Add(1)
-		go e.telemetryLoop()
-		return e.startIPX(profile)
-	}
-
-	if e.cfg.Role == "entry" {
-		if err := e.startEntry(); err != nil {
-			e.cancel()
-			return err
-		}
-	} else if e.cfg.Role == "exit" {
-		if err := e.startExit(); err != nil {
-			e.cancel()
-			return err
-		}
-	} else {
-		e.cancel()
-		return fmt.Errorf("unknown relay engine role: %q", e.cfg.Role)
-	}
-
-	e.alive.Store(true)
-
 	if transport.GetTransportSpec(e.cfg.Transport).IsL3 {
 		mtu := e.cfg.L3MTU
 		if mtu <= 0 {
@@ -229,6 +202,40 @@ func (e *Engine) Start() error {
 		} else {
 			e.logger.WithField("err", err).Debug("[Relay] Layer-3 TUN device skipped (running unprivileged or in sandbox)")
 		}
+	}
+
+	if e.cfg.Role == "entry" {
+		if err := e.startEntry(); err != nil {
+			if e.l3TunDev != nil {
+				_ = e.l3TunDev.Close()
+				e.l3TunDev = nil
+			}
+			e.cancel()
+			return err
+		}
+	} else if e.cfg.Role == "exit" {
+		if err := e.startExit(); err != nil {
+			if e.l3TunDev != nil {
+				_ = e.l3TunDev.Close()
+				e.l3TunDev = nil
+			}
+			e.cancel()
+			return err
+		}
+	} else {
+		if e.l3TunDev != nil {
+			_ = e.l3TunDev.Close()
+			e.l3TunDev = nil
+		}
+		e.cancel()
+		return fmt.Errorf("unknown relay engine role: %q", e.cfg.Role)
+	}
+
+	e.alive.Store(true)
+
+	if e.l3TunDev != nil && e.cfg.Role == "entry" && !e.isPacketTransport() {
+		e.wg.Add(1)
+		go e.l3StreamInitiatorLoop()
 	}
 
 	e.wg.Add(1)
@@ -618,7 +625,34 @@ func (e *Engine) bindL3TUNDuplex(conn net.Conn) {
 	})
 }
 
-func (e *Engine) bindL3TCPDuplex(conn net.Conn) {
+func (e *Engine) l3StreamInitiatorLoop() {
+	defer e.wg.Done()
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
+		}
+		stream, err := e.ClaimReverseStream(5 * time.Second)
+		if err != nil {
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+				continue
+			}
+		}
+		_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		if err := routing.WriteRoutingHeader(stream, routing.RouteProtoTUN, 0); err != nil {
+			_ = stream.Close()
+			continue
+		}
+		_ = stream.SetWriteDeadline(time.Time{})
+		e.runL3StreamDuplex(stream)
+	}
+}
+
+func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 	e.mu.Lock()
 	tunDev := e.l3TunDev
 	e.mu.Unlock()
@@ -627,44 +661,42 @@ func (e *Engine) bindL3TCPDuplex(conn net.Conn) {
 		return
 	}
 	e.activeStreams.Store(conn, struct{}{})
+	defer func() {
+		_ = conn.Close()
+		e.activeStreams.Delete(conn)
+	}()
 
-	// Configure TUN -> TCP carrier sender hook
+	var writeMu sync.Mutex
 	tunDev.SetSender(func(wire []byte) error {
 		if len(wire) > 65535 {
-			return errors.New("l3-tcp: packet exceeds max frame size")
+			return errors.New("l3-stream: packet exceeds max frame size")
 		}
 		frame := make([]byte, 2+len(wire))
 		binary.BigEndian.PutUint16(frame[:2], uint16(len(wire)))
 		copy(frame[2:], wire)
 		e.Stats.AddUpload(int64(len(wire)))
+		writeMu.Lock()
 		_, err := conn.Write(frame)
+		writeMu.Unlock()
 		return err
 	})
 
-	e.wg.Add(1)
-	// TCP carrier stream -> TUN device
-	go func() {
-		defer e.wg.Done()
-		defer conn.Close()
-		defer e.activeStreams.Delete(conn)
-		defer tunDev.SetSender(nil)
-		var lenBuf [2]byte
-		for {
-			if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
-				return
-			}
-			pktLen := int(binary.BigEndian.Uint16(lenBuf[:]))
-			if pktLen <= 0 || pktLen > 65535 {
-				return
-			}
-			wire := make([]byte, pktLen)
-			if _, err := io.ReadFull(conn, wire); err != nil {
-				return
-			}
-			e.Stats.AddDownload(int64(pktLen))
-			_ = tunDev.InjectWirePacket(wire)
+	var lenBuf [2]byte
+	for {
+		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+			return
 		}
-	}()
+		pktLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+		if pktLen <= 0 || pktLen > 65535 {
+			return
+		}
+		wire := make([]byte, pktLen)
+		if _, err := io.ReadFull(conn, wire); err != nil {
+			return
+		}
+		e.Stats.AddDownload(int64(pktLen))
+		_ = tunDev.InjectWirePacket(wire)
+	}
 }
 
 func (e *Engine) serveMuxSession(rawConn net.Conn) {
@@ -760,10 +792,6 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 			if action == transport.ActionUserClient && inspectedConn != nil {
 				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
 			}
-			return
-		}
-		if e.cfg.Transport == "l3-tcp" && e.l3TunDev != nil {
-			e.bindL3TCPDuplex(inspectedConn)
 			return
 		}
 		carrierConn = inspectedConn
@@ -1115,10 +1143,6 @@ func (e *Engine) exitPoolLoop() {
 				_ = stream.Close()
 				return
 			}
-			if e.cfg.Transport == "l3-tcp" && e.l3TunDev != nil {
-				e.bindL3TCPDuplex(stream)
-				return
-			}
 			if e.isDirect() {
 				e.pushIdleStream(stream)
 			} else {
@@ -1187,6 +1211,9 @@ func (e *Engine) dialCarrierStream() (net.Conn, error) {
 }
 
 func (e *Engine) dialMuxCarrier() (net.Conn, error) {
+	e.dialSessMu.Lock()
+	defer e.dialSessMu.Unlock()
+
 	e.mu.Lock()
 	muxSess := e.activeMuxSess
 	e.mu.Unlock()
@@ -1208,12 +1235,15 @@ func (e *Engine) dialMuxCarrier() (net.Conn, error) {
 	if err != nil {
 		_ = muxSess.Close()
 		e.mu.Lock()
-		e.activeMuxSess = nil
+		if e.activeMuxSess == muxSess {
+			e.activeMuxSess = nil
+		}
 		e.mu.Unlock()
 		baseConn, bErr := e.dialSingleCarrier()
 		if bErr != nil {
 			return nil, bErr
 		}
+		e.bindL3TUNDuplex(baseConn)
 		retrySess := transport.NewMuxSession(baseConn, true)
 		e.mu.Lock()
 		e.activeMuxSess = retrySess
@@ -1229,6 +1259,9 @@ func (e *Engine) dialQuicCarrier() (net.Conn, error) {
 		return nil, fmt.Errorf("no target server IP configured for quic dial")
 	}
 	addr := net.JoinHostPort(candidates[0], strconv.Itoa(e.cfg.CarrierPort))
+
+	e.dialSessMu.Lock()
+	defer e.dialSessMu.Unlock()
 
 	e.mu.Lock()
 	qConn := e.activeQuicConn
@@ -1249,7 +1282,9 @@ func (e *Engine) dialQuicCarrier() (net.Conn, error) {
 	if err != nil {
 		_ = qConn.CloseWithError(0, "stream open failed")
 		e.mu.Lock()
-		e.activeQuicConn = nil
+		if e.activeQuicConn == qConn {
+			e.activeQuicConn = nil
+		}
 		e.mu.Unlock()
 		retryConn, rErr := transport.DialQuicSession(e.ctx, addr, e.cfg.SNI)
 		if rErr != nil {
@@ -1439,6 +1474,8 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, false)
 	case routing.RouteProtoUDPGaming:
 		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, true)
+	case routing.RouteProtoTUN:
+		e.runL3StreamDuplex(stream)
 	case routing.RouteProtoProbe:
 		telemetry.HandleExitProbeStream(stream, e.Stats)
 	default:

@@ -11,6 +11,7 @@ const (
 	RouteProtoTCP       byte = 0x01
 	RouteProtoUDP       byte = 0x02
 	RouteProtoUDPGaming byte = 0x03 // Low-latency gaming UDP with QoS + zero-alloc buffer pooling
+	RouteProtoTUN       byte = 0x04 // Layer-3 TUN IP packet stream
 	RouteProtoProbe     byte = 0xFF
 
 	MaxUDPFrameSize = 65505

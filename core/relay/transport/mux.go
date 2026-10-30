@@ -100,6 +100,7 @@ type MuxSession struct {
 	conn       net.Conn
 	isClient   bool
 	nextID     atomic.Uint32
+	lastRxNano atomic.Int64
 	writeMu    sync.Mutex
 	streamsMu  sync.RWMutex
 	streams    map[uint32]*MuxStream
@@ -118,6 +119,7 @@ func NewMuxSession(conn net.Conn, isClient bool) *MuxSession {
 		acceptCh: make(chan *MuxStream, 256),
 		closeCh:  make(chan struct{}),
 	}
+	s.lastRxNano.Store(time.Now().UnixNano())
 	if isClient {
 		s.nextID.Store(1)
 		go s.pingLoop()
@@ -129,7 +131,7 @@ func NewMuxSession(conn net.Conn, isClient bool) *MuxSession {
 }
 
 func (s *MuxSession) pingLoop() {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -137,6 +139,10 @@ func (s *MuxSession) pingLoop() {
 			return
 		case <-ticker.C:
 			if s.IsClosed() {
+				return
+			}
+			if last := s.lastRxNano.Load(); last > 0 && time.Since(time.Unix(0, last)) > 20*time.Second {
+				_ = s.Close()
 				return
 			}
 			if err := s.writeFrame(muxCmdPING, 0, nil); err != nil {
@@ -239,6 +245,7 @@ func (s *MuxSession) readLoop() {
 		if _, err := io.ReadFull(s.conn, hdr[:]); err != nil {
 			return
 		}
+		s.lastRxNano.Store(time.Now().UnixNano())
 		cmd := hdr[0]
 		id := binary.BigEndian.Uint32(hdr[1:5])
 		length := int(binary.BigEndian.Uint16(hdr[5:7]))

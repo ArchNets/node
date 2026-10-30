@@ -866,6 +866,15 @@ func (c *spoofPacketConn) pickSrcIP() string {
 }
 
 func (c *spoofPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	host := addr.String()
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ipAddr, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return 0, err
+	}
+
 	data := p
 
 	// 1. Self-describing padding
@@ -894,15 +903,58 @@ func (c *spoofPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		data = fake
 	}
 
-	return c.PacketConn.WriteTo(data, addr)
+	// 3. Prepend [4B tag][1B dirByte]
+	dirByte := byte(0x01)
+	if c.isServer {
+		dirByte = byte(0x02)
+	}
+	frame := make([]byte, 5+len(data))
+	copy(frame[0:4], c.tag[:])
+	frame[4] = dirByte
+	copy(frame[5:], data)
+
+	if afConn, ok := c.PacketConn.(*afPacketIPv4Conn); ok {
+		var spoofSrc net.IP
+		if picked := c.pickSrcIP(); picked != "" {
+			spoofSrc = net.ParseIP(picked)
+		}
+		ttl := byte(64)
+		if c.opts.TTLJitter {
+			var b [1]byte
+			_, _ = rand.Read(b[:])
+			ttl = 56 + (b[0] % 16)
+		}
+		tos := byte(0)
+		if c.opts.RandomDSCP {
+			var b [1]byte
+			_, _ = rand.Read(b[:])
+			tos = (b[0] & 0x3F) << 2
+		}
+		if _, err := afConn.WriteToWithIPOpts(frame, ipAddr, spoofSrc, ttl, tos); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+
+	if _, err := c.PacketConn.WriteTo(frame, ipAddr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func (c *spoofPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	buf := make([]byte, 65535)
+	expectedDir := byte(0x02)
+	if c.isServer {
+		expectedDir = byte(0x01)
+	}
 	for {
 		n, addr, err := c.PacketConn.ReadFrom(buf)
 		if err != nil {
 			return 0, nil, err
+		}
+		if n < 5 {
+			continue
 		}
 
 		// Verify expected incoming peer source if set
@@ -916,7 +968,10 @@ func (c *spoofPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			}
 		}
 
-		data := buf[:n]
+		if !bytes.Equal(buf[0:4], c.tag[:]) || buf[4] != expectedDir {
+			continue
+		}
+		data := buf[5:n]
 
 		// Strip fake TLS header if present
 		if c.opts.FakeTLS && len(data) >= 5 && data[0] == 0x17 && data[1] == 0x03 && data[2] == 0x03 {
@@ -938,18 +993,12 @@ func (c *spoofPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 
 // ListenSpoofCarrier starts an advanced raw IP spoofing carrier listener.
 func ListenSpoofCarrier(addr, password string, opts SpoofOptions, port int) (*UDPCarrierListener, *net.UDPConn, error) {
-	proto := byte(17) // default UDP
+	proto := byte(58) // default BIP (Protocol 58)
 	prof := strings.ToLower(strings.TrimSpace(opts.Profile))
 	if opts.Downlink != "" {
 		prof = strings.ToLower(strings.TrimSpace(opts.Downlink))
 	}
 	switch prof {
-	case "tcp":
-		proto = 6
-	case "icmp":
-		proto = 1
-	case "bip":
-		proto = 58
 	case "ipip":
 		proto = 4
 	case "gre":
@@ -960,17 +1009,15 @@ func ListenSpoofCarrier(addr, password string, opts SpoofOptions, port int) (*UD
 	if err != nil || host == "" {
 		host = "0.0.0.0"
 	}
-	var port16 uint16
-	if port > 0 && port <= 65535 {
-		port16 = uint16(port)
-	} else if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
-		port16 = uint16(pNum)
-		port = int(port16)
+	if port <= 0 {
+		if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+			port = int(pNum)
+		}
 	}
 	tag := deriveScopedTag(password, proto, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		protoStr := fmt.Sprintf("ip4:%d", proto)
-		if rawConn, rErr := openBestRawConn(proto, protoStr, host, opts.Interface, port16); rErr == nil {
+		if rawConn, rErr := openBestRawConn(proto, protoStr, host, opts.Interface, 0); rErr == nil {
 			wrapped := newSpoofPacketConn(rawConn, opts, true, tag)
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
@@ -980,18 +1027,12 @@ func ListenSpoofCarrier(addr, password string, opts SpoofOptions, port int) (*UD
 
 // DialSpoofCarrier dials an advanced raw IP spoofing carrier session.
 func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOptions, port int) (net.Conn, error) {
-	proto := byte(17) // default UDP
+	proto := byte(58) // default BIP (Protocol 58)
 	prof := strings.ToLower(strings.TrimSpace(opts.Profile))
 	if opts.Uplink != "" {
 		prof = strings.ToLower(strings.TrimSpace(opts.Uplink))
 	}
 	switch prof {
-	case "tcp":
-		proto = 6
-	case "icmp":
-		proto = 1
-	case "bip":
-		proto = 58
 	case "ipip":
 		proto = 4
 	case "gre":

@@ -54,27 +54,40 @@ func findInterfaceByIP(localIP net.IP) (*net.Interface, net.IP, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if (v4 == nil || v4.IsUnspecified()) && isVirtualInterface(iface.Name) {
-			continue // Skip docker0, wtun, wg0 when auto-discovering primary interface
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipNet, ok := a.(*net.IPNet)
-			if !ok || ipNet.IP == nil {
+
+	// Pass 1: If a specific localIP was requested, or when auto-discovering, prefer a physical
+	// interface carrying a public (non-RFC1918) IPv4 address (e.g. eth0 91.107.255.40 / 194.5.188.55).
+	for pass := 0; pass < 2; pass++ {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 				continue
 			}
-			ip4 := ipNet.IP.To4()
-			if ip4 == nil {
+			if (v4 == nil || v4.IsUnspecified()) && isVirtualInterface(iface.Name) {
 				continue
 			}
-			if v4 == nil || v4.IsUnspecified() || ip4.Equal(v4) {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				ipNet, ok := a.(*net.IPNet)
+				if !ok || ipNet.IP == nil {
+					continue
+				}
+				ip4 := ipNet.IP.To4()
+				if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+					continue
+				}
+				if v4 != nil && !v4.IsUnspecified() {
+					if ip4.Equal(v4) {
+						cp := iface
+						return &cp, ip4, nil
+					}
+					continue
+				}
+				if pass == 0 && ip4.IsPrivate() {
+					continue
+				}
 				cp := iface
 				return &cp, ip4, nil
 			}
@@ -202,16 +215,15 @@ func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string, loca
 	if err != nil {
 		return nil, err
 	}
-	// Drop all incoming packets on the transmit-only raw socket so its kernel RX queue stays empty
-	// while keeping the IP protocol registered in the kernel (preventing ICMP Protocol Unreachable).
-	dropAll := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
-	dropProg := unix.SockFprog{Len: 1, Filter: &dropAll[0]}
-	_ = unix.SetsockoptSockFprog(tx, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &dropProg)
-
 	if err = unix.SetsockoptInt(tx, unix.IPPROTO_IP, unix.IP_HDRINCL, 1); err != nil {
 		return nil, err
 	}
 	_ = unix.SetsockoptString(tx, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface.Name)
+	if ip4 := localIP.To4(); ip4 != nil {
+		var bindAddr unix.SockaddrInet4
+		copy(bindAddr.Addr[:], ip4)
+		_ = unix.Bind(tx, &bindAddr)
+	}
 	_ = unix.SetsockoptInt(tx, unix.SOL_SOCKET, unix.SO_SNDBUF, 8*1024*1024)
 
 	wake, err = unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)

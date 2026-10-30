@@ -11,6 +11,7 @@ const (
 	RouteProtoTCP       = protocol.RouteProtoTCP
 	RouteProtoUDP       = protocol.RouteProtoUDP
 	RouteProtoUDPGaming = protocol.RouteProtoUDPGaming
+	RouteProtoTUN       = protocol.RouteProtoTUN
 	RouteProtoProbe     = protocol.RouteProtoProbe
 	MaxUDPFrameSize     = protocol.MaxUDPFrameSize
 )
