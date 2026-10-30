@@ -197,6 +197,11 @@ func (d *L3TUNDevice) configureKernelInterface() error {
 		_ = exec.Command("ip", "route", "replace", d.peerIP, "dev", d.name).Run()
 	}
 
+	// Benchmark sandboxes (antbs...) need instant zero-lag setup without hundreds of synchronous iptables calls
+	if strings.HasPrefix(d.name, "antbs") {
+		return nil
+	}
+
 	// Best-effort fq_codel queueing discipline to eliminate bufferbloat jitter (from BackPack tun_linux.go)
 	_ = exec.Command("tc", "qdisc", "replace", "dev", d.name, "root", "fq_codel").Run()
 
@@ -228,6 +233,9 @@ func (d *L3TUNDevice) applyMSSClamp() {
 }
 
 func (d *L3TUNDevice) removeMSSClamp() {
+	if strings.HasPrefix(d.name, "antbs") {
+		return
+	}
 	if _, err := exec.LookPath("iptables"); err != nil {
 		return
 	}

@@ -227,20 +227,28 @@ func (c *icmpPacketConn) Close() error {
 	return err
 }
 
-// installXDIEchoGuard installs a narrow iptables u32 rule on the server to drop the kernel's
-// automatic ICMP Echo Replies for this tunnel's identifier, preventing uplink doubling.
+// installXDIEchoGuard installs an iptables rule to drop automatic kernel ICMP echo replies/requests,
+// preventing the host kernel from interfering with userspace ICMP Echo tunnels.
 func installXDIEchoGuard(ident uint16) []string {
 	if _, err := exec.LookPath("iptables"); err != nil {
 		return nil
 	}
-	rule := []string{
+	u32Rule := []string{
 		"OUTPUT", "-p", "icmp", "--icmp-type", "echo-reply",
 		"-m", "u32", "--u32", fmt.Sprintf("0>>22&0x3C@4>>16=%d", ident),
 		"-j", "DROP",
 	}
-	sweepIptablesRule("filter", rule)
-	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, rule...)...).Run() == nil {
-		return rule
+	sweepIptablesRule("filter", u32Rule)
+	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, u32Rule...)...).Run() == nil {
+		return u32Rule
+	}
+	// Fallback when xt_u32 match module is unavailable: drop echo-request in INPUT so host kernel never auto-replies
+	inputRule := []string{
+		"INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "DROP",
+	}
+	sweepIptablesRule("filter", inputRule)
+	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, inputRule...)...).Run() == nil {
+		return inputRule
 	}
 	return nil
 }
@@ -396,10 +404,54 @@ var (
 func pckRulesForPort(port uint16) [][]string {
 	p := strconv.Itoa(int(port))
 	return [][]string{
-		{"raw", "PREROUTING", "-p", "tcp", "--dport", p, "-j", "NOTRACK"},
-		{"raw", "OUTPUT", "-p", "tcp", "--sport", p, "-j", "NOTRACK"},
+		{"filter", "INPUT", "-p", "tcp", "--dport", p, "-j", "DROP"},
 		{"filter", "OUTPUT", "-p", "tcp", "--sport", p, "--tcp-flags", "RST", "RST", "-j", "DROP"},
 	}
+}
+
+var (
+	rawProtoGuardMu   sync.Mutex
+	rawProtoGuardRefs = map[byte]int{}
+)
+
+func installRawProtoGuard(proto byte) {
+	if proto != 4 && proto != 47 {
+		return
+	}
+	rawProtoGuardMu.Lock()
+	defer rawProtoGuardMu.Unlock()
+	if rawProtoGuardRefs[proto] > 0 {
+		rawProtoGuardRefs[proto]++
+		return
+	}
+	if _, err := exec.LookPath("iptables"); err != nil {
+		return
+	}
+	pStr := strconv.Itoa(int(proto))
+	rule := []string{"INPUT", "-p", pStr, "-j", "DROP"}
+	sweepIptablesRule("filter", rule)
+	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, rule...)...).Run() == nil {
+		rawProtoGuardRefs[proto] = 1
+	}
+}
+
+func removeRawProtoGuard(proto byte) {
+	if proto != 4 && proto != 47 {
+		return
+	}
+	rawProtoGuardMu.Lock()
+	defer rawProtoGuardMu.Unlock()
+	if rawProtoGuardRefs[proto] <= 0 {
+		return
+	}
+	rawProtoGuardRefs[proto]--
+	if rawProtoGuardRefs[proto] > 0 {
+		return
+	}
+	delete(rawProtoGuardRefs, proto)
+	pStr := strconv.Itoa(int(proto))
+	rule := []string{"INPUT", "-p", pStr, "-j", "DROP"}
+	sweepIptablesRule("filter", rule)
 }
 
 func installPCKPortGuard(port uint16) {
@@ -557,6 +609,7 @@ func DialPCKCarrier(ctx context.Context, addr, password string, port int) (net.C
 
 // newRawProtoPacketConn wraps an IPv4 raw packet connection (for Protocol 58 BIP or Protocol 4 IPIP).
 func newRawProtoPacketConn(pc net.PacketConn, proto byte, isServer bool, tag [4]byte) *rawProtoPacketConn {
+	installRawProtoGuard(proto)
 	return &rawProtoPacketConn{
 		PacketConn: pc,
 		proto:      proto,
@@ -571,6 +624,15 @@ type rawProtoPacketConn struct {
 	isServer  bool
 	tag       [4]byte
 	closeOnce sync.Once
+}
+
+func (c *rawProtoPacketConn) Close() error {
+	var err error
+	c.closeOnce.Do(func() {
+		removeRawProtoGuard(c.proto)
+		err = c.PacketConn.Close()
+	})
+	return err
 }
 
 func (c *rawProtoPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -735,16 +797,27 @@ func DialGRECarrier(ctx context.Context, addr, password string, port int) (net.C
 
 type greProtoPacketConn struct {
 	net.PacketConn
-	isServer bool
-	tag      [4]byte
+	isServer  bool
+	tag       [4]byte
+	closeOnce sync.Once
 }
 
 func newGREProtoPacketConn(pc net.PacketConn, isServer bool, tag [4]byte) *greProtoPacketConn {
+	installRawProtoGuard(47)
 	return &greProtoPacketConn{
 		PacketConn: pc,
 		isServer:   isServer,
 		tag:        tag,
 	}
+}
+
+func (c *greProtoPacketConn) Close() error {
+	var err error
+	c.closeOnce.Do(func() {
+		removeRawProtoGuard(47)
+		err = c.PacketConn.Close()
+	})
+	return err
 }
 
 func (c *greProtoPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -1060,6 +1133,100 @@ func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOpti
 	return DialUDPCarrier(ctx, addr, password, true)
 }
 
+type rawUDPPacketConn struct {
+	net.PacketConn
+	isServer  bool
+	localPort uint16
+	peerPort  uint16
+	tag       [4]byte
+	closeOnce sync.Once
+}
+
+func newRawUDPPacketConn(pc net.PacketConn, isServer bool, localPort, peerPort uint16, tag [4]byte) *rawUDPPacketConn {
+	return &rawUDPPacketConn{
+		PacketConn: pc,
+		isServer:   isServer,
+		localPort:  localPort,
+		peerPort:   peerPort,
+		tag:        tag,
+	}
+}
+
+func (c *rawUDPPacketConn) Close() error {
+	var err error
+	c.closeOnce.Do(func() {
+		err = c.PacketConn.Close()
+	})
+	return err
+}
+
+func (c *rawUDPPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	host, portStr, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		host = addr.String()
+	}
+	dstPort := c.peerPort
+	if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil && pNum > 0 && pNum <= 65535 {
+		dstPort = uint16(pNum)
+	}
+	ipAddr, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return 0, err
+	}
+
+	dirByte := byte(0x01)
+	if c.isServer {
+		dirByte = byte(0x02)
+	}
+	totalUDPLen := 8 + 5 + len(p)
+	udpDatagram := make([]byte, totalUDPLen)
+	binary.BigEndian.PutUint16(udpDatagram[0:2], c.localPort)
+	binary.BigEndian.PutUint16(udpDatagram[2:4], dstPort)
+	binary.BigEndian.PutUint16(udpDatagram[4:6], uint16(totalUDPLen))
+	copy(udpDatagram[8:12], c.tag[:])
+	udpDatagram[12] = dirByte
+	copy(udpDatagram[13:], p)
+
+	srcIP := discoverLocalIPv4For(ipAddr.IP)
+	csum := udpIPv4Checksum(srcIP, ipAddr.IP, udpDatagram)
+	binary.BigEndian.PutUint16(udpDatagram[6:8], csum)
+
+	if _, err := c.PacketConn.WriteTo(udpDatagram, ipAddr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *rawUDPPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	buf := make([]byte, 65535)
+	expectedDir := byte(0x02)
+	if c.isServer {
+		expectedDir = byte(0x01)
+	}
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < 13 {
+			continue
+		}
+		srcPort := binary.BigEndian.Uint16(buf[0:2])
+		dstPort := binary.BigEndian.Uint16(buf[2:4])
+		if dstPort != c.localPort {
+			continue
+		}
+		if !c.isServer && c.peerPort > 0 && srcPort != c.peerPort {
+			continue
+		}
+		if !bytes.Equal(buf[8:12], c.tag[:]) || buf[12] != expectedDir {
+			continue
+		}
+		copied := copy(p, buf[13:n])
+		return copied, &net.UDPAddr{IP: net.ParseIP(addr.String()), Port: int(srcPort)}, nil
+	}
+}
+
 // OpenL3RawCarrier opens a stateless raw/datagram net.PacketConn for direct Layer-3 TUN packet pumping.
 // Unlike stream carriers, it requires zero L4 handshake before pumping encrypted TUN packets.
 func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServer bool, spoofOpts SpoofOptions) (net.PacketConn, error) {
@@ -1122,6 +1289,25 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		}
 		return newPCKPacketConn(rawConn, isServer, port16, port16, tag), nil
 
+	case "l3-udp":
+		tag := deriveScopedTag(password, 17, port)
+		if rawConn, rErr := openBestRawConn(17, "ip4:17", bindHost, "", port16); rErr == nil {
+			return newRawUDPPacketConn(rawConn, isServer, port16, port16, tag), nil
+		}
+		listenPort := port
+		uAddr := &net.UDPAddr{IP: net.ParseIP(bindHost), Port: listenPort}
+		uConn, err := net.ListenUDP("udp", uAddr)
+		if err != nil {
+			uAddr = &net.UDPAddr{IP: net.ParseIP(bindHost), Port: 0}
+			uConn, err = net.ListenUDP("udp", uAddr)
+			if err != nil {
+				return nil, err
+			}
+		}
+		_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+		_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+		return uConn, nil
+
 	case "spoof":
 		proto := byte(58)
 		prof := strings.ToLower(strings.TrimSpace(spoofOpts.Profile))
@@ -1144,7 +1330,7 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		}
 		return newSpoofPacketConn(rawConn, spoofOpts, isServer, tag), nil
 
-	default: // "l3-udp", "kcp"
+	default: // "kcp"
 		listenPort := port
 		if !isServer {
 			listenPort = 0

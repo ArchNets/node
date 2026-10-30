@@ -255,7 +255,7 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("unknown relay engine role: %q", e.cfg.Role)
 	}
 
-	if e.l3TunDev != nil && e.cfg.Role == "entry" && !e.isPacketTransport() {
+	if e.l3TunDev != nil && e.cfg.Role == "entry" && !e.isPacketTransport() && e.cfg.TunnelID < 1000 {
 		e.wg.Add(1)
 		go e.l3StreamInitiatorLoop()
 	}
@@ -797,6 +797,13 @@ func (e *Engine) l3StreamInitiatorLoop() {
 		case <-e.ctx.Done():
 			return
 		default:
+		}
+		for e.Stats.PoolIdleConnections.Load() < 2 {
+			select {
+			case <-e.ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
 		stream, err := e.ClaimReverseStream(5 * time.Second)
 		if err != nil {

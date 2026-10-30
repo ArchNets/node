@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultL3MTU = 1420
+	defaultL3MTU = 1320
 	greHeaderLen = 4
 	l3HeaderLen  = 9 // [1B version=0x01][8B counter nonce]
 	ifnamSize    = 16

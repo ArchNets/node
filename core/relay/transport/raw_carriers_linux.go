@@ -298,11 +298,14 @@ func (c *afPacketIPv4Conn) ReadFrom(p []byte) (int, net.Addr, error) {
 
 	buf := c.readBuf
 	for !c.closed.Load() {
-		if err := c.wait(c.rx, unix.POLLIN); err != nil {
-			return 0, nil, err
-		}
 		n, from, err := unix.Recvfrom(c.rx, buf, 0)
-		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			if wErr := c.wait(c.rx, unix.POLLIN); wErr != nil {
+				return 0, nil, wErr
+			}
+			continue
+		}
+		if errors.Is(err, unix.EINTR) {
 			continue
 		}
 		if err != nil {
@@ -340,17 +343,32 @@ func (c *afPacketIPv4Conn) WriteToWithIPOpts(p []byte, addr net.Addr, srcIP net.
 		return 0, net.ErrClosed
 	}
 
-	host := addr.String()
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	dstIP := net.ParseIP(host)
-	if dstIP == nil {
-		if resolved, rErr := net.ResolveIPAddr("ip4", host); rErr == nil {
-			dstIP = resolved.IP
+	var dst4 net.IP
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		if a != nil {
+			dst4 = a.IP.To4()
+		}
+	case *net.IPAddr:
+		if a != nil {
+			dst4 = a.IP.To4()
 		}
 	}
-	dst4 := dstIP.To4()
+	if dst4 == nil {
+		host := addr.String()
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		dstIP := net.ParseIP(host)
+		if dstIP == nil {
+			if resolved, rErr := net.ResolveIPAddr("ip4", host); rErr == nil {
+				dstIP = resolved.IP
+			}
+		}
+		if dstIP != nil {
+			dst4 = dstIP.To4()
+		}
+	}
 	if dst4 == nil {
 		return 0, errors.New("invalid IPv4 destination")
 	}
