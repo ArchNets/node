@@ -201,7 +201,7 @@ func (e *Engine) Start() error {
 
 	e.alive.Store(true)
 
-	if transport.GetTransportSpec(e.cfg.Transport).IsL3 && e.cfg.TunnelID < 1000 {
+	if transport.GetTransportSpec(e.cfg.Transport).IsL3 {
 		mtu := e.cfg.L3MTU
 		if mtu <= 0 {
 			mtu = transport.GetConfiguredMTU()
@@ -751,7 +751,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 			}
 			return
 		}
-		if e.cfg.Transport == "l3-tcp" && e.cfg.TunnelID < 1000 {
+		if e.cfg.Transport == "l3-tcp" && e.l3TunDev != nil {
 			e.bindL3TCPDuplex(inspectedConn)
 			return
 		}
@@ -1104,7 +1104,7 @@ func (e *Engine) exitPoolLoop() {
 				_ = stream.Close()
 				return
 			}
-			if e.cfg.Transport == "l3-tcp" && e.cfg.TunnelID < 1000 {
+			if e.cfg.Transport == "l3-tcp" && e.l3TunDev != nil {
 				e.bindL3TCPDuplex(stream)
 				return
 			}
