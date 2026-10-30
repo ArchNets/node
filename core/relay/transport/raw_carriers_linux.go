@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,34 @@ func htons(v uint16) uint16 {
 	return binary.NativeEndian.Uint16(b[:])
 }
 
+func isVirtualInterface(name string) bool {
+	lower := strings.ToLower(name)
+	prefixes := []string{"docker", "veth", "wtun", "antun", "antbs", "wg", "tun", "tap", "br-", "virbr"}
+	for _, p := range prefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func findDefaultGatewayInterface(dstHint net.IP) (*net.Interface, net.IP, error) {
+	dstStr := "1.1.1.1:80"
+	if dstHint != nil && !dstHint.IsUnspecified() && !dstHint.IsLoopback() {
+		dstStr = net.JoinHostPort(dstHint.String(), "80")
+	}
+	conn, err := net.Dial("udp4", dstStr)
+	if err == nil {
+		defer conn.Close()
+		if ua, ok := conn.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil {
+			if iface, local, fErr := findInterfaceByIP(ua.IP); fErr == nil {
+				return iface, local, nil
+			}
+		}
+	}
+	return findInterfaceByIP(nil)
+}
+
 func findInterfaceByIP(localIP net.IP) (*net.Interface, net.IP, error) {
 	v4 := localIP.To4()
 	ifaces, err := net.Interfaces()
@@ -28,6 +57,9 @@ func findInterfaceByIP(localIP net.IP) (*net.Interface, net.IP, error) {
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
+		}
+		if (v4 == nil || v4.IsUnspecified()) && isVirtualInterface(iface.Name) {
+			continue // Skip docker0, wtun, wg0 when auto-discovering primary interface
 		}
 		addrs, err := iface.Addrs()
 		if err != nil {
@@ -101,7 +133,7 @@ func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string, loca
 		}
 	}
 	if iface == nil || localIP == nil {
-		iface, localIP, err = findInterfaceByIP(parsedBind)
+		iface, localIP, err = findDefaultGatewayInterface(parsedBind)
 		if err != nil {
 			return nil, err
 		}

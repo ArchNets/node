@@ -193,6 +193,10 @@ func (d *L3TUNDevice) configureKernelInterface() error {
 		}
 	}
 
+	if d.peerIP != "" {
+		_ = exec.Command("ip", "route", "replace", d.peerIP, "dev", d.name).Run()
+	}
+
 	// Best-effort fq_codel queueing discipline to eliminate bufferbloat jitter (from BackPack tun_linux.go)
 	_ = exec.Command("tc", "qdisc", "replace", "dev", d.name, "root", "fq_codel").Run()
 
