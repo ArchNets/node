@@ -182,8 +182,19 @@ func NewEngine(cfg Config) *Engine {
 	}
 }
 
+func (e *Engine) isLocalTest() bool {
+	return e.cfg.ListenIP == "127.0.0.1" || e.cfg.EntryServerIP == "127.0.0.1" || e.cfg.ExitServerIP == "127.0.0.1"
+}
+
 // Start launches the relay engine according to its role ("entry" or "exit").
 func (e *Engine) Start() error {
+	if isIPX, profile := isIPXTransport(e.cfg.Transport); isIPX && !e.isLocalTest() {
+		e.alive.Store(true)
+		e.wg.Add(1)
+		go e.telemetryLoop()
+		return e.startIPX(profile)
+	}
+
 	if e.cfg.Role == "entry" {
 		if err := e.startEntry(); err != nil {
 			e.cancel()
