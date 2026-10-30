@@ -642,7 +642,9 @@ func DialBIPCarrier(ctx context.Context, addr, password string, port int) (net.C
 		host = addr
 	}
 	if port <= 0 {
-		port, _ = strconv.Atoi(portStr)
+		if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+			port = int(pNum)
+		}
 	}
 	tag := deriveScopedTag(password, 58, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
@@ -678,7 +680,9 @@ func DialIPIPCarrier(ctx context.Context, addr, password string, port int) (net.
 		host = addr
 	}
 	if port <= 0 {
-		port, _ = strconv.Atoi(portStr)
+		if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+			port = int(pNum)
+		}
 	}
 	tag := deriveScopedTag(password, 4, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
@@ -714,7 +718,9 @@ func DialGRECarrier(ctx context.Context, addr, password string, port int) (net.C
 		host = addr
 	}
 	if port <= 0 {
-		port, _ = strconv.Atoi(portStr)
+		if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+			port = int(pNum)
+		}
 	}
 	tag := deriveScopedTag(password, 47, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
@@ -954,13 +960,17 @@ func ListenSpoofCarrier(addr, password string, opts SpoofOptions, port int) (*UD
 	if err != nil || host == "" {
 		host = "0.0.0.0"
 	}
-	if port <= 0 {
-		port, _ = strconv.Atoi(portStr)
+	var port16 uint16
+	if port > 0 && port <= 65535 {
+		port16 = uint16(port)
+	} else if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+		port16 = uint16(pNum)
+		port = int(port16)
 	}
 	tag := deriveScopedTag(password, proto, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
 		protoStr := fmt.Sprintf("ip4:%d", proto)
-		if rawConn, rErr := openBestRawConn(proto, protoStr, host, opts.Interface, uint16(port)); rErr == nil {
+		if rawConn, rErr := openBestRawConn(proto, protoStr, host, opts.Interface, port16); rErr == nil {
 			wrapped := newSpoofPacketConn(rawConn, opts, true, tag)
 			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
 		}
@@ -993,7 +1003,9 @@ func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOpti
 		host = addr
 	}
 	if port <= 0 {
-		port, _ = strconv.Atoi(portStr)
+		if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+			port = int(pNum)
+		}
 	}
 	tag := deriveScopedTag(password, proto, port)
 	if os.Geteuid() == 0 && host != "127.0.0.1" {
