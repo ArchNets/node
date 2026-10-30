@@ -15,6 +15,6 @@ func (c *afPacketIPv4Conn) WriteToWithIPOpts(p []byte, addr net.Addr, srcIP net.
 	return c.PacketConn.WriteTo(p, addr)
 }
 
-func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string) (net.PacketConn, error) {
+func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string, localPort uint16) (net.PacketConn, error) {
 	return nil, errors.New("AF_PACKET raw sockets supported on Linux only")
 }

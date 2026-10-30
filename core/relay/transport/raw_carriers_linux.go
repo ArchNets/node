@@ -53,8 +53,8 @@ func findInterfaceByIP(localIP net.IP) (*net.Interface, net.IP, error) {
 
 // afPacketIPv4Conn implements net.PacketConn using Backhaul IPX's dual-socket architecture:
 // - RX: AF_PACKET (SOCK_DGRAM, ETH_P_IP) bound to the physical interface with a socket-local
-//   Classic BPF filter matching the exact IPv4 protocol number. This captures packets directly
-//   from the NIC driver before kernel ipip/gre/conntrack modules can intercept or drop them.
+//   Classic BPF filter matching the exact IPv4 protocol number (and destination TCP/UDP port when applicable).
+//   This captures packets directly from the NIC driver before kernel ipip/gre/conntrack modules can drop them.
 // - TX: AF_INET (SOCK_RAW) with IP_HDRINCL=1 and SO_BINDTODEVICE so complete IPv4 packets
 //   (including custom source IPs for spoofing) are transmitted directly onto the wire.
 type afPacketIPv4Conn struct {
@@ -68,6 +68,7 @@ type afPacketIPv4Conn struct {
 	closeOnce   sync.Once
 	readMu      sync.Mutex
 	writeMu     sync.Mutex
+	readBuf     []byte
 	readEnd     atomic.Int64 // UnixNano deadline
 	ipIDCounter atomic.Uint32
 }
@@ -75,7 +76,7 @@ type afPacketIPv4Conn struct {
 // openPlatformRawIPv4Conn opens an AF_PACKET + IP_HDRINCL raw IPv4 socket pair on Linux
 // when running as root on a non-loopback address. Returns (nil, error) if unavailable so
 // callers can fall back to standard net.ListenPacket.
-func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string) (net.PacketConn, error) {
+func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string, localPort uint16) (net.PacketConn, error) {
 	var parsedBind net.IP
 	if bindHost != "" && bindHost != "0.0.0.0" {
 		parsedBind = net.ParseIP(bindHost)
@@ -134,12 +135,27 @@ func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string) (net
 		return nil, err
 	}
 
-	// Attach socket-local BPF filter: accept only IPv4 packets with ip[9] == proto
-	filter := []unix.SockFilter{
-		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 9},
-		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: uint32(proto)},
-		{Code: unix.BPF_RET | unix.BPF_K, K: 0},
-		{Code: unix.BPF_RET | unix.BPF_K, K: 65535},
+	// Build socket-local Classic BPF filter:
+	// If localPort > 0 on TCP (6) or UDP (17), also filter L4 destination port (X + 2) in kernel
+	// so high-volume TCP traffic (port 443, SSH) is never copied to userspace.
+	var filter []unix.SockFilter
+	if localPort > 0 && (proto == 6 || proto == 17) {
+		filter = []unix.SockFilter{
+			{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 9},
+			{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 4, K: uint32(proto)},
+			{Code: unix.BPF_LDX | unix.BPF_B | unix.BPF_MSH, K: 0},
+			{Code: unix.BPF_LD | unix.BPF_H | unix.BPF_IND, K: 2},
+			{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: uint32(localPort)},
+			{Code: unix.BPF_RET | unix.BPF_K, K: 65535},
+			{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+		}
+	} else {
+		filter = []unix.SockFilter{
+			{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 9},
+			{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: uint32(proto)},
+			{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+			{Code: unix.BPF_RET | unix.BPF_K, K: 65535},
+		}
 	}
 	prog := unix.SockFprog{
 		Len:    uint16(len(filter)),
@@ -154,6 +170,12 @@ func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string) (net
 	if err != nil {
 		return nil, err
 	}
+	// Drop all incoming packets on the transmit-only raw socket so its kernel RX queue stays empty
+	// while keeping the IP protocol registered in the kernel (preventing ICMP Protocol Unreachable).
+	dropAll := []unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+	dropProg := unix.SockFprog{Len: 1, Filter: &dropAll[0]}
+	_ = unix.SetsockoptSockFprog(tx, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &dropProg)
+
 	if err = unix.SetsockoptInt(tx, unix.IPPROTO_IP, unix.IP_HDRINCL, 1); err != nil {
 		return nil, err
 	}
@@ -173,6 +195,7 @@ func openPlatformRawIPv4Conn(proto byte, bindHost string, ifaceHint string) (net
 		proto:     proto,
 		localIP:   localIP,
 		ifaceName: iface.Name,
+		readBuf:   make([]byte, 65535),
 	}, nil
 }
 
@@ -222,7 +245,7 @@ func (c *afPacketIPv4Conn) ReadFrom(p []byte) (int, net.Addr, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
-	buf := make([]byte, 65535)
+	buf := c.readBuf
 	for !c.closed.Load() {
 		if err := c.wait(c.rx, unix.POLLIN); err != nil {
 			return 0, nil, err
@@ -255,8 +278,6 @@ func (c *afPacketIPv4Conn) ReadFrom(p []byte) (int, net.Addr, error) {
 	return 0, nil, net.ErrClosed
 }
 
-// WriteTo prepends a valid 20-byte IPv4 header (or uses the caller's IPv4 header if p already starts
-// with 0x45 and matches total length) and transmits via AF_INET SOCK_RAW (IP_HDRINCL=1).
 func (c *afPacketIPv4Conn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return c.WriteToWithIPOpts(p, addr, nil, 64, 0)
 }
