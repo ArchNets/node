@@ -39,12 +39,16 @@ func DeriveL3Subnet(tunnelID int, role string) (ifaceName, localCIDR, peerIP str
 	if len(ifaceName) >= ifnamSize {
 		ifaceName = ifaceName[:ifnamSize-1]
 	}
+	subnetPrefix := "10.10"
+	if tunnelID >= 1000 {
+		subnetPrefix = "10.19"
+	}
 	if role == "entry" {
-		localCIDR = fmt.Sprintf("10.10.%d.1/30", octet)
-		peerIP = fmt.Sprintf("10.10.%d.2", octet)
+		localCIDR = fmt.Sprintf("%s.%d.1/30", subnetPrefix, octet)
+		peerIP = fmt.Sprintf("%s.%d.2", subnetPrefix, octet)
 	} else {
-		localCIDR = fmt.Sprintf("10.10.%d.2/30", octet)
-		peerIP = fmt.Sprintf("10.10.%d.1", octet)
+		localCIDR = fmt.Sprintf("%s.%d.2/30", subnetPrefix, octet)
+		peerIP = fmt.Sprintf("%s.%d.1", subnetPrefix, octet)
 	}
 	return ifaceName, localCIDR, peerIP
 }

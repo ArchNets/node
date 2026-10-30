@@ -104,6 +104,8 @@ type Engine struct {
 	tcpForwarderMap  sync.Map // int (listenPort) -> net.Listener
 	udpForwarderMap  sync.Map // int (listenPort) -> *net.UDPConn
 	l3TunDev         *transport.L3TUNDevice
+	l3RawConn        net.PacketConn
+	l3PeerAddr       atomic.Value // net.Addr
 	tcpListeners   []net.Listener
 	udpListeners  []*net.UDPConn
 	hdMatcher     *transport.HalfDuplexMatcher
@@ -185,6 +187,8 @@ func NewEngine(cfg Config) *Engine {
 
 // Start launches the relay engine according to its role ("entry" or "exit").
 func (e *Engine) Start() error {
+	e.alive.Store(true)
+
 	if transport.GetTransportSpec(e.cfg.Transport).IsL3 {
 		mtu := e.cfg.L3MTU
 		if mtu <= 0 {
@@ -199,6 +203,11 @@ func (e *Engine) Start() error {
 				"localIP": tunDev.LocalIP(),
 				"peerIP":  tunDev.PeerIP(),
 			}).Info("[Relay] Layer-3 TUN interface (GRE + ChaCha20-Poly1305) brought up")
+			if e.isPacketTransport() {
+				if pErr := e.startL3RawPump(); pErr != nil {
+					e.logger.WithField("err", pErr).Warn("[Relay] Failed to open L3 raw packet pump")
+				}
+			}
 		} else {
 			e.logger.WithField("err", err).Debug("[Relay] Layer-3 TUN device skipped (running unprivileged or in sandbox)")
 		}
@@ -206,6 +215,11 @@ func (e *Engine) Start() error {
 
 	if e.cfg.Role == "entry" {
 		if err := e.startEntry(); err != nil {
+			e.alive.Store(false)
+			if e.l3RawConn != nil {
+				_ = e.l3RawConn.Close()
+				e.l3RawConn = nil
+			}
 			if e.l3TunDev != nil {
 				_ = e.l3TunDev.Close()
 				e.l3TunDev = nil
@@ -215,6 +229,11 @@ func (e *Engine) Start() error {
 		}
 	} else if e.cfg.Role == "exit" {
 		if err := e.startExit(); err != nil {
+			e.alive.Store(false)
+			if e.l3RawConn != nil {
+				_ = e.l3RawConn.Close()
+				e.l3RawConn = nil
+			}
 			if e.l3TunDev != nil {
 				_ = e.l3TunDev.Close()
 				e.l3TunDev = nil
@@ -223,6 +242,11 @@ func (e *Engine) Start() error {
 			return err
 		}
 	} else {
+		e.alive.Store(false)
+		if e.l3RawConn != nil {
+			_ = e.l3RawConn.Close()
+			e.l3RawConn = nil
+		}
 		if e.l3TunDev != nil {
 			_ = e.l3TunDev.Close()
 			e.l3TunDev = nil
@@ -230,8 +254,6 @@ func (e *Engine) Start() error {
 		e.cancel()
 		return fmt.Errorf("unknown relay engine role: %q", e.cfg.Role)
 	}
-
-	e.alive.Store(true)
 
 	if e.l3TunDev != nil && e.cfg.Role == "entry" && !e.isPacketTransport() {
 		e.wg.Add(1)
@@ -315,6 +337,10 @@ func (e *Engine) Close() error {
 	}
 	if e.udpCarrierLn != nil {
 		_ = e.udpCarrierLn.Close()
+	}
+	if e.l3RawConn != nil {
+		_ = e.l3RawConn.Close()
+		e.l3RawConn = nil
 	}
 	if e.l3TunDev != nil {
 		_ = e.l3TunDev.Close()
@@ -447,7 +473,125 @@ func (e *Engine) isMuxTransport() bool {
 	return transport.GetTransportSpec(e.cfg.Transport).IsMux
 }
 
+func (e *Engine) isL3DirectTUNMode() bool {
+	return e.l3TunDev != nil && e.isPacketTransport() && e.l3RawConn != nil
+}
+
+func (e *Engine) startL3RawPump() error {
+	spoofOpts := transport.SpoofOptions{
+		SrcIP:       e.cfg.SpoofSrcIP,
+		SrcPool:     e.cfg.SpoofSrcPool,
+		PeerSrcIP:   e.cfg.SpoofPeerSrcIP,
+		Profile:     e.cfg.SpoofProfile,
+		Uplink:      e.cfg.SpoofUplink,
+		Downlink:    e.cfg.SpoofDownlink,
+		FakeTLS:     e.cfg.SpoofFakeTLS,
+		TTLJitter:   e.cfg.SpoofTTLJitter,
+		RandomDSCP:  e.cfg.SpoofRandomDSCP,
+		ShufflePort: e.cfg.SpoofShufflePort,
+		PortMin:     uint16(e.cfg.SpoofPortMin),
+		PortMax:     uint16(e.cfg.SpoofPortMax),
+		Padding:     e.cfg.SpoofPadding,
+		PaddingMax:  uint8(e.cfg.SpoofPaddingMax),
+		Interface:   e.cfg.SpoofInterface,
+	}
+	isServer := e.cfg.Role == "entry"
+	rawConn, err := transport.OpenL3RawCarrier(e.cfg.Transport, e.cfg.ListenIP, e.cfg.Password, e.cfg.CarrierPort, isServer, spoofOpts)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.l3RawConn = rawConn
+	e.mu.Unlock()
+
+	peerIPStr := e.cfg.ExitServerIP
+	if e.cfg.Role == "exit" {
+		peerIPStr = e.cfg.EntryServerIP
+	}
+	if peerIPStr == "" && len(e.cfg.FloatingIPs) > 0 {
+		peerIPStr = strings.TrimSpace(e.cfg.FloatingIPs[0])
+	}
+	if parsedPeer := net.ParseIP(peerIPStr); parsedPeer != nil {
+		e.l3PeerAddr.Store(&net.UDPAddr{IP: parsedPeer, Port: e.cfg.CarrierPort})
+	}
+
+	e.l3TunDev.SetSender(func(wire []byte) error {
+		dst, _ := e.l3PeerAddr.Load().(net.Addr)
+		if dst == nil {
+			return errors.New("l3: peer public IP not yet known")
+		}
+		e.Stats.AddUpload(int64(len(wire)))
+		_, wErr := rawConn.WriteTo(wire, dst)
+		return wErr
+	})
+
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		buf := make([]byte, 65535)
+		for {
+			n, from, rErr := rawConn.ReadFrom(buf)
+			if rErr != nil {
+				if !e.alive.Load() {
+					return
+				}
+				continue
+			}
+			if e.l3TunDev != nil {
+				if err := e.l3TunDev.InjectWirePacket(buf[:n]); err == nil {
+					e.Stats.AddDownload(int64(n))
+					if from != nil {
+						e.l3PeerAddr.Store(from)
+					}
+				}
+			}
+		}
+	}()
+	return nil
+}
+
 func (e *Engine) startCarrierListener(listenIP string) error {
+	if e.isL3DirectTUNMode() {
+		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
+		privAddr := net.JoinHostPort(tunLocalIP, "1234")
+		ln, err := net.Listen("tcp", privAddr)
+		if err != nil {
+			return fmt.Errorf("listen L3 private carrier on %s: %w", privAddr, err)
+		}
+		e.mu.Lock()
+		e.carrierLn = ln
+		e.mu.Unlock()
+		e.logger.WithFields(log.Fields{
+			"privateAddr": privAddr,
+			"iface":       e.l3TunDev.Name(),
+			"transport":   e.cfg.Transport,
+		}).Info("[Relay] L3 TUN private carrier listener active")
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			for {
+				c, aErr := ln.Accept()
+				if aErr != nil {
+					return
+				}
+				go func(raw net.Conn) {
+					action, inspected, iErr := transport.InspectTCPTraffic(raw, e.cfg.Password, false)
+					if iErr != nil || action != transport.ActionReverseCarrier {
+						_ = raw.Close()
+						return
+					}
+					if e.isDirect() {
+						e.wg.Add(1)
+						go e.serveExitStream(inspected)
+					} else {
+						e.pushIdleStream(inspected)
+					}
+				}(c)
+			}
+		}()
+		return nil
+	}
+
 	spec := transport.GetTransportSpec(e.cfg.Transport)
 	if spec.NeedsTLSServerCfg {
 		tlsCfg, err := transport.BuildRelayTLSConfig(e.cfg.SNI, e.cfg.CertMode, e.cfg.CertFile, e.cfg.KeyFile)
@@ -1103,6 +1247,15 @@ func (e *Engine) logDialFailure(err error) {
 	last := e.lastDialLog.Load()
 	if now-last >= 10 {
 		if e.lastDialLog.CompareAndSwap(last, now) {
+			if e.isL3DirectTUNMode() {
+				e.logger.WithFields(log.Fields{
+					"tunPeer":   net.JoinHostPort(e.l3TunDev.PeerIP(), "1234"),
+					"transport": e.cfg.Transport,
+					"entryIP":   e.cfg.EntryServerIP,
+					"err":       err,
+				}).Warn("[Relay] Exit node waiting for L3 TUN private IP response (check raw protocol connectivity)")
+				return
+			}
 			e.logger.WithFields(log.Fields{
 				"carrierPort": e.cfg.CarrierPort,
 				"entryIP":     e.cfg.EntryServerIP,
@@ -1198,6 +1351,14 @@ func (e *Engine) exitPoolLoop() {
 }
 
 func (e *Engine) dialCarrierStream() (net.Conn, error) {
+	if e.isL3DirectTUNMode() {
+		privTarget := net.JoinHostPort(e.l3TunDev.PeerIP(), "1234")
+		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
+		rawDial := func() (net.Conn, error) {
+			return transport.DialTCPContextWithLocal(e.ctx, tunLocalIP, privTarget, 4*time.Second)
+		}
+		return transport.DialTCPCarrier(rawDial, e.cfg.Password)
+	}
 	if e.isQuicTransport() {
 		return e.dialQuicCarrier()
 	}

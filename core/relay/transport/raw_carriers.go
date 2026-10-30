@@ -1060,6 +1060,106 @@ func DialSpoofCarrier(ctx context.Context, addr, password string, opts SpoofOpti
 	return DialUDPCarrier(ctx, addr, password, true)
 }
 
+// OpenL3RawCarrier opens a stateless raw/datagram net.PacketConn for direct Layer-3 TUN packet pumping.
+// Unlike stream carriers, it requires zero L4 handshake before pumping encrypted TUN packets.
+func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServer bool, spoofOpts SpoofOptions) (net.PacketConn, error) {
+	if bindHost == "" {
+		bindHost = "0.0.0.0"
+	}
+	if port <= 0 || port > 65535 {
+		port = 443
+	}
+	port16 := uint16(port)
+
+	switch strings.ToLower(strings.TrimSpace(transportName)) {
+	case "l3-bip":
+		tag := deriveScopedTag(password, 58, port)
+		rawConn, err := openBestRawConn(58, "ip4:58", bindHost, "", 0)
+		if err != nil {
+			return nil, err
+		}
+		return newRawProtoPacketConn(rawConn, 58, isServer, tag), nil
+
+	case "l3-ipip":
+		tag := deriveScopedTag(password, 4, port)
+		rawConn, err := openBestRawConn(4, "ip4:4", bindHost, "", 0)
+		if err != nil {
+			return nil, err
+		}
+		return newRawProtoPacketConn(rawConn, 4, isServer, tag), nil
+
+	case "l3-gre":
+		tag := deriveScopedTag(password, 47, port)
+		rawConn, err := openBestRawConn(47, "ip4:47", bindHost, "", 0)
+		if err != nil {
+			return nil, err
+		}
+		return newGREProtoPacketConn(rawConn, isServer, tag), nil
+
+	case "xdi", "l3-xdi":
+		tag := deriveScopedTag(password, 1, port)
+		rawConn, err := openBestRawConn(1, "ip4:icmp", bindHost, "", 0)
+		if err != nil {
+			return nil, err
+		}
+		var echoRule []string
+		if isServer {
+			echoRule = installXDIEchoGuard(port16)
+		}
+		return &icmpPacketConn{
+			PacketConn: rawConn,
+			isServer:   isServer,
+			ident:      port16,
+			tag:        tag,
+			echoRule:   echoRule,
+		}, nil
+
+	case "pck", "l3-pck", "l3-sni":
+		tag := deriveScopedTag(password, 6, port)
+		rawConn, err := openBestRawConn(6, "ip4:tcp", bindHost, "", port16)
+		if err != nil {
+			return nil, err
+		}
+		return newPCKPacketConn(rawConn, isServer, port16, port16, tag), nil
+
+	case "spoof":
+		proto := byte(58)
+		prof := strings.ToLower(strings.TrimSpace(spoofOpts.Profile))
+		if isServer && spoofOpts.Downlink != "" {
+			prof = strings.ToLower(strings.TrimSpace(spoofOpts.Downlink))
+		} else if !isServer && spoofOpts.Uplink != "" {
+			prof = strings.ToLower(strings.TrimSpace(spoofOpts.Uplink))
+		}
+		switch prof {
+		case "ipip":
+			proto = 4
+		case "gre":
+			proto = 47
+		}
+		tag := deriveScopedTag(password, proto, port)
+		protoStr := fmt.Sprintf("ip4:%d", proto)
+		rawConn, err := openBestRawConn(proto, protoStr, bindHost, spoofOpts.Interface, 0)
+		if err != nil {
+			return nil, err
+		}
+		return newSpoofPacketConn(rawConn, spoofOpts, isServer, tag), nil
+
+	default: // "l3-udp", "kcp"
+		listenPort := port
+		if !isServer {
+			listenPort = 0
+		}
+		uAddr := &net.UDPAddr{IP: net.ParseIP(bindHost), Port: listenPort}
+		uConn, err := net.ListenUDP("udp", uAddr)
+		if err != nil {
+			return nil, err
+		}
+		_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+		_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+		return uConn, nil
+	}
+}
+
 // CheckRPFilterStatus checks /proc/sys/net/ipv4/conf/all/rp_filter on Linux (matching BackPack's ctStrictRPFilter).
 func CheckRPFilterStatus() string {
 	b, err := os.ReadFile("/proc/sys/net/ipv4/conf/all/rp_filter")

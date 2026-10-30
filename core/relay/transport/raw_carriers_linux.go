@@ -269,8 +269,15 @@ func (c *afPacketIPv4Conn) wait(fd int, events int16) error {
 		if err != nil {
 			return err
 		}
-		if c.closed.Load() || fds[1].Revents != 0 {
+		if c.closed.Load() {
 			return net.ErrClosed
+		}
+		if fds[1].Revents != 0 {
+			var drain [8]byte
+			_, _ = unix.Read(c.wake, drain[:])
+			if c.closed.Load() {
+				return net.ErrClosed
+			}
 		}
 		if fds[0].Revents&events != 0 {
 			return nil
