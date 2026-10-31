@@ -194,6 +194,20 @@ func (e *Engine) Start() error {
 		if mtu <= 0 {
 			mtu = transport.GetConfiguredMTU()
 		}
+		dataShards := e.cfg.KCPDataShards
+		parityShards := e.cfg.KCPParityShards
+		if dataShards <= 0 && parityShards <= 0 {
+			for _, f := range e.cfg.Forwarders {
+				if f.GamingMode {
+					dataShards = 10
+					parityShards = 3
+					break
+				}
+			}
+		}
+		if dataShards > 0 && parityShards > 0 && mtu > 1312 {
+			mtu -= transport.FECOverhead
+		}
 		if tunDev, err := transport.OpenL3TUNWithSubnet(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP); err == nil {
 			e.mu.Lock()
 			e.l3TunDev = tunDev
@@ -500,6 +514,29 @@ func (e *Engine) startL3RawPump() error {
 	if err != nil {
 		return err
 	}
+
+	dataShards := e.cfg.KCPDataShards
+	parityShards := e.cfg.KCPParityShards
+	if dataShards <= 0 && parityShards <= 0 {
+		for _, f := range e.cfg.Forwarders {
+			if f.GamingMode {
+				dataShards = 10
+				parityShards = 3
+				break
+			}
+		}
+	}
+	if dataShards > 0 && parityShards > 0 {
+		if fecConn, fErr := transport.NewFECPacketConn(rawConn, dataShards, parityShards); fErr == nil {
+			rawConn = fecConn
+			e.logger.WithFields(log.Fields{
+				"dataShards":   dataShards,
+				"parityShards": parityShards,
+				"transport":    e.cfg.Transport,
+			}).Info("[Relay] Stateless UDPspeeder Reed-Solomon FEC decorator active on L3 carrier")
+		}
+	}
+
 	e.mu.Lock()
 	e.l3RawConn = rawConn
 	e.mu.Unlock()

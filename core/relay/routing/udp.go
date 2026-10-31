@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/archnets/node/core/relay/telemetry"
@@ -44,9 +45,65 @@ const (
 
 type UDPSession struct {
 	Stream     net.Conn
+	StreamTwin net.Conn
 	ClientAddr *net.UDPAddr
 	LastActive time.Time
 	WriteMu    sync.Mutex
+	gamingSeq  atomic.Uint32
+	rxDedup    udpSeqDeduplicator
+}
+
+// udpSeqDeduplicator prevents duplicate packet delivery when twin streams receive the same packet.
+type udpSeqDeduplicator struct {
+	mu      sync.Mutex
+	highest uint32
+	window  [16]uint64
+	init    bool
+}
+
+func (d *udpSeqDeduplicator) checkAndRecord(seq uint32) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.init {
+		d.highest = seq
+		d.window[0] = 1
+		d.init = true
+		return true
+	}
+	diff := int32(seq - d.highest)
+	if diff > 0 {
+		uDiff := uint32(diff)
+		if uDiff >= 1024 {
+			clear(d.window[:])
+		} else {
+			shiftWords := int(uDiff / 64)
+			shiftBits := uint(uDiff % 64)
+			for i := len(d.window) - 1; i >= 0; i-- {
+				var next uint64
+				if i >= shiftWords {
+					next = d.window[i-shiftWords] << shiftBits
+					if shiftBits > 0 && i > shiftWords {
+						next |= d.window[i-shiftWords-1] >> (64 - shiftBits)
+					}
+				}
+				d.window[i] = next
+			}
+		}
+		d.highest = seq
+		d.window[0] |= 1
+		return true
+	}
+	gap := uint32(-diff)
+	if gap >= 1024 {
+		return false
+	}
+	word := gap / 64
+	bit := uint(gap % 64)
+	if (d.window[word] & (uint64(1) << bit)) != 0 {
+		return false
+	}
+	d.window[word] |= (uint64(1) << bit)
+	return true
 }
 
 // StartUDPListenerLoop binds UDP listener on Entry and frames datagrams over claimed streams.
@@ -143,9 +200,55 @@ func StartUDPListenerLoop(
 					ClientAddr: &addrCopy,
 					LastActive: time.Now(),
 				}
+
+				if gamingMode {
+					// Attempt to claim twin stream for multi-path anti-jitter replication
+					if twin, tErr := claimStreamFn(150 * time.Millisecond); tErr == nil && twin != nil {
+						_ = twin.SetWriteDeadline(time.Now().Add(2 * time.Second))
+						if err := WriteRoutingHeader(twin, RouteProtoUDPGaming, uint16(targetPort)); err == nil {
+							_ = twin.SetWriteDeadline(time.Time{})
+							sess.StreamTwin = twin
+						} else {
+							_ = twin.Close()
+						}
+					}
+				}
+
 				sessionsMu.Lock()
 				sessions[key] = sess
 				sessionsMu.Unlock()
+
+				pumpStream := func(st net.Conn) {
+					var lenBuf [2]byte
+					frameBuf := make([]byte, 65536)
+					for {
+						_ = st.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+						if _, err := io.ReadFull(st, lenBuf[:]); err != nil {
+							return
+						}
+						frameLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+						if frameLen == 0 || frameLen > MaxUDPFrameSize {
+							return
+						}
+						if _, err := io.ReadFull(st, frameBuf[:frameLen]); err != nil {
+							return
+						}
+						sess.LastActive = time.Now()
+
+						payload := frameBuf[:frameLen]
+						if gamingMode && frameLen >= 4 {
+							seq := binary.BigEndian.Uint32(payload[:4])
+							if !sess.rxDedup.checkAndRecord(seq) {
+								continue // Duplicate dropped; first arrival won!
+							}
+							payload = payload[4:]
+						}
+
+						if nw, err := udpConn.WriteToUDP(payload, sess.ClientAddr); err == nil && nw > 0 && stats != nil {
+							stats.AddDownload(int64(nw))
+						}
+					}
+				}
 
 				go func(k string, s *UDPSession) {
 					if stats != nil {
@@ -154,6 +257,9 @@ func StartUDPListenerLoop(
 					}
 					defer func() {
 						_ = s.Stream.Close()
+						if s.StreamTwin != nil {
+							_ = s.StreamTwin.Close()
+						}
 						sessionsMu.Lock()
 						if sessions[k] == s {
 							delete(sessions, k)
@@ -161,37 +267,37 @@ func StartUDPListenerLoop(
 						sessionsMu.Unlock()
 					}()
 
-					var lenBuf [2]byte
-					frameBuf := make([]byte, 65536)
-					for {
-						_ = s.Stream.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
-						if _, err := io.ReadFull(s.Stream, lenBuf[:]); err != nil {
-							return
-						}
-						frameLen := int(binary.BigEndian.Uint16(lenBuf[:]))
-						if frameLen == 0 || frameLen > MaxUDPFrameSize {
-							return
-						}
-						if _, err := io.ReadFull(s.Stream, frameBuf[:frameLen]); err != nil {
-							return
-						}
-						s.LastActive = time.Now()
-						if nw, err := udpConn.WriteToUDP(frameBuf[:frameLen], s.ClientAddr); err == nil && nw > 0 && stats != nil {
-							stats.AddDownload(int64(nw))
-						}
+					if s.StreamTwin != nil {
+						go pumpStream(s.StreamTwin)
 					}
+					pumpStream(s.Stream)
 				}(key, sess)
 			}
 
-			frame := getUDPFrameBuffer(2 + n)
-			binary.BigEndian.PutUint16(frame[0:2], uint16(n))
-			copy(frame[2:], buf[:n])
+			var frame []byte
+			if gamingMode {
+				seq := sess.gamingSeq.Add(1)
+				frame = getUDPFrameBuffer(2 + 4 + n)
+				binary.BigEndian.PutUint16(frame[0:2], uint16(4+n))
+				binary.BigEndian.PutUint32(frame[2:6], seq)
+				copy(frame[6:], buf[:n])
+			} else {
+				frame = getUDPFrameBuffer(2 + n)
+				binary.BigEndian.PutUint16(frame[0:2], uint16(n))
+				copy(frame[2:], buf[:n])
+			}
 
 			sess.WriteMu.Lock()
 			sess.LastActive = time.Now()
 			_ = sess.Stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			_, wErr := sess.Stream.Write(frame)
 			_ = sess.Stream.SetWriteDeadline(time.Time{})
+
+			if sess.StreamTwin != nil {
+				_ = sess.StreamTwin.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_, _ = sess.StreamTwin.Write(frame)
+				_ = sess.StreamTwin.SetWriteDeadline(time.Time{})
+			}
 			sess.WriteMu.Unlock()
 			putUDPFrameBuffer(frame)
 
@@ -237,6 +343,8 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		defer stats.ActiveConnections.Add(-1)
 	}
 
+	var exitDedup udpSeqDeduplicator
+	var exitSeq atomic.Uint32
 	done := make(chan struct{}, 2)
 
 	go func() {
@@ -255,8 +363,18 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 			if _, err := io.ReadFull(stream, payload[:frameLen]); err != nil {
 				return
 			}
+
+			data := payload[:frameLen]
+			if gamingMode && frameLen >= 4 {
+				seq := binary.BigEndian.Uint32(data[:4])
+				if !exitDedup.checkAndRecord(seq) {
+					continue // Duplicate dropped
+				}
+				data = data[4:]
+			}
+
 			_ = udpConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if n, err := udpConn.Write(payload[:frameLen]); err == nil && n > 0 && stats != nil {
+			if n, err := udpConn.Write(data); err == nil && n > 0 && stats != nil {
 				stats.AddUpload(int64(n))
 			}
 		}
@@ -267,16 +385,31 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		buf := make([]byte, 65536)
 		for {
 			_ = udpConn.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
-			n, err := udpConn.Read(buf[2:])
+			readOffset := 2
+			if gamingMode {
+				readOffset = 6 // [2B length][4B seq]
+			}
+			n, err := udpConn.Read(buf[readOffset:])
 			if err != nil {
 				return
 			}
 			if n <= 0 || n > MaxUDPFrameSize {
 				continue
 			}
-			frame := getUDPFrameBuffer(2 + n)
-			binary.BigEndian.PutUint16(frame[0:2], uint16(n))
-			copy(frame[2:], buf[2:2+n])
+
+			var frame []byte
+			if gamingMode {
+				seq := exitSeq.Add(1)
+				frame = getUDPFrameBuffer(2 + 4 + n)
+				binary.BigEndian.PutUint16(frame[0:2], uint16(4+n))
+				binary.BigEndian.PutUint32(frame[2:6], seq)
+				copy(frame[6:], buf[readOffset:readOffset+n])
+			} else {
+				frame = getUDPFrameBuffer(2 + n)
+				binary.BigEndian.PutUint16(frame[0:2], uint16(n))
+				copy(frame[2:], buf[readOffset:readOffset+n])
+			}
+
 			_ = stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			_, wErr := stream.Write(frame)
 			putUDPFrameBuffer(frame)
