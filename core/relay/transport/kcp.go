@@ -66,13 +66,14 @@ func DefaultKCPSettings(useFEC bool) KCPSettings {
 	}
 }
 
-// kcpCrypt derives and caches an AES-256 block cipher from the tunnel password.
-// Encrypts both KCP segments and Reed-Solomon FEC headers in-place on the wire.
+// kcpCrypt derives and caches an AES-128 block cipher from the tunnel password.
+// As recommended by xtaci/kcp-go Section 4, AES-128 (16-byte key) executes 10 AES-NI rounds
+// instead of 14, encrypting both KCP segments and Reed-Solomon FEC headers in CFB mode.
 func kcpCrypt(password string) (kcp.BlockCrypt, error) {
 	if key, ok := kcpKeyCache.Load(password); ok {
 		return kcp.NewAESBlockCrypt(key.([]byte))
 	}
-	key := pbkdf2.Key([]byte(password), []byte("archnet-kcp-v1"), 100_000, 32, sha256.New)
+	key := pbkdf2.Key([]byte(password), []byte("archnet-kcp-v1"), 100_000, 16, sha256.New)
 	kcpKeyCache.Store(password, key)
 	return kcp.NewAESBlockCrypt(key)
 }

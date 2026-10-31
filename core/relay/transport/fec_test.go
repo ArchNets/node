@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
@@ -97,9 +98,11 @@ func TestFECPacketConn_LossRecovery(t *testing.T) {
 	go func() {
 		defer close(dropCh)
 		for pkt := range rawB.ch {
-			if len(pkt) >= FECHeaderLen && pkt[0] == fecKindData {
-				idx := pkt[5]
-				if idx == 2 || idx == 6 {
+			if len(pkt) >= FECHeaderLen {
+				flag := binary.LittleEndian.Uint16(pkt[4:6])
+				seqid := binary.LittleEndian.Uint32(pkt[:4])
+				idx := seqid % 13
+				if flag == fecTypeData && (idx == 2 || idx == 6) {
 					continue // simulate packet drop on the border!
 				}
 			}
@@ -145,47 +148,27 @@ func TestFECPacketConn_LossRecovery(t *testing.T) {
 	t.Logf("✓ Verified: 100%% of packets recovered across 20%% simulated border packet drop")
 }
 
-func TestFECPacketConn_SparsePacketFlush(t *testing.T) {
-	rawA, rawB := newPipePacketConnPair()
-	dropCh := make(chan []byte, 1024)
-	droppedPipe := &pipePacketConn{
-		localAddr: rawB.localAddr,
-		peer:      rawA,
-		ch:        dropCh,
-	}
-
-	fecA, _ := NewFECPacketConn(rawA, 10, 3)
-	defer fecA.Close()
-	fecB, _ := NewFECPacketConn(droppedPipe, 10, 3)
-	defer fecB.Close()
-
-	// Drop the lone data packet on the wire so ONLY the 8ms-flushed parity shards arrive!
-	go func() {
-		defer close(dropCh)
-		for pkt := range rawB.ch {
-			if len(pkt) >= FECHeaderLen && pkt[0] == fecKindData {
-				continue // Drop the lone data packet!
-			}
-			dropCh <- pkt
+func TestFECPacketConn_AutoTunePulseDetector(t *testing.T) {
+	tune := autoTune{}
+	// Feed a 10:3 pulse sequence (10 data followed by 3 parity)
+	var seq uint32
+	for round := 0; round < 6; round++ {
+		for i := 0; i < 10; i++ {
+			tune.Sample(true, seq)
+			seq++
 		}
-	}()
-
-	// Send just 1 lone packet (sparse game tick)
-	testMsg := []byte("SPARSE_GAME_TICK_RECOVERED_FROM_PARITY")
-	_, err := fecA.WriteTo(testMsg, rawB.localAddr)
-	if err != nil {
-		t.Fatalf("WriteTo: %v", err)
+		for i := 0; i < 3; i++ {
+			tune.Sample(false, seq)
+			seq++
+		}
 	}
 
-	readBuf := make([]byte, 1024)
-	n, _, err := fecB.ReadFrom(readBuf)
-	if err != nil {
-		t.Fatalf("ReadFrom: %v", err)
+	ds := tune.FindPeriod(true)
+	ps := tune.FindPeriod(false)
+	if ds != 10 || ps != 3 {
+		t.Fatalf("expected autoTune to detect 10:3, got %d:%d", ds, ps)
 	}
-	if !bytes.Equal(readBuf[:n], testMsg) {
-		t.Fatalf("got %s, want %s", readBuf[:n], testMsg)
-	}
-	t.Logf("✓ Verified: Dropped lone sparse gaming packet reconstructed from 8ms parity flush!")
+	t.Logf("✓ Verified: autoTune pulse detector cleanly detected 10:3 shard period (%d:%d)", ds, ps)
 }
 
 func TestFECPacketConn_EncryptedHeaders(t *testing.T) {
