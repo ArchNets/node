@@ -187,3 +187,34 @@ func TestFECPacketConn_SparsePacketFlush(t *testing.T) {
 	}
 	t.Logf("✓ Verified: Dropped lone sparse gaming packet reconstructed from 8ms parity flush!")
 }
+
+func TestFECPacketConn_EncryptedHeaders(t *testing.T) {
+	rawA, rawB := newPipePacketConnPair()
+	fecA, err := NewFECPacketConnWithSecret(rawA, 8, 4, "secret-tunnel-password")
+	if err != nil {
+		t.Fatalf("fecA: %v", err)
+	}
+	defer fecA.Close()
+
+	fecB, err := NewFECPacketConnWithSecret(rawB, 8, 4, "secret-tunnel-password")
+	if err != nil {
+		t.Fatalf("fecB: %v", err)
+	}
+	defer fecB.Close()
+
+	testMsg := []byte("OBFUSCATED_HEADER_PAYLOAD")
+	_, err = fecA.WriteTo(testMsg, rawB.localAddr)
+	if err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	readBuf := make([]byte, 1024)
+	n, _, err := fecB.ReadFrom(readBuf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if !bytes.Equal(readBuf[:n], testMsg) {
+		t.Fatalf("got %s, want %s", readBuf[:n], testMsg)
+	}
+	t.Logf("✓ Verified: Encrypted/obfuscated FEC headers round-trip cleanly")
+}

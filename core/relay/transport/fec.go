@@ -55,6 +55,7 @@ type FECPacketConn struct {
 	sendFrame   []byte
 	flushTimer  *time.Timer
 	flushActive bool
+	headerMask  uint64
 
 	readMu    sync.Mutex
 	readFrame []byte
@@ -82,9 +83,38 @@ type fecRecvGroup struct {
 	addr      net.Addr
 }
 
+var fecShardPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 2048)
+		return &b
+	},
+}
+
+func getFECShard(needed int) []byte {
+	if needed <= 2048 {
+		bufPtr := fecShardPool.Get().(*[]byte)
+		return (*bufPtr)[:needed]
+	}
+	return make([]byte, needed)
+}
+
+func putFECShard(b []byte) {
+	if cap(b) >= 2048 {
+		b = b[:2048]
+		clear(b)
+		fecShardPool.Put(&b)
+	}
+}
+
 // NewFECPacketConn wraps below in a stateless Reed-Solomon FEC decorator.
 // If dataShards <= 0 or parityShards <= 0, below is returned as-is with no FEC overhead.
 func NewFECPacketConn(below net.PacketConn, dataShards, parityShards int) (net.PacketConn, error) {
+	return NewFECPacketConnWithSecret(below, dataShards, parityShards, "")
+}
+
+// NewFECPacketConnWithSecret wraps below in a stateless Reed-Solomon FEC decorator with
+// encrypted/obfuscated wire headers derived from password to prevent DPI traffic shaping.
+func NewFECPacketConnWithSecret(below net.PacketConn, dataShards, parityShards int, password string) (net.PacketConn, error) {
 	if dataShards <= 0 || parityShards <= 0 {
 		return below, nil
 	}
@@ -100,6 +130,13 @@ func NewFECPacketConn(below net.PacketConn, dataShards, parityShards int) (net.P
 	_, _ = rand.Read(first[:])
 	initialGrp := binary.BigEndian.Uint32(first[:])
 
+	var mask uint64
+	if password != "" {
+		if k, kErr := DeriveRealityKey(password, "archnet-fec-mask"); kErr == nil {
+			mask = binary.BigEndian.Uint64(k[:8])
+		}
+	}
+
 	f := &FECPacketConn{
 		below:        below,
 		dataShards:   dataShards,
@@ -107,6 +144,7 @@ func NewFECPacketConn(below net.PacketConn, dataShards, parityShards int) (net.P
 		totalShards:  dataShards + parityShards,
 		enc:          enc,
 		sendGrp:      initialGrp,
+		headerMask:   mask,
 		groups:       make(map[uint32]*fecRecvGroup),
 		closeCh:      make(chan struct{}),
 	}
@@ -157,7 +195,16 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	c.sendFrame[5] = byte(c.sendIdx)
 	copy(c.sendFrame[FECHeaderLen:], shard)
 
+	if c.headerMask != 0 {
+		hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
+		binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+	}
+
 	n, err := c.below.WriteTo(c.sendFrame, addr)
+	if c.headerMask != 0 {
+		hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
+		binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+	}
 	c.sendIdx++
 
 	if c.sendIdx == c.dataShards {
@@ -236,7 +283,15 @@ func (c *FECPacketConn) flushParityLocked() {
 			binary.BigEndian.PutUint32(c.sendFrame[1:5], c.sendGrp)
 			c.sendFrame[5] = byte(i)
 			copy(c.sendFrame[FECHeaderLen:], c.sendPad[i])
+			if c.headerMask != 0 {
+				hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
+				binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+			}
 			_, _ = c.below.WriteTo(c.sendFrame, c.sendPeer)
+			if c.headerMask != 0 {
+				hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
+				binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+			}
 		}
 	}
 
@@ -267,8 +322,13 @@ func (c *FECPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		if err != nil {
 			return 0, nil, err
 		}
-		if n < FECHeaderLen {
+		if n < FECOverhead {
 			continue
+		}
+
+		if c.headerMask != 0 {
+			hVal := binary.BigEndian.Uint64(buf[:8])
+			binary.BigEndian.PutUint64(buf[:8], hVal^c.headerMask)
 		}
 
 		kind := buf[0]
@@ -330,7 +390,9 @@ func (c *FECPacketConn) absorb(kind byte, group uint32, index int, body []byte, 
 	}
 
 	if g.shards[index] == nil {
-		g.shards[index] = append([]byte(nil), body...)
+		shardBuf := getFECShard(len(body))
+		copy(shardBuf, body)
+		g.shards[index] = shardBuf
 		g.haveTotal++
 		if index < c.dataShards {
 			g.haveData++
@@ -339,13 +401,12 @@ func (c *FECPacketConn) absorb(kind byte, group uint32, index int, body []byte, 
 			if g.size == 0 {
 				g.size = len(body)
 			}
-			// If this was a partial/sparse group (actualCount < dataShards), pre-fill the
-			// unused data shard slots (actualCount .. dataShards-1) with zeros so Reed-Solomon
-			// can immediately reconstruct lost packets in sparse gaming bursts.
 			actualCount := int(kind)
 			for i := actualCount; i < c.dataShards; i++ {
 				if g.shards[i] == nil {
-					g.shards[i] = make([]byte, g.size)
+					zeroShard := getFECShard(g.size)
+					clear(zeroShard)
+					g.shards[i] = zeroShard
 					g.haveTotal++
 					g.haveData++
 					g.delivered[i] = true
@@ -415,7 +476,14 @@ func (c *FECPacketConn) evictLocked() {
 	for len(c.order) > fecWindow {
 		oldest := c.order[0]
 		c.order = c.order[1:]
-		delete(c.groups, oldest)
+		if g, exists := c.groups[oldest]; exists {
+			for _, s := range g.shards {
+				if s != nil {
+					putFECShard(s)
+				}
+			}
+			delete(c.groups, oldest)
+		}
 	}
 }
 

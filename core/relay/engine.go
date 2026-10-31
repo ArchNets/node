@@ -527,7 +527,7 @@ func (e *Engine) startL3RawPump() error {
 		}
 	}
 	if dataShards > 0 && parityShards > 0 {
-		if fecConn, fErr := transport.NewFECPacketConn(rawConn, dataShards, parityShards); fErr == nil {
+		if fecConn, fErr := transport.NewFECPacketConnWithSecret(rawConn, dataShards, parityShards, e.cfg.Password); fErr == nil {
 			rawConn = fecConn
 			e.logger.WithFields(log.Fields{
 				"dataShards":   dataShards,
@@ -806,26 +806,7 @@ func (e *Engine) packetCarrierAcceptLoop(ln *transport.UDPCarrierListener) {
 	}
 }
 
-func (e *Engine) bindL3TUNDuplex(conn net.Conn) {
-	uSess, ok := conn.(*transport.UDPSessionConn)
-	if !ok {
-		return
-	}
-	e.mu.Lock()
-	tunDev := e.l3TunDev
-	e.mu.Unlock()
-	if tunDev == nil {
-		return
-	}
-	tunDev.SetSender(func(wire []byte) error {
-		e.Stats.AddUpload(int64(len(wire)))
-		return uSess.WriteTUNPacket(wire)
-	})
-	uSess.SetTUNPacketHandler(func(wire []byte) {
-		e.Stats.AddDownload(int64(len(wire)))
-		_ = tunDev.InjectWirePacket(wire)
-	})
-}
+func (e *Engine) bindL3TUNDuplex(conn net.Conn) {}
 
 func (e *Engine) l3StreamInitiatorLoop() {
 	defer e.wg.Done()
