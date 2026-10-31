@@ -545,95 +545,123 @@ func discoverLocalIPv4For(dst net.IP) net.IP {
 
 // ListenXDICarrier starts an XDI (ICMP Echo) listener. If the process has CAP_NET_RAW / root,
 // it binds a raw "ip4:icmp" socket with direction-tag filtering and iptables echo guard.
-func ListenXDICarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil || host == "" {
-		host = "0.0.0.0"
-	}
-	tag := deriveScopedTag(password, 1, port)
-	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := openBestRawConn(1, "ip4:icmp", host, "", 0); rErr == nil {
-			ident := uint16(port & 0xFFFF)
-			wrapped := &icmpPacketConn{
-				PacketConn: rawConn,
-				isServer:   true,
-				ident:      ident,
-				tag:        tag,
-				echoRule:   installXDIEchoGuard(ident),
-			}
-			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
-		}
-	}
-	return ListenUDPCarrier(addr, password, true)
+func ListenXDICarrier(addr, password string, port int, settings ...KCPSettings) (*UDPCarrierListener, *net.UDPConn, error) {
+ s := DefaultKCPSettings(true)
+ if len(settings) > 0 {
+  s = settings[0]
+ }
+ if s.MTU > 1230 {
+  s.MTU = 1230 // Account for 28B IPv4+ICMP + 5B XDI metadata
+ }
+ host, _, err := net.SplitHostPort(addr)
+ if err != nil || host == "" {
+  host = "0.0.0.0"
+ }
+ tag := deriveScopedTag(password, 1, port)
+ if os.Geteuid() == 0 && host != "127.0.0.1" {
+  if rawConn, rErr := openBestRawConn(1, "ip4:icmp", host, "", 0); rErr == nil {
+   ident := uint16(port & 0xFFFF)
+   wrapped := &icmpPacketConn{
+    PacketConn: rawConn,
+    isServer:   true,
+    ident:      ident,
+    tag:        tag,
+    echoRule:   installXDIEchoGuard(ident),
+   }
+   return newPacketCarrierListenerWithSettings(wrapped, password, s), nil, nil
+  }
+ }
+ return ListenUDPCarrierWithSettings(addr, password, s)
 }
 
 // DialXDICarrier dials an XDI (ICMP Echo) session to addr.
-func DialXDICarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	tag := deriveScopedTag(password, 1, port)
-	if os.Geteuid() == 0 && host != "127.0.0.1" {
-		if rawConn, rErr := openBestRawConn(1, "ip4:icmp", "0.0.0.0", "", 0); rErr == nil {
-			ident := uint16(port & 0xFFFF)
-			wrapped := &icmpPacketConn{
-				PacketConn: rawConn,
-				isServer:   false,
-				ident:      ident,
-				tag:        tag,
-			}
-			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
-			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
-		}
-	}
-	return DialUDPCarrier(ctx, addr, password, true)
+func DialXDICarrier(ctx context.Context, addr, password string, port int, settings ...KCPSettings) (net.Conn, error) {
+ s := DefaultKCPSettings(true)
+ if len(settings) > 0 {
+  s = settings[0]
+ }
+ if s.MTU > 1230 {
+  s.MTU = 1230
+ }
+ host, _, err := net.SplitHostPort(addr)
+ if err != nil {
+  host = addr
+ }
+ tag := deriveScopedTag(password, 1, port)
+ if os.Geteuid() == 0 && host != "127.0.0.1" {
+  if rawConn, rErr := openBestRawConn(1, "ip4:icmp", "0.0.0.0", "", 0); rErr == nil {
+   ident := uint16(port & 0xFFFF)
+   wrapped := &icmpPacketConn{
+    PacketConn: rawConn,
+    isServer:   false,
+    ident:      ident,
+    tag:        tag,
+   }
+   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+   return dialPacketCarrierWithSettings(ctx, wrapped, targetAddr, password, s)
+  }
+ }
+ return DialUDPCarrierWithSettings(ctx, addr, password, s)
 }
 
 // ListenPCKCarrier starts a PCK (Stateless Raw TCP Packet + KCP/FEC) carrier listener.
-func ListenPCKCarrier(addr, password string, port int) (*UDPCarrierListener, *net.UDPConn, error) {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil || host == "" {
-		host = "0.0.0.0"
-	}
-	pNum, pErr := strconv.ParseUint(portStr, 10, 16)
-	if port <= 0 && pErr == nil {
-		port = int(pNum)
-	}
-	tag := deriveScopedTag(password, 6, port)
-	if os.Geteuid() == 0 && port > 0 && port <= 65535 && host != "127.0.0.1" {
-		p16 := uint16(port)
-		if rawConn, rErr := openBestRawConn(6, "ip4:tcp", host, "", p16); rErr == nil {
-			wrapped := newPCKPacketConn(rawConn, true, p16, 0, tag)
-			return newPacketCarrierListener(wrapped, nil, password, true), nil, nil
-		}
-	}
-	return ListenUDPCarrier(addr, password, true)
+func ListenPCKCarrier(addr, password string, port int, settings ...KCPSettings) (*UDPCarrierListener, *net.UDPConn, error) {
+ s := DefaultKCPSettings(true)
+ if len(settings) > 0 {
+  s = settings[0]
+ }
+ if s.MTU > 1200 {
+  s.MTU = 1200 // Account for 52B IPv4+TCP+TSopt + 4B PCK tag
+ }
+ host, portStr, err := net.SplitHostPort(addr)
+ if err != nil || host == "" {
+  host = "0.0.0.0"
+ }
+ pNum, pErr := strconv.ParseUint(portStr, 10, 16)
+ if port <= 0 && pErr == nil {
+  port = int(pNum)
+ }
+ tag := deriveScopedTag(password, 6, port)
+ if os.Geteuid() == 0 && port > 0 && port <= 65535 && host != "127.0.0.1" {
+  p16 := uint16(port)
+  if rawConn, rErr := openBestRawConn(6, "ip4:tcp", host, "", p16); rErr == nil {
+   wrapped := newPCKPacketConn(rawConn, true, p16, 0, tag)
+   return newPacketCarrierListenerWithSettings(wrapped, password, s), nil, nil
+  }
+ }
+ return ListenUDPCarrierWithSettings(addr, password, s)
 }
 
 // DialPCKCarrier dials a PCK (Stateless Raw TCP Packet + KCP/FEC) carrier session.
-func DialPCKCarrier(ctx context.Context, addr, password string, port int) (net.Conn, error) {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	pNum, pErr := strconv.ParseUint(portStr, 10, 16)
-	if port <= 0 && pErr == nil {
-		port = int(pNum)
-	}
-	tag := deriveScopedTag(password, 6, port)
-	if os.Geteuid() == 0 && port > 0 && port <= 65535 && host != "127.0.0.1" {
-		p16 := uint16(port)
-		var rnd [2]byte
-		_, _ = rand.Read(rnd[:])
-		localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
-		if rawConn, rErr := openBestRawConn(6, "ip4:tcp", "0.0.0.0", "", localPort); rErr == nil {
-			wrapped := newPCKPacketConn(rawConn, false, localPort, p16, tag)
-			targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
-			return dialPacketCarrier(ctx, wrapped, targetAddr, password, true)
-		}
-	}
-	return DialUDPCarrier(ctx, addr, password, true)
+func DialPCKCarrier(ctx context.Context, addr, password string, port int, settings ...KCPSettings) (net.Conn, error) {
+ s := DefaultKCPSettings(true)
+ if len(settings) > 0 {
+  s = settings[0]
+ }
+ if s.MTU > 1200 {
+  s.MTU = 1200
+ }
+ host, portStr, err := net.SplitHostPort(addr)
+ if err != nil {
+  host = addr
+ }
+ pNum, pErr := strconv.ParseUint(portStr, 10, 16)
+ if port <= 0 && pErr == nil {
+  port = int(pNum)
+ }
+ tag := deriveScopedTag(password, 6, port)
+ if os.Geteuid() == 0 && port > 0 && port <= 65535 && host != "127.0.0.1" {
+  p16 := uint16(port)
+  var rnd [2]byte
+  _, _ = rand.Read(rnd[:])
+  localPort := uint16(20000 + (int(rnd[0])<<8|int(rnd[1]))%25000)
+  if rawConn, rErr := openBestRawConn(6, "ip4:tcp", "0.0.0.0", "", localPort); rErr == nil {
+   wrapped := newPCKPacketConn(rawConn, false, localPort, p16, tag)
+   targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
+   return dialPacketCarrierWithSettings(ctx, wrapped, targetAddr, password, s)
+  }
+ }
+ return DialUDPCarrierWithSettings(ctx, addr, password, s)
 }
 
 // newRawProtoPacketConn wraps an IPv4 raw packet connection (for Protocol 58 BIP or Protocol 4 IPIP).

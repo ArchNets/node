@@ -709,11 +709,12 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 		var uLn *transport.UDPCarrierListener
 		var uConn *net.UDPConn
 		var err error
+		kcpCfg := e.kcpSettings()
 		switch e.cfg.Transport {
 		case "xdi", "l3-xdi":
-			uLn, uConn, err = transport.ListenXDICarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
+			uLn, uConn, err = transport.ListenXDICarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "pck", "l3-pck", "l3-sni":
-			uLn, uConn, err = transport.ListenPCKCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
+			uLn, uConn, err = transport.ListenPCKCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "l3-bip":
 			uLn, uConn, err = transport.ListenBIPCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-ipip":
@@ -1533,11 +1534,12 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 
 	if e.isPacketTransport() {
 		addr := net.JoinHostPort(candidates[0], strconv.Itoa(e.cfg.CarrierPort))
+		kcpCfg := e.kcpSettings()
 		switch e.cfg.Transport {
 		case "xdi", "l3-xdi":
-			return transport.DialXDICarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
+			return transport.DialXDICarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "pck", "l3-pck", "l3-sni":
-			return transport.DialPCKCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
+			return transport.DialPCKCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "l3-bip":
 			return transport.DialBIPCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-ipip":
