@@ -163,11 +163,12 @@ type FECPacketConn struct {
 	readMu    sync.Mutex
 	readFrame []byte
 
-	recvMu        sync.Mutex
-	shardSet      map[uint32]*fecShardSet
-	newestShardID uint32
-	decodeCache   [][]byte
-	flagCache     []bool
+	recvMu          sync.Mutex
+	shardSet        map[uint32]*fecShardSet
+	newestShardID   uint32
+	hasNewestShard  bool
+	decodeCache     [][]byte
+	flagCache       []bool
 	autoTune      autoTune
 	shouldTune    bool
 	pending       []fecRebuiltPacket
@@ -278,6 +279,9 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	c.next = (c.next + 1) % c.paws
 
 	// Cache shard for parity calculation
+	if cap(c.shardCache[c.shardCount]) < bodyLen {
+		c.shardCache[c.shardCount] = make([]byte, bodyLen)
+	}
 	shardBuf := c.shardCache[c.shardCount][:bodyLen]
 	copy(shardBuf, c.sendFrame[FECHeaderLen:frameSize])
 	c.shardCache[c.shardCount] = shardBuf
@@ -287,15 +291,19 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	}
 	c.sendPeer = addr
 
-	// Header encryption if configured
+	// Header encryption if configured (6-byte FEC header only; payload size stays intact)
 	if c.headerMask != 0 {
-		hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
-		binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+		h0 := binary.LittleEndian.Uint32(c.sendFrame[0:4]) ^ uint32(c.headerMask>>32)
+		h1 := binary.LittleEndian.Uint16(c.sendFrame[4:6]) ^ uint16(c.headerMask&0xFFFF)
+		binary.LittleEndian.PutUint32(c.sendFrame[0:4], h0)
+		binary.LittleEndian.PutUint16(c.sendFrame[4:6], h1)
 	}
 	n, err := c.below.WriteTo(c.sendFrame, addr)
 	if c.headerMask != 0 {
-		hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
-		binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+		h0 := binary.LittleEndian.Uint32(c.sendFrame[0:4]) ^ uint32(c.headerMask>>32)
+		h1 := binary.LittleEndian.Uint16(c.sendFrame[4:6]) ^ uint16(c.headerMask&0xFFFF)
+		binary.LittleEndian.PutUint32(c.sendFrame[0:4], h0)
+		binary.LittleEndian.PutUint16(c.sendFrame[4:6], h1)
 	}
 
 	// Reed-Solomon parity generation upon collecting dataShards
@@ -306,13 +314,23 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 			for i := 0; i < c.dataShards; i++ {
 				shard := c.shardCache[i]
 				slen := len(shard)
-				c.shardCache[i] = c.shardCache[i][:c.maxSize]
-				clear(c.shardCache[i][slen:c.maxSize])
+				if cap(shard) < c.maxSize {
+					padded := make([]byte, c.maxSize)
+					copy(padded, shard)
+					c.shardCache[i] = padded
+				} else {
+					c.shardCache[i] = shard[:c.maxSize]
+					clear(c.shardCache[i][slen:c.maxSize])
+				}
 				c.encodeCache[i] = c.shardCache[i][:c.maxSize]
 			}
 			for i := c.dataShards; i < c.totalShards; i++ {
-				c.shardCache[i] = c.shardCache[i][:c.maxSize]
-				clear(c.shardCache[i])
+				if cap(c.shardCache[i]) < c.maxSize {
+					c.shardCache[i] = make([]byte, c.maxSize)
+				} else {
+					c.shardCache[i] = c.shardCache[i][:c.maxSize]
+					clear(c.shardCache[i])
+				}
 				c.encodeCache[i] = c.shardCache[i][:c.maxSize]
 			}
 
@@ -330,13 +348,17 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 					c.next = (c.next + 1) % c.paws
 
 					if c.headerMask != 0 {
-						hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
-						binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+						h0 := binary.LittleEndian.Uint32(c.sendFrame[0:4]) ^ uint32(c.headerMask>>32)
+						h1 := binary.LittleEndian.Uint16(c.sendFrame[4:6]) ^ uint16(c.headerMask&0xFFFF)
+						binary.LittleEndian.PutUint32(c.sendFrame[0:4], h0)
+						binary.LittleEndian.PutUint16(c.sendFrame[4:6], h1)
 					}
 					_, _ = c.below.WriteTo(c.sendFrame, c.sendPeer)
 					if c.headerMask != 0 {
-						hVal := binary.BigEndian.Uint64(c.sendFrame[:8])
-						binary.BigEndian.PutUint64(c.sendFrame[:8], hVal^c.headerMask)
+						h0 := binary.LittleEndian.Uint32(c.sendFrame[0:4]) ^ uint32(c.headerMask>>32)
+						h1 := binary.LittleEndian.Uint16(c.sendFrame[4:6]) ^ uint16(c.headerMask&0xFFFF)
+						binary.LittleEndian.PutUint32(c.sendFrame[0:4], h0)
+						binary.LittleEndian.PutUint16(c.sendFrame[4:6], h1)
 					}
 				}
 			} else {
@@ -384,17 +406,21 @@ func (c *FECPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			continue
 		}
 
-		if c.headerMask != 0 && n >= 8 {
-			hVal := binary.BigEndian.Uint64(buf[:8])
-			binary.BigEndian.PutUint64(buf[:8], hVal^c.headerMask)
+		if c.headerMask != 0 {
+			h0 := binary.LittleEndian.Uint32(buf[0:4]) ^ uint32(c.headerMask>>32)
+			h1 := binary.LittleEndian.Uint16(buf[4:6]) ^ uint16(c.headerMask&0xFFFF)
+			binary.LittleEndian.PutUint32(buf[0:4], h0)
+			binary.LittleEndian.PutUint16(buf[4:6], h1)
 		}
 
 		flag := binary.LittleEndian.Uint16(buf[4:6])
 		if flag != fecTypeData && flag != fecTypeParity {
 			// Transparent pass-through for non-FEC frames
-			if c.headerMask != 0 && n >= 8 {
-				hVal := binary.BigEndian.Uint64(buf[:8])
-				binary.BigEndian.PutUint64(buf[:8], hVal^c.headerMask)
+			if c.headerMask != 0 {
+				h0 := binary.LittleEndian.Uint32(buf[0:4]) ^ uint32(c.headerMask>>32)
+				h1 := binary.LittleEndian.Uint16(buf[4:6]) ^ uint16(c.headerMask&0xFFFF)
+				binary.LittleEndian.PutUint32(buf[0:4], h0)
+				binary.LittleEndian.PutUint16(buf[4:6], h1)
 			}
 			copied := copy(p, buf[:n])
 			return copied, addr, nil
@@ -561,8 +587,9 @@ func (c *FECPacketConn) absorb(raw []byte, addr net.Addr) ([]byte, bool) {
 		delete(c.shardSet, shardID)
 	}
 
-	if int32((shardID-c.newestShardID)*uint32(c.totalShards)) > 0 {
+	if !c.hasNewestShard || int32((shardID-c.newestShardID)*uint32(c.totalShards)) > 0 {
 		c.newestShardID = shardID
+		c.hasNewestShard = true
 	}
 	c.discardShardsLocked()
 

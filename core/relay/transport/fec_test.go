@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -173,31 +172,54 @@ func TestFECPacketConn_AutoTunePulseDetector(t *testing.T) {
 
 func TestFECPacketConn_EncryptedHeaders(t *testing.T) {
 	rawA, rawB := newPipePacketConnPair()
+	dropCh := make(chan []byte, 1024)
+	droppedPipe := &pipePacketConn{
+		localAddr: rawB.localAddr,
+		peer:      rawA,
+		ch:        dropCh,
+	}
+
 	fecA, err := NewFECPacketConnWithSecret(rawA, 8, 4, "secret-tunnel-password")
 	if err != nil {
 		t.Fatalf("fecA: %v", err)
 	}
 	defer fecA.Close()
 
-	fecB, err := NewFECPacketConnWithSecret(rawB, 8, 4, "secret-tunnel-password")
+	fecB, err := NewFECPacketConnWithSecret(droppedPipe, 8, 4, "secret-tunnel-password")
 	if err != nil {
 		t.Fatalf("fecB: %v", err)
 	}
 	defer fecB.Close()
 
-	testMsg := []byte("OBFUSCATED_HEADER_PAYLOAD")
-	_, err = fecA.WriteTo(testMsg, rawB.localAddr)
-	if err != nil {
-		t.Fatalf("WriteTo: %v", err)
+	// Drop 3 out of 8 data packets while header encryption is active!
+	var pktCount int
+	go func() {
+		defer close(dropCh)
+		for pkt := range rawB.ch {
+			pktCount++
+			if pktCount == 2 || pktCount == 4 || pktCount == 7 {
+				continue // Drop 3 encrypted packets!
+			}
+			dropCh <- pkt
+		}
+	}()
+
+	for i := 0; i < 8; i++ {
+		testMsg := []byte(fmt.Sprintf("ENCRYPTED_FEC_PACKET_%02d", i))
+		if _, err := fecA.WriteTo(testMsg, rawB.localAddr); err != nil {
+			t.Fatalf("WriteTo %d: %v", i, err)
+		}
 	}
 
 	readBuf := make([]byte, 1024)
-	n, _, err := fecB.ReadFrom(readBuf)
-	if err != nil {
-		t.Fatalf("ReadFrom: %v", err)
+	for i := 0; i < 8; i++ {
+		n, _, err := fecB.ReadFrom(readBuf)
+		if err != nil {
+			t.Fatalf("ReadFrom %d: %v", i, err)
+		}
+		if n == 0 {
+			t.Fatalf("empty packet recovered at %d", i)
+		}
 	}
-	if !bytes.Equal(readBuf[:n], testMsg) {
-		t.Fatalf("got %s, want %s", readBuf[:n], testMsg)
-	}
-	t.Logf("✓ Verified: Encrypted/obfuscated FEC headers round-trip cleanly")
+	t.Logf("✓ Verified: Encrypted FEC headers recovered 3/8 dropped packets cleanly")
 }
