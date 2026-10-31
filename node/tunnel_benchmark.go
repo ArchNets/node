@@ -1,7 +1,9 @@
 package node
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"math"
 	"net"
 	"sort"
@@ -450,6 +452,77 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 	results := make([]panel.ScanResultItem, 0, total)
 	exitCheckedIn := false
 
+	// Start 1-by-1 Lockstep Benchmark Coordinator on sandboxPort (e.g. 58443)
+	// so Exit starts and stops each candidate sandbox strictly one by one.
+	coordAddr := net.JoinHostPort("0.0.0.0", strconv.Itoa(sandboxPort))
+	coordLn, coordErr := transport.ListenTCP(ctx, coordAddr)
+	var coordConn net.Conn
+	var coordReader *bufio.Reader
+	coordReadyCh := make(chan net.Conn, 1)
+	if coordErr == nil {
+		defer coordLn.Close()
+		go func() {
+			for {
+				raw, aErr := coordLn.Accept()
+				if aErr != nil {
+					return
+				}
+				action, inspected, iErr := transport.InspectTCPTraffic(raw, password, false)
+				if iErr != nil || action != transport.ActionReverseCarrier {
+					_ = raw.Close()
+					continue
+				}
+				select {
+				case coordReadyCh <- inspected:
+					return
+				default:
+					_ = inspected.Close()
+				}
+			}
+		}()
+
+		c.logger.WithField("coordPort", sandboxPort).Info("[Benchmark] Waiting for Exit node to connect to 1-by-1 lockstep coordinator...")
+		select {
+		case <-ctx.Done():
+			c.handleBenchmarkInterruption(t.Id, sCtx.getSignal(), scanMode, results, 0)
+			return
+		case conn := <-coordReadyCh:
+			coordConn = conn
+			coordReader = bufio.NewReader(coordConn)
+			exitCheckedIn = true
+			c.logger.WithField("remote", conn.RemoteAddr().String()).Info("[Benchmark] Exit node connected to 1-by-1 lockstep coordinator")
+		case <-time.After(35 * time.Second):
+			c.logger.Warn("[Benchmark] Exit coordinator did not connect within 35s; proceeding with standalone candidate evaluation")
+		}
+	}
+	defer func() {
+		if coordConn != nil {
+			_ = coordConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+			_, _ = fmt.Fprintf(coordConn, "STOP\n")
+			_ = coordConn.Close()
+		}
+	}()
+
+	requestExitCandidate := func(candIdx int) bool {
+		if coordConn == nil || coordReader == nil {
+			return false
+		}
+		_ = coordConn.SetDeadline(time.Now().Add(8 * time.Second))
+		if _, wErr := fmt.Fprintf(coordConn, "START %d\n", candIdx); wErr != nil {
+			_ = coordConn.Close()
+			coordConn = nil
+			return false
+		}
+		line, rErr := coordReader.ReadString('\n')
+		_ = coordConn.SetDeadline(time.Time{})
+		if rErr != nil {
+			_ = coordConn.Close()
+			coordConn = nil
+			return false
+		}
+		return strings.HasPrefix(strings.TrimSpace(line), fmt.Sprintf("READY %d", candIdx))
+	}
+
 	for idx, cand := range candidates {
 		select {
 		case <-ctx.Done():
@@ -462,19 +535,17 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			continue
 		}
 
-		// Wait up to 35s on the first candidate so Exit has time to poll /v2/server/:id/tunnel (30s interval)
-		// and launch its parallel sandbox engines. Once Exit checks in once, subsequent candidates need only 4s.
-		waitTimeout := 4 * time.Second
+		waitTimeout := 5 * time.Second
 		if !exitCheckedIn {
 			waitTimeout = 35 * time.Second
 		} else {
 			spec := transport.GetTransportSpec(cand.Transport)
 			if spec.IsPacket || spec.IsQuic || spec.NeedsTLSServerCfg || spec.IsL3 {
-				waitTimeout = 12 * time.Second
+				waitTimeout = 7 * time.Second
 			}
 		}
 
-		item := c.evaluateCandidate(ctx, t, cand, sandboxPort, password, waitTimeout)
+		item := c.evaluateCandidate(ctx, t, cand, sandboxPort, password, waitTimeout, requestExitCandidate)
 		if item != nil {
 			exitCheckedIn = true
 			results = append(results, *item)
@@ -524,6 +595,7 @@ func (c *TunnelController) evaluateCandidate(
 	sandboxPort int,
 	password string,
 	waitTimeout time.Duration,
+	requestExitCandidate func(candIdx int) bool,
 ) *panel.ScanResultItem {
 	c.logger.WithFields(log.Fields{
 		"tunnel_id": t.Id,
@@ -602,6 +674,9 @@ func (c *TunnelController) evaluateCandidate(
 
 	var sample *telemetry.BandwidthSample
 	if err := sandboxEngine.Start(); err == nil {
+		if requestExitCandidate != nil {
+			requestExitCandidate(cand.Index)
+		}
 		waitDeadline := time.Now().Add(waitTimeout)
 		for time.Now().Before(waitDeadline) {
 			select {
@@ -795,30 +870,13 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 		// Always bind 0.0.0.0 on Exit node because cloud VPS instances (Hetzner, AWS, etc.)
 		// use internal private IPs with 1:1 NAT; binding t.LocalIP fails with EADDRNOTAVAIL.
 
-		// Start all candidate sandbox engines concurrently on their dedicated port (sandboxPort + cand.Index)
-		// so Entry and Exit never suffer from 30-second config poll clock skew.
-		c.logger.WithFields(log.Fields{
-			"tunnel_id":  t.Id,
-			"candidates": len(candidates),
-			"basePort":   sandboxPort,
-			"entryIP":    entryIP,
-		}).Info("[Benchmark] Exit node starting parallel candidate sandbox engines")
-
-		for _, cand := range candidates {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
+		startSingleExitCandidate := func(cand BenchmarkCandidate) *relay.Engine {
 			candDirection := cand.Direction
 			if candDirection == "" {
 				candDirection = direction
 			}
 			candPort := sandboxPort + cand.Index
 
-			// For Direct mode, Exit is the Listener, so ListenIP is exitBindIP
-			// For Reverse mode, Exit dials Entry, so EntryServerIP is entryIP
 			exitCertMode := ""
 			spec := transport.GetTransportSpec(cand.Transport)
 			if spec.NeedsTLSServerCfg || spec.IsQuic {
@@ -836,7 +894,6 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 						spoofProfile = t.RelayConfig.SpoofProfile
 					}
 				} else {
-					// Benchmark testing true forged-source IP capability between Entry and Exit
 					spoofSrcIP = "82.115.26.174"
 					spoofPeerSrcIP = "185.143.234.201"
 				}
@@ -864,7 +921,102 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 				SpoofProfile:       spoofProfile,
 				Logger:             c.logger,
 			})
-			if err := eng.Start(); err == nil {
+			if err := eng.Start(); err != nil {
+				c.logger.WithFields(log.Fields{"idx": cand.Index, "transport": cand.Transport, "err": err}).Warn("[Benchmark] Exit sandbox engine failed to start")
+				return nil
+			}
+			return eng
+		}
+
+		candByIdx := make(map[int]BenchmarkCandidate, len(candidates))
+		for _, cand := range candidates {
+			candByIdx[cand.Index] = cand
+		}
+
+		// Connect to Entry's 1-by-1 Lockstep Coordinator on entryIP:sandboxPort
+		coordAddr := net.JoinHostPort(entryIP, strconv.Itoa(sandboxPort))
+		var coordConn net.Conn
+		dialDeadline := time.Now().Add(45 * time.Second)
+		for time.Now().Before(dialDeadline) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			rawDial := func() (net.Conn, error) {
+				return transport.DialTCPContext(ctx, coordAddr, 3*time.Second)
+			}
+			conn, dErr := transport.DialTCPCarrier(rawDial, password)
+			if dErr == nil {
+				coordConn = conn
+				break
+			}
+			time.Sleep(400 * time.Millisecond)
+		}
+
+		if coordConn != nil {
+			defer coordConn.Close()
+			c.logger.WithField("coordAddr", coordAddr).Info("[Benchmark] Exit connected to Entry 1-by-1 lockstep coordinator")
+			reader := bufio.NewReader(coordConn)
+			var activeEng *relay.Engine
+			defer func() {
+				if activeEng != nil {
+					_ = activeEng.Close()
+				}
+			}()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				_ = coordConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+				line, rErr := reader.ReadString('\n')
+				if rErr != nil {
+					return
+				}
+				line = strings.TrimSpace(line)
+				if line == "STOP" {
+					return
+				}
+				if strings.HasPrefix(line, "START ") {
+					idxStr := strings.TrimSpace(strings.TrimPrefix(line, "START "))
+					candIdx, pErr := strconv.Atoi(idxStr)
+					if pErr != nil {
+						continue
+					}
+					if activeEng != nil {
+						_ = activeEng.Close()
+						activeEng = nil
+						state.mu.Lock()
+						state.engines = nil
+						state.mu.Unlock()
+						time.Sleep(50 * time.Millisecond)
+					}
+					if cand, ok := candByIdx[candIdx]; ok {
+						activeEng = startSingleExitCandidate(cand)
+						if activeEng != nil {
+							state.mu.Lock()
+							state.engines = []*relay.Engine{activeEng}
+							state.mu.Unlock()
+						}
+					}
+					_ = coordConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+					_, _ = fmt.Fprintf(coordConn, "READY %d\n", candIdx)
+				}
+			}
+		}
+
+		// Fallback if coordinator port was unreachable: start candidates sequentially
+		c.logger.Warn("[Benchmark] Coordinator unreachable; falling back to parallel candidate sandbox engines")
+		for _, cand := range candidates {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if eng := startSingleExitCandidate(cand); eng != nil {
 				state.mu.Lock()
 				state.engines = append(state.engines, eng)
 				state.mu.Unlock()
