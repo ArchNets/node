@@ -474,8 +474,9 @@ func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnli
 
 	isDirect := t.RelayConfig != nil && strings.ToLower(t.RelayConfig.Direction) == "direct"
 	isDialer := (t.Role == "exit" && !isDirect) || (t.Role == "entry" && isDirect)
+	hasPeerActivity := eng.Stats.PoolIdleConnections.Load() > 0 || eng.Stats.ActiveConnections.Load() > 0 || deltaUpload > 0 || deltaDownload > 0
 	online := eng.IsAlive()
-	if eng.Stats.PoolIdleConnections.Load() > 0 || eng.Stats.ActiveConnections.Load() > 0 || deltaUpload > 0 || deltaDownload > 0 {
+	if hasPeerActivity {
 		online = true
 	} else if isDialer {
 		online = false
@@ -483,7 +484,11 @@ func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnli
 	curUpBps := eng.Stats.CurrentUploadBps.Load()
 	curDownBps := eng.Stats.CurrentDownloadBps.Load()
 	latency := int(eng.Stats.LatencyMs.Load())
-	if latency <= 0 {
+	if !hasPeerActivity {
+		latency = 0
+		curUpBps = 0
+		curDownBps = 0
+	} else if latency <= 0 {
 		latency = pingLatency
 	}
 	lastProbeUp, lastProbeDown, probeStatus := eng.Stats.GetLastProbeResult()
