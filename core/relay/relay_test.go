@@ -1479,3 +1479,121 @@ func TestRawCarriersAndL3TransportsEndToEnd(t *testing.T) {
 		})
 	}
 }
+
+func TestGamingModeTwinStreamUDPForwardingEndToEnd(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	gameServerUDPPort := getFreeUDPPort(t)
+	fwdUDPPort := getFreeUDPPort(t)
+
+	// Start a mock UDP game server on Exit that counts received datagrams and echoes them back
+	uAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", gameServerUDPPort))
+	if err != nil {
+		t.Fatalf("ResolveUDPAddr: %v", err)
+	}
+	gameServerConn, err := net.ListenUDP("udp", uAddr)
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer gameServerConn.Close()
+
+	var serverRecvCount int
+	var lastPeerAddr string
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, rAddr, rErr := gameServerConn.ReadFromUDP(buf)
+			if rErr != nil {
+				return
+			}
+			serverRecvCount++
+			if lastPeerAddr == "" {
+				lastPeerAddr = rAddr.String()
+			} else if lastPeerAddr != rAddr.String() {
+				t.Errorf("expected single consistent UDP source port on Exit, got %s vs %s", rAddr.String(), lastPeerAddr)
+			}
+			_, _ = gameServerConn.WriteToUDP([]byte("ACK:"+string(buf[:n])), rAddr)
+		}
+	}()
+
+	entry := NewEngine(Config{
+		TunnelID:           701,
+		Role:               "entry",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "gaming-twin-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 6,
+		Forwarders: []routing.ForwarderRule{
+			{
+				ID:         1,
+				Protocol:   "udp",
+				ListenIP:   "127.0.0.1",
+				ListenPort: fwdUDPPort,
+				TargetPort: gameServerUDPPort,
+				GamingMode: true,
+			},
+		},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("entry start: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           701,
+		Role:               "exit",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "gaming-twin-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 6,
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("exit start: %v", err)
+	}
+	defer exit.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry.Stats.PoolIdleConnections.Load() >= 4 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	playerConn, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", fwdUDPPort))
+	if err != nil {
+		t.Fatalf("player dial: %v", err)
+	}
+	defer playerConn.Close()
+
+	for i := 1; i <= 5; i++ {
+		msg := fmt.Sprintf("TICK_%d", i)
+		if _, err := playerConn.Write([]byte(msg)); err != nil {
+			t.Fatalf("player write %d: %v", i, err)
+		}
+		_ = playerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 512)
+		n, err := playerConn.Read(buf)
+		if err != nil {
+			t.Fatalf("player read %d: %v", i, err)
+		}
+		want := "ACK:" + msg
+		if string(buf[:n]) != want {
+			t.Fatalf("got %q, want %q", string(buf[:n]), want)
+		}
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if serverRecvCount != 5 {
+		t.Fatalf("expected game server to receive exactly 5 deduplicated packets, got %d", serverRecvCount)
+	}
+	t.Logf("✓ Gaming Mode Twin-Stream UDP verified: 5/5 ticks delivered with 0 duplicates and single Exit source port (%s)", lastPeerAddr)
+}

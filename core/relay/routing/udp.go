@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"io"
 	"net"
@@ -192,6 +193,14 @@ func StartUDPListenerLoop(
 					_ = stream.Close()
 					continue
 				}
+				var sessKey [8]byte
+				if gamingMode {
+					_, _ = rand.Read(sessKey[:])
+					if _, err := stream.Write(sessKey[:]); err != nil {
+						_ = stream.Close()
+						continue
+					}
+				}
 				_ = stream.SetWriteDeadline(time.Time{})
 
 				addrCopy := *clientAddr
@@ -206,8 +215,12 @@ func StartUDPListenerLoop(
 					if twin, tErr := claimStreamFn(150 * time.Millisecond); tErr == nil && twin != nil {
 						_ = twin.SetWriteDeadline(time.Now().Add(2 * time.Second))
 						if err := WriteRoutingHeader(twin, RouteProtoUDPGaming, uint16(targetPort)); err == nil {
-							_ = twin.SetWriteDeadline(time.Time{})
-							sess.StreamTwin = twin
+							if _, kErr := twin.Write(sessKey[:]); kErr == nil {
+								_ = twin.SetWriteDeadline(time.Time{})
+								sess.StreamTwin = twin
+							} else {
+								_ = twin.Close()
+							}
 						} else {
 							_ = twin.Close()
 						}
@@ -315,8 +328,165 @@ func StartUDPListenerLoop(
 	}()
 }
 
+type exitGamingSession struct {
+	key       [8]byte
+	udpConn   *net.UDPConn
+	dedup     udpSeqDeduplicator
+	txSeq     atomic.Uint32
+	mu        sync.Mutex
+	streams   []net.Conn
+	closeOnce sync.Once
+}
+
+var exitGamingSessMap sync.Map // [8]byte -> *exitGamingSession
+
+func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats) {
+	defer stream.Close()
+
+	var sessKey [8]byte
+	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(stream, sessKey[:]); err != nil {
+		return
+	}
+	_ = stream.SetReadDeadline(time.Time{})
+
+	var sess *exitGamingSession
+	if val, ok := exitGamingSessMap.Load(sessKey); ok {
+		sess = val.(*exitGamingSession)
+		sess.mu.Lock()
+		sess.streams = append(sess.streams, stream)
+		sess.mu.Unlock()
+	} else {
+		if targetIP == "" {
+			targetIP = "127.0.0.1"
+		}
+		raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(targetIP, strconv.Itoa(int(targetPort))))
+		if err != nil {
+			return
+		}
+		udpConn, err := net.DialUDP("udp", nil, raddr)
+		if err != nil {
+			return
+		}
+		_ = udpConn.SetReadBuffer(4 * 1024 * 1024)
+		_ = udpConn.SetWriteBuffer(4 * 1024 * 1024)
+		transport.SetSocketQoS(udpConn)
+
+		newSess := &exitGamingSession{
+			key:     sessKey,
+			udpConn: udpConn,
+			streams: []net.Conn{stream},
+		}
+		actual, loaded := exitGamingSessMap.LoadOrStore(sessKey, newSess)
+		if loaded {
+			_ = udpConn.Close()
+			sess = actual.(*exitGamingSession)
+			sess.mu.Lock()
+			sess.streams = append(sess.streams, stream)
+			sess.mu.Unlock()
+		} else {
+			sess = newSess
+			// Start single downlink reader from target UDP service -> replicate to all active twin streams
+			go func(gs *exitGamingSession) {
+				defer func() {
+					exitGamingSessMap.Delete(gs.key)
+					_ = gs.udpConn.Close()
+					gs.mu.Lock()
+					for _, st := range gs.streams {
+						_ = st.Close()
+					}
+					gs.mu.Unlock()
+				}()
+				buf := make([]byte, 65536)
+				for {
+					_ = gs.udpConn.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+					n, rErr := gs.udpConn.Read(buf[6:])
+					if rErr != nil {
+						return
+					}
+					if n <= 0 || n > MaxUDPFrameSize {
+						continue
+					}
+					seq := gs.txSeq.Add(1)
+					frame := getUDPFrameBuffer(6 + n)
+					binary.BigEndian.PutUint16(frame[0:2], uint16(4+n))
+					binary.BigEndian.PutUint32(frame[2:6], seq)
+					copy(frame[6:], buf[6:6+n])
+
+					gs.mu.Lock()
+					activeCount := len(gs.streams)
+					for _, st := range gs.streams {
+						_ = st.SetWriteDeadline(time.Now().Add(2 * time.Second))
+						_, _ = st.Write(frame)
+						_ = st.SetWriteDeadline(time.Time{})
+					}
+					gs.mu.Unlock()
+					putUDPFrameBuffer(frame)
+
+					if activeCount == 0 {
+						return
+					}
+					if stats != nil {
+						stats.AddDownload(int64(n))
+					}
+				}
+			}(sess)
+		}
+	}
+
+	if stats != nil {
+		stats.ActiveConnections.Add(1)
+		defer stats.ActiveConnections.Add(-1)
+	}
+
+	defer func() {
+		sess.mu.Lock()
+		for i, st := range sess.streams {
+			if st == stream {
+				sess.streams = append(sess.streams[:i], sess.streams[i+1:]...)
+				break
+			}
+		}
+		remaining := len(sess.streams)
+		sess.mu.Unlock()
+		if remaining == 0 {
+			exitGamingSessMap.Delete(sess.key)
+			_ = sess.udpConn.Close()
+		}
+	}()
+
+	var lenBuf [2]byte
+	payload := make([]byte, 65536)
+	for {
+		_ = stream.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+		if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
+			return
+		}
+		frameLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+		if frameLen < 4 || frameLen > MaxUDPFrameSize {
+			return
+		}
+		if _, err := io.ReadFull(stream, payload[:frameLen]); err != nil {
+			return
+		}
+		seq := binary.BigEndian.Uint32(payload[:4])
+		if !sess.dedup.checkAndRecord(seq) {
+			continue // Duplicate dropped; twin stream already delivered this packet!
+		}
+		data := payload[4:frameLen]
+		_ = sess.udpConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if n, err := sess.udpConn.Write(data); err == nil && n > 0 && stats != nil {
+			stats.AddUpload(int64(n))
+		}
+	}
+}
+
 // HandleExitUDPForward handles exit UDP stream by un-framing datagrams to target UDP socket.
 func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats, gamingMode bool) {
+	if gamingMode {
+		handleExitGamingUDPForward(stream, targetIP, targetPort, stats)
+		return
+	}
 	defer stream.Close()
 
 	if targetIP == "" {

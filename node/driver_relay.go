@@ -376,8 +376,18 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	return nil
 }
 
+func hasGamingForwarder(rules []routing.ForwarderRule) bool {
+	for _, r := range rules {
+		if r.GamingMode {
+			return true
+		}
+	}
+	return false
+}
+
 func carrierSettingsEqual(a, b relay.Config) bool {
 	return a.Transport == b.Transport &&
+		hasGamingForwarder(a.Forwarders) == hasGamingForwarder(b.Forwarders) &&
 		a.CarrierPort == b.CarrierPort &&
 		a.Password == b.Password &&
 		a.SNI == b.SNI &&

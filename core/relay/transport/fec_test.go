@@ -147,20 +147,35 @@ func TestFECPacketConn_LossRecovery(t *testing.T) {
 
 func TestFECPacketConn_SparsePacketFlush(t *testing.T) {
 	rawA, rawB := newPipePacketConnPair()
+	dropCh := make(chan []byte, 1024)
+	droppedPipe := &pipePacketConn{
+		localAddr: rawB.localAddr,
+		peer:      rawA,
+		ch:        dropCh,
+	}
+
 	fecA, _ := NewFECPacketConn(rawA, 10, 3)
 	defer fecA.Close()
-	fecB, _ := NewFECPacketConn(rawB, 10, 3)
+	fecB, _ := NewFECPacketConn(droppedPipe, 10, 3)
 	defer fecB.Close()
 
+	// Drop the lone data packet on the wire so ONLY the 8ms-flushed parity shards arrive!
+	go func() {
+		defer close(dropCh)
+		for pkt := range rawB.ch {
+			if len(pkt) >= FECHeaderLen && pkt[0] == fecKindData {
+				continue // Drop the lone data packet!
+			}
+			dropCh <- pkt
+		}
+	}()
+
 	// Send just 1 lone packet (sparse game tick)
-	testMsg := []byte("SPARSE_GAME_TICK")
+	testMsg := []byte("SPARSE_GAME_TICK_RECOVERED_FROM_PARITY")
 	_, err := fecA.WriteTo(testMsg, rawB.localAddr)
 	if err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-
-	// Wait 25ms to allow the 8ms flush timer to fire and emit parity shards
-	time.Sleep(25 * time.Millisecond)
 
 	readBuf := make([]byte, 1024)
 	n, _, err := fecB.ReadFrom(readBuf)
@@ -170,5 +185,5 @@ func TestFECPacketConn_SparsePacketFlush(t *testing.T) {
 	if !bytes.Equal(readBuf[:n], testMsg) {
 		t.Fatalf("got %s, want %s", readBuf[:n], testMsg)
 	}
-	t.Logf("✓ Verified: Sparse packet flushed and delivered immediately")
+	t.Logf("✓ Verified: Dropped lone sparse gaming packet reconstructed from 8ms parity flush!")
 }

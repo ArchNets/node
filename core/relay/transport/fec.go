@@ -199,10 +199,11 @@ func (c *FECPacketConn) flushParityLocked() {
 	}
 
 	size := c.sendMax
+	actualCount := c.sendIdx
 	// Zero-pad missing data shards if partial flush
 	for i := 0; i < c.dataShards; i++ {
 		shard := c.sendPad[i]
-		if i >= c.sendIdx || shard == nil {
+		if i >= actualCount || shard == nil {
 			shard = make([]byte, size)
 			c.sendPad[i] = shard
 		} else if len(shard) < size {
@@ -227,8 +228,11 @@ func (c *FECPacketConn) flushParityLocked() {
 		} else {
 			c.sendFrame = c.sendFrame[:frameSize]
 		}
+		// Encode actualCount (1..dataShards) in byte 0 for parity shards so the receiver
+		// knows how many data shards were actually transmitted in partial/sparse groups.
+		parityKind := byte(actualCount)
 		for i := c.dataShards; i < c.totalShards; i++ {
-			c.sendFrame[0] = fecKindParity
+			c.sendFrame[0] = parityKind
 			binary.BigEndian.PutUint32(c.sendFrame[1:5], c.sendGrp)
 			c.sendFrame[5] = byte(i)
 			copy(c.sendFrame[FECHeaderLen:], c.sendPad[i])
@@ -268,7 +272,7 @@ func (c *FECPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		}
 
 		kind := buf[0]
-		if kind != fecKindData && kind != fecKindParity {
+		if int(kind) > c.dataShards {
 			// Transparent pass-through for non-FEC frames
 			copied := copy(p, buf[:n])
 			return copied, addr, nil
@@ -308,7 +312,8 @@ func (c *FECPacketConn) absorb(kind byte, group uint32, index int, body []byte, 
 	c.recvMu.Lock()
 	defer c.recvMu.Unlock()
 
-	if index >= c.totalShards || (kind == fecKindData && index >= c.dataShards) || (kind == fecKindParity && index < c.dataShards) {
+	isParity := kind >= 1 && int(kind) <= c.dataShards
+	if index >= c.totalShards || (kind == fecKindData && index >= c.dataShards) || (isParity && index < c.dataShards) {
 		return nil, false
 	}
 
@@ -330,8 +335,22 @@ func (c *FECPacketConn) absorb(kind byte, group uint32, index int, body []byte, 
 		if index < c.dataShards {
 			g.haveData++
 		}
-		if kind == fecKindParity && g.size == 0 {
-			g.size = len(body)
+		if isParity {
+			if g.size == 0 {
+				g.size = len(body)
+			}
+			// If this was a partial/sparse group (actualCount < dataShards), pre-fill the
+			// unused data shard slots (actualCount .. dataShards-1) with zeros so Reed-Solomon
+			// can immediately reconstruct lost packets in sparse gaming bursts.
+			actualCount := int(kind)
+			for i := actualCount; i < c.dataShards; i++ {
+				if g.shards[i] == nil {
+					g.shards[i] = make([]byte, g.size)
+					g.haveTotal++
+					g.haveData++
+					g.delivered[i] = true
+				}
+			}
 		}
 	}
 
