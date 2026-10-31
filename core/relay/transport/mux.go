@@ -177,7 +177,12 @@ func (m *MuxStreamConn) IsAlive() bool {
 	if m.sess != nil && m.sess.IsClosed() {
 		return false
 	}
-	return true
+	select {
+	case <-m.Stream.GetDieCh():
+		return false
+	default:
+		return true
+	}
 }
 
 func (m *MuxStreamConn) LocalAddr() net.Addr {

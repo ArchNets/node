@@ -487,6 +487,27 @@ func (e *Engine) isMuxTransport() bool {
 	return transport.GetTransportSpec(e.cfg.Transport).IsMux
 }
 
+func (e *Engine) kcpSettings() transport.KCPSettings {
+	useFEC := e.cfg.Transport == "kcp"
+	s := transport.DefaultKCPSettings(useFEC)
+	switch strings.ToLower(e.cfg.Preset) {
+	case "balance":
+		s.SndWnd = 256
+		s.RcvWnd = 256
+	case "aggressive":
+		s.SndWnd = 2048
+		s.RcvWnd = 2048
+	}
+	if e.cfg.KCPDataShards > 0 && e.cfg.KCPParityShards > 0 {
+		s.DataShards = e.cfg.KCPDataShards
+		s.ParityShards = e.cfg.KCPParityShards
+	}
+	if e.cfg.KCPMTU >= 576 && e.cfg.KCPMTU <= 1450 {
+		s.MTU = e.cfg.KCPMTU
+	}
+	return s
+}
+
 func (e *Engine) isL3DirectTUNMode() bool {
 	return e.l3TunDev != nil && e.isPacketTransport() && e.l3RawConn != nil
 }
@@ -719,8 +740,7 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 			}
 			uLn, uConn, err = transport.ListenSpoofCarrier(carrierAddr, e.cfg.Password, spoofOpts, e.cfg.CarrierPort)
 		default:
-			useFEC := e.cfg.Transport == "kcp"
-			uLn, uConn, err = transport.ListenUDPCarrier(carrierAddr, e.cfg.Password, useFEC)
+			uLn, uConn, err = transport.ListenUDPCarrierWithSettings(carrierAddr, e.cfg.Password, e.kcpSettings())
 		}
 		if err != nil {
 			return fmt.Errorf("listen packet carrier (%s) on %s: %w", e.cfg.Transport, carrierAddr, err)
@@ -1544,8 +1564,7 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 			}
 			return transport.DialSpoofCarrier(e.ctx, addr, e.cfg.Password, spoofOpts, e.cfg.CarrierPort)
 		default:
-			useFEC := e.cfg.Transport == "kcp"
-			return transport.DialUDPCarrier(e.ctx, addr, e.cfg.Password, useFEC)
+			return transport.DialUDPCarrierWithSettings(e.ctx, addr, e.cfg.Password, e.kcpSettings())
 		}
 	}
 

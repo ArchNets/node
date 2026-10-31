@@ -88,26 +88,15 @@ type UDPCarrierListener struct {
 }
 
 func (l *UDPCarrierListener) Accept(ctx context.Context) (net.Conn, error) {
-	type acceptRes struct {
-		sess *kcp.UDPSession
-		err  error
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	resCh := make(chan acceptRes, 1)
-	go func() {
-		sess, err := l.ln.AcceptKCP()
-		resCh <- acceptRes{sess: sess, err: err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-resCh:
-		if res.err != nil {
-			return nil, res.err
-		}
-		ApplyKCPSettings(res.sess, l.settings)
-		return IdleAwareKCP(res.sess, l.settings), nil
+	sess, err := l.ln.AcceptKCP()
+	if err != nil {
+		return nil, err
 	}
+	ApplyKCPSettings(sess, l.settings)
+	return IdleAwareKCP(sess, l.settings), nil
 }
 
 func (l *UDPCarrierListener) Close() error {
@@ -147,7 +136,11 @@ func newPacketCarrierListener(pconn net.PacketConn, udpConn *net.UDPConn, passwo
 
 // ListenUDPCarrier starts a high-performance UDP listener with KCP + Reed-Solomon FEC.
 func ListenUDPCarrier(addr, password string, useFEC bool) (*UDPCarrierListener, *net.UDPConn, error) {
-	settings := DefaultKCPSettings(useFEC)
+	return ListenUDPCarrierWithSettings(addr, password, DefaultKCPSettings(useFEC))
+}
+
+// ListenUDPCarrierWithSettings starts a UDP KCP listener using custom KCPSettings.
+func ListenUDPCarrierWithSettings(addr, password string, settings KCPSettings) (*UDPCarrierListener, *net.UDPConn, error) {
 	block, err := kcpCrypt(password)
 	if err != nil {
 		return nil, nil, err
@@ -197,10 +190,14 @@ func dialPacketCarrier(ctx context.Context, pconn net.PacketConn, rAddr net.Addr
 
 // DialUDPCarrier dials a standard UDP KCP session with Reed-Solomon FEC.
 func DialUDPCarrier(ctx context.Context, addr, password string, useFEC bool) (net.Conn, error) {
+	return DialUDPCarrierWithSettings(ctx, addr, password, DefaultKCPSettings(useFEC))
+}
+
+// DialUDPCarrierWithSettings dials a UDP KCP session using custom KCPSettings.
+func DialUDPCarrierWithSettings(ctx context.Context, addr, password string, settings KCPSettings) (net.Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	settings := DefaultKCPSettings(useFEC)
 	block, err := kcpCrypt(password)
 	if err != nil {
 		return nil, err
