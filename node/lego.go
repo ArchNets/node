@@ -75,12 +75,18 @@ func (l *Lego) SetProvider() error {
 			return err
 		}
 	case "dns":
-		DnsEnvString := strings.Split(l.info.Protocol.CertDNSEnv, "\n")
 		DnsEnv := make(map[string]string)
-		for _, line := range DnsEnvString {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				DnsEnv[parts[0]] = parts[1]
+		trimmedEnv := strings.TrimSpace(l.info.Protocol.CertDNSEnv)
+		if strings.HasPrefix(trimmedEnv, "{") {
+			_ = json.Unmarshal([]byte(trimmedEnv), &DnsEnv)
+		}
+		if len(DnsEnv) == 0 {
+			DnsEnvString := strings.Split(l.info.Protocol.CertDNSEnv, "\n")
+			for _, line := range DnsEnvString {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					DnsEnv[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+				}
 			}
 		}
 		for k, v := range DnsEnv {

@@ -255,6 +255,7 @@ type Protocol struct {
 	EncryptionPassword      string `json:"encryption_password"`
 	CertMode                string `json:"cert_mode"`
 	CertDNSProvider         string `json:"cert_dns_provider"`
+	CertDNSProviderId       int64  `json:"cert_dns_provider_id,omitempty"`
 	CertDNSEnv              string `json:"cert_dns_env"`
 	CertFile                string `json:"cert_file"`
 	KeyFile                 string `json:"key_file"`

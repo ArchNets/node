@@ -107,6 +107,23 @@ func EnsureNodeCertificate(info *panel.NodeInfo, tag string) (string, string, er
 		log.WithField("node", tag).Infof("Using cert path: %s, key path: %s", info.Protocol.CertFile, info.Protocol.KeyFile)
 		return info.Protocol.CertFile, info.Protocol.KeyFile, nil
 	case "dns", "http":
+		// If backend already issued and provided the certificate bundle, save to disk
+		if info.Protocol.CertFile != "" && info.Protocol.KeyFile != "" {
+			dir := filepath.Dir(certFile)
+			if !file.IsExist(dir) {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					return "", "", fmt.Errorf("create cert directory error: %s", err)
+				}
+			}
+			if err := os.WriteFile(certFile, []byte(info.Protocol.CertFile), 0644); err != nil {
+				return "", "", fmt.Errorf("write cert file error: %s", err)
+			}
+			if err := os.WriteFile(keyFile, []byte(info.Protocol.KeyFile), 0600); err != nil {
+				return "", "", fmt.Errorf("write key file error: %s", err)
+			}
+			log.WithField("node", tag).Info("Certificate files saved from API payload: ", certFile)
+			return certFile, keyFile, nil
+		}
 		if file.IsExist(certFile) && file.IsExist(keyFile) {
 			return certFile, keyFile, nil
 		}
