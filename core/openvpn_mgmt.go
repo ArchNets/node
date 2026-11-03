@@ -239,8 +239,12 @@ func (c *ovpnMgmtClient) readLoop() {
 			payload := strings.TrimPrefix(body, "BYTECOUNT_CLI:")
 			parts := strings.Split(payload, ",")
 			if len(parts) == 3 {
-				in, _ := strconv.ParseInt(parts[1], 10, 64)
-				out, _ := strconv.ParseInt(parts[2], 10, 64)
+				in, errIn := strconv.ParseInt(parts[1], 10, 64)
+				out, errOut := strconv.ParseInt(parts[2], 10, 64)
+				if errIn != nil || errOut != nil {
+					log.WithField("line", line).Warn("openvpn management: malformed integer in BYTECOUNT_CLI, dropping")
+					continue
+				}
 				ev := ovpnEvent{kind: "BYTECOUNT_CLI", cid: parts[0], in: in, out: out}
 				select {
 				case c.events <- ev:

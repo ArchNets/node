@@ -233,6 +233,9 @@ func (c *OpenVPNController) Close() error {
 }
 
 func (c *OpenVPNController) cleanupCores() {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+
 	for _, core := range c.openvpnCores {
 		if core != nil {
 			core.Stop()
@@ -351,6 +354,10 @@ func (c *OpenVPNController) userListMonitor() error {
 }
 
 func (c *OpenVPNController) reportTask() error {
+	if c.closed.Load() {
+		return nil
+	}
+
 	reportMin := 0
 	if c.info.TrafficReportThreshold > 0 {
 		reportMin = c.info.TrafficReportThreshold
