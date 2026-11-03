@@ -81,3 +81,17 @@ func TestOpenVPNLimiterTagMatch(t *testing.T) {
 		t.Fatalf("expected correct base tag NOT to be rejected")
 	}
 }
+
+func TestOpenVPNControllerReconcileClosed(t *testing.T) {
+	c := &OpenVPNController{
+		tag:               "openvpn-test",
+		reconcileFailures: make(map[string]int),
+	}
+	c.closed.Store(true)
+
+	// When closed, reconcileCores must immediately return without touching cores
+	c.reconcileCores()
+	if len(c.reconcileFailures) != 0 {
+		t.Errorf("expected 0 failures recorded on closed controller, got %d", len(c.reconcileFailures))
+	}
+}

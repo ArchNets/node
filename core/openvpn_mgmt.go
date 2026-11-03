@@ -22,10 +22,10 @@ import (
 
 // ovpnEvent represents a parsed asynchronous event from the management socket.
 type ovpnEvent struct {
-	kind string // "CLIENT_CONNECT", "CLIENT_ESTABLISHED", "CLIENT_DISCONNECT", "BYTECOUNT_CLI"
+	kind string // "CLIENT_CONNECT", "CLIENT_REAUTH", "CLIENT_DISCONNECT", "BYTECOUNT_CLI"
 	cid  string
 	kid  string
-	env  map[string]string // populated for CLIENT_CONNECT / CLIENT_DISCONNECT
+	env  map[string]string // populated for CLIENT_CONNECT / CLIENT_REAUTH
 	in   int64             // populated for BYTECOUNT_CLI
 	out  int64             // populated for BYTECOUNT_CLI
 }
@@ -116,12 +116,6 @@ func (c *ovpnMgmtClient) enableByteCount(intervalSeconds int) error {
 	return err
 }
 
-// enableStateNotify puts the connection into deferred-auth mode.
-func (c *ovpnMgmtClient) enableStateNotify() error {
-	_, err := c.send("state on")
-	return err
-}
-
 // authorizeClient accepts a pending client with no client-specific config push.
 func (c *ovpnMgmtClient) authorizeClient(cid, kid string) error {
 	_, err := c.send(fmt.Sprintf("client-auth-nt %s %s", cid, kid))
@@ -174,14 +168,30 @@ func (c *ovpnMgmtClient) readLoop() {
 		switch {
 		case strings.HasPrefix(body, "CLIENT:CONNECT,"):
 			fields := strings.SplitN(body, ",", 2)
+			if len(fields) < 2 {
+				log.WithField("line", line).Warn("openvpn management: malformed CLIENT:CONNECT, dropping")
+				continue
+			}
 			rest := strings.SplitN(fields[1], ",", 2)
+			if len(rest) < 2 {
+				log.WithField("line", line).Warn("openvpn management: malformed CLIENT:CONNECT payload, dropping")
+				continue
+			}
 			pendingCID, pendingKID = rest[0], rest[1]
 			pendingEnv = make(map[string]string)
 			pendingKind = "CLIENT_CONNECT"
 
 		case strings.HasPrefix(body, "CLIENT:REAUTH,"):
 			fields := strings.SplitN(body, ",", 2)
+			if len(fields) < 2 {
+				log.WithField("line", line).Warn("openvpn management: malformed CLIENT:REAUTH, dropping")
+				continue
+			}
 			rest := strings.SplitN(fields[1], ",", 2)
+			if len(rest) < 2 {
+				log.WithField("line", line).Warn("openvpn management: malformed CLIENT:REAUTH payload, dropping")
+				continue
+			}
 			pendingCID, pendingKID = rest[0], rest[1]
 			pendingEnv = make(map[string]string)
 			pendingKind = "CLIENT_REAUTH"
@@ -208,18 +218,18 @@ func (c *ovpnMgmtClient) readLoop() {
 			}
 
 		case strings.HasPrefix(body, "CLIENT:ESTABLISHED,"):
-			cid := strings.TrimPrefix(body, "CLIENT:ESTABLISHED,")
-			select {
-			case c.events <- ovpnEvent{kind: "CLIENT_ESTABLISHED", cid: cid}:
-			case <-c.done:
-				return
-			}
+			// Informational event from OpenVPN; no action needed
+			continue
 
 		case strings.HasPrefix(body, "CLIENT:DISCONNECT,"):
 			fields := strings.SplitN(body, ",", 2)
+			if len(fields) < 2 {
+				log.WithField("line", line).Warn("openvpn management: malformed CLIENT:DISCONNECT, dropping")
+				continue
+			}
 			cid := fields[1]
 			select {
-			case c.events <- ovpnEvent{kind: "CLIENT_DISCONNECT", cid: cid, env: map[string]string{}}:
+			case c.events <- ovpnEvent{kind: "CLIENT_DISCONNECT", cid: cid}:
 			case <-c.done:
 				return
 			}

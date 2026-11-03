@@ -1,12 +1,55 @@
 package core
 
 import (
+	"bufio"
 	"net"
 	"os"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/archnets/node/api/panel"
 )
+
+type fakeOvpnResponder struct {
+	mu             sync.Mutex
+	authorizations []struct{ cid, kid string }
+	denials        []struct{ cid, kid, reason string }
+	kills          []string
+	authCh         chan struct{ cid, kid string }
+	denyCh         chan struct{ cid, kid, reason string }
+}
+
+func newFakeOvpnResponder() *fakeOvpnResponder {
+	return &fakeOvpnResponder{
+		authCh: make(chan struct{ cid, kid string }, 10),
+		denyCh: make(chan struct{ cid, kid, reason string }, 10),
+	}
+}
+
+func (f *fakeOvpnResponder) authorizeClient(cid, kid string) error {
+	f.mu.Lock()
+	f.authorizations = append(f.authorizations, struct{ cid, kid string }{cid, kid})
+	f.mu.Unlock()
+	f.authCh <- struct{ cid, kid string }{cid, kid}
+	return nil
+}
+
+func (f *fakeOvpnResponder) denyClient(cid, kid, reason string) error {
+	f.mu.Lock()
+	f.denials = append(f.denials, struct{ cid, kid, reason string }{cid, kid, reason})
+	f.mu.Unlock()
+	f.denyCh <- struct{ cid, kid, reason string }{cid, kid, reason}
+	return nil
+}
+
+func (f *fakeOvpnResponder) killClient(cid string) error {
+	f.mu.Lock()
+	f.kills = append(f.kills, cid)
+	f.mu.Unlock()
+	return nil
+}
 
 func TestOpenVPNCoreAddDelUsers(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ovpn-test")
@@ -76,7 +119,6 @@ func TestOpenVPNCoreTrafficDelta(t *testing.T) {
 	}
 	core.handleByteCount(ev1)
 
-	// Check accumulated traffic
 	traffic1 := core.GetTrafficAndReset()
 	t1, ok := traffic1[42]
 	if !ok {
@@ -98,7 +140,6 @@ func TestOpenVPNCoreTrafficDelta(t *testing.T) {
 	}
 	core.handleByteCount(ev2)
 
-	// Delta should be +50 in, +150 out
 	traffic2 := core.GetTrafficAndReset()
 	t2, ok := traffic2[42]
 	if !ok {
@@ -130,17 +171,52 @@ func TestOpenVPNHandleClientConnectAuth(t *testing.T) {
 	}
 	core.AddUsers(users)
 
-	// Fallback to common_name when username is empty (standard client certificate mode)
-	core.users.mu.RLock()
-	uid, ok := core.users.uuidToID["uuid-user-10"]
-	core.users.mu.RUnlock()
-	if !ok || uid != 10 {
-		t.Errorf("expected user ID 10 for uuid-user-10, got %d, ok=%v", uid, ok)
+	fakeResp := newFakeOvpnResponder()
+
+	// 1. Authorize valid user
+	evValid := ovpnEvent{
+		kind: "CLIENT_CONNECT",
+		cid:  "cid-10",
+		kid:  "0",
+		env: map[string]string{
+			"common_name":   "uuid-user-10",
+			"untrusted_ip": "1.2.3.4",
+		},
+	}
+	core.handleClientConnect(evValid, false, fakeResp)
+
+	select {
+	case auth := <-fakeResp.authCh:
+		if auth.cid != "cid-10" || auth.kid != "0" {
+			t.Errorf("unexpected authorize payload: %+v", auth)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for authorizeClient")
+	}
+
+	// 2. Deny unknown user
+	evInvalid := ovpnEvent{
+		kind: "CLIENT_CONNECT",
+		cid:  "cid-unknown",
+		kid:  "0",
+		env: map[string]string{
+			"username":      "uuid-user-nonexistent",
+			"untrusted_ip": "1.2.3.4",
+		},
+	}
+	core.handleClientConnect(evInvalid, false, fakeResp)
+
+	select {
+	case deny := <-fakeResp.denyCh:
+		if deny.cid != "cid-unknown" || deny.reason != "unknown user" {
+			t.Errorf("unexpected deny payload: %+v", deny)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for denyClient")
 	}
 }
 
 func TestOpenVPNMgmtDoubleClose(t *testing.T) {
-	// Create a dummy in-memory net.Pipe to test mgmt client lifecycle
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 
@@ -151,14 +227,172 @@ func TestOpenVPNMgmtDoubleClose(t *testing.T) {
 		done:           make(chan struct{}),
 	}
 
-	// First Close should succeed
 	if err := c.Close(); err != nil {
 		t.Errorf("first Close() failed: %v", err)
 	}
 
-	// Second Close must not panic and must succeed cleanly
 	if err := c.Close(); err != nil {
 		t.Errorf("second Close() failed: %v", err)
+	}
+}
+
+func TestOpenVPNMgmtConcurrentSend(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &ovpnMgmtClient{
+		conn:           clientConn,
+		reader:         bufio.NewReader(clientConn),
+		pendingReplies: make(chan string, 16),
+		events:         make(chan ovpnEvent, 16),
+		done:           make(chan struct{}),
+	}
+	go c.readLoop()
+	defer c.Close()
+
+	// Mock OpenVPN server replying to commands
+	go func() {
+		scanner := bufio.NewScanner(serverConn)
+		for scanner.Scan() {
+			cmd := scanner.Text()
+			switch {
+			case strings.HasPrefix(cmd, "slow-cmd"):
+				time.Sleep(50 * time.Millisecond)
+				_, _ = serverConn.Write([]byte("SUCCESS: slow reply\n"))
+			case strings.HasPrefix(cmd, "fast-cmd"):
+				_, _ = serverConn.Write([]byte("SUCCESS: fast reply\n"))
+			default:
+				_, _ = serverConn.Write([]byte("SUCCESS: default reply\n"))
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	var replySlow, replyFast string
+	var errSlow, errFast error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		replySlow, errSlow = c.send("slow-cmd")
+	}()
+
+	go func() {
+		defer wg.Done()
+		// Small delay to ensure slow-cmd acquires writeMu first
+		time.Sleep(10 * time.Millisecond)
+		replyFast, errFast = c.send("fast-cmd")
+	}()
+
+	wg.Wait()
+
+	if errSlow != nil {
+		t.Errorf("slow-cmd failed: %v", errSlow)
+	}
+	if replySlow != "SUCCESS: slow reply" {
+		t.Errorf("slow reply crosstalk! got: %q", replySlow)
+	}
+
+	if errFast != nil {
+		t.Errorf("fast-cmd failed: %v", errFast)
+	}
+	if replyFast != "SUCCESS: fast reply" {
+		t.Errorf("fast reply crosstalk! got: %q", replyFast)
+	}
+}
+
+func TestOpenVPNMgmtSendErrorReply(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &ovpnMgmtClient{
+		conn:           clientConn,
+		reader:         bufio.NewReader(clientConn),
+		pendingReplies: make(chan string, 16),
+		events:         make(chan ovpnEvent, 16),
+		done:           make(chan struct{}),
+	}
+	go c.readLoop()
+	defer c.Close()
+
+	go func() {
+		scanner := bufio.NewScanner(serverConn)
+		if scanner.Scan() {
+			_, _ = serverConn.Write([]byte("ERROR: client-auth command failed: invalid kid\n"))
+		}
+	}()
+
+	reply, err := c.send("client-auth-nt 1 2")
+	if err == nil {
+		t.Fatalf("expected error on ERROR: reply, got nil (reply: %q)", reply)
+	}
+	if !strings.Contains(err.Error(), "ERROR: client-auth command failed: invalid kid") {
+		t.Errorf("error does not contain server reply: %v", err)
+	}
+}
+
+func TestOpenVPNMgmtReadLoopReauthParsing(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &ovpnMgmtClient{
+		conn:           clientConn,
+		reader:         bufio.NewReader(clientConn),
+		pendingReplies: make(chan string, 16),
+		events:         make(chan ovpnEvent, 16),
+		done:           make(chan struct{}),
+	}
+	go c.readLoop()
+	defer c.Close()
+
+	payload := ">CLIENT:REAUTH,42,1\n>CLIENT:ENV,username=reauth-user\n>CLIENT:ENV,END\n"
+	_, _ = serverConn.Write([]byte(payload))
+
+	select {
+	case ev := <-c.events:
+		if ev.kind != "CLIENT_REAUTH" {
+			t.Errorf("expected kind CLIENT_REAUTH, got %q", ev.kind)
+		}
+		if ev.cid != "42" || ev.kid != "1" {
+			t.Errorf("expected cid 42, kid 1, got cid=%s kid=%s", ev.cid, ev.kid)
+		}
+		if ev.env["username"] != "reauth-user" {
+			t.Errorf("expected username reauth-user, got %q", ev.env["username"])
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for CLIENT_REAUTH event")
+	}
+}
+
+func TestOpenVPNMgmtReadLoopMalformedLinesNoPanic(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &ovpnMgmtClient{
+		conn:           clientConn,
+		reader:         bufio.NewReader(clientConn),
+		pendingReplies: make(chan string, 16),
+		events:         make(chan ovpnEvent, 16),
+		done:           make(chan struct{}),
+	}
+	go c.readLoop()
+	defer c.Close()
+
+	// Write malformed notification lines that lack commas or fields
+	malformed := ">CLIENT:CONNECT\n>CLIENT:CONNECT,onlycid\n>CLIENT:REAUTH\n>CLIENT:REAUTH,onlycid\n>CLIENT:DISCONNECT\n>BYTECOUNT_CLI:incomplete\n>UNKNOWN:EVENT\n"
+	_, _ = serverConn.Write([]byte(malformed))
+
+	// Write a valid event afterwards to confirm readLoop is still alive
+	valid := ">CLIENT:DISCONNECT,999\n"
+	_, _ = serverConn.Write([]byte(valid))
+
+	select {
+	case ev := <-c.events:
+		if ev.kind != "CLIENT_DISCONNECT" || ev.cid != "999" {
+			t.Errorf("expected valid disconnect event, got %+v", ev)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("readLoop hung or died on malformed lines")
 	}
 }
 
@@ -175,6 +409,7 @@ func TestOpenVPNReauthTrafficCounterPreservation(t *testing.T) {
 	}
 
 	core.AddUsers([]panel.UserInfo{{Id: 99, Uuid: "test-reauth-uuid"}})
+	fakeResp := newFakeOvpnResponder()
 
 	// 1. Initial connect
 	evConnect := ovpnEvent{
@@ -186,9 +421,9 @@ func TestOpenVPNReauthTrafficCounterPreservation(t *testing.T) {
 			"untrusted_ip": "1.2.3.4",
 		},
 	}
-	core.handleClientConnect(evConnect, false)
+	core.handleClientConnect(evConnect, false, fakeResp)
+	<-fakeResp.authCh
 
-	// Verify session stored with 0 byte counts
 	val, ok := core.sessions.Load("cid-reauth-1")
 	if !ok {
 		t.Fatalf("session not stored after initial connect")
@@ -221,9 +456,9 @@ func TestOpenVPNReauthTrafficCounterPreservation(t *testing.T) {
 			"untrusted_ip": "1.2.3.4",
 		},
 	}
-	core.handleClientConnect(evReauth, true)
+	core.handleClientConnect(evReauth, true, fakeResp)
+	<-fakeResp.authCh
 
-	// Check that previous counters were preserved!
 	val2, ok := core.sessions.Load("cid-reauth-1")
 	if !ok {
 		t.Fatalf("session missing after reauth")
@@ -250,23 +485,25 @@ func TestOpenVPNReauthTrafficCounterPreservation(t *testing.T) {
 	}
 }
 
-func TestLogRingBuffer(t *testing.T) {
-	ring := newLogRingBuffer(3)
+func TestOpenVPNCoreDoubleStop(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ovpn-test-stop")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
 
-	_, _ = ring.Write([]byte("line 1\nline 2\n"))
-	dump1 := ring.Dump()
-	if len(dump1) != 2 || dump1[0] != "line 1" || dump1[1] != "line 2" {
-		t.Fatalf("dump1 unexpected: %v", dump1)
+	core, err := NewOpenVPNCore("test-ovpn-stop", 1194, "udp", "10.9.0.0/24", tmpDir, "", "", "test-key")
+	if err != nil {
+		t.Fatalf("failed to create core: %v", err)
 	}
 
-	// Overwrite ring buffer capacity (capacity = 3)
-	_, _ = ring.Write([]byte("line 3\nline 4\n"))
-	dump2 := ring.Dump()
-	if len(dump2) != 3 {
-		t.Fatalf("expected 3 lines, got %d: %v", len(dump2), dump2)
+	// First Stop on an unstarted core
+	if err := core.Stop(); err != nil {
+		t.Errorf("first Stop() failed: %v", err)
 	}
-	// Oldest "line 1" was discarded; should be [line 2, line 3, line 4]
-	if dump2[0] != "line 2" || dump2[1] != "line 3" || dump2[2] != "line 4" {
-		t.Errorf("unexpected ring buffer ordering: %v", dump2)
+
+	// Second Stop must not panic
+	if err := core.Stop(); err != nil {
+		t.Errorf("second Stop() failed: %v", err)
 	}
 }

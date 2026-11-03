@@ -1,8 +1,6 @@
 package core
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,7 +16,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -29,6 +26,12 @@ import (
 	"github.com/archnets/node/limiter"
 	log "github.com/sirupsen/logrus"
 )
+
+type ovpnResponder interface {
+	authorizeClient(cid, kid string) error
+	denyClient(cid, kid, reason string) error
+	killClient(cid string) error
+}
 
 // OpenVPNCore manages a single real `openvpn` server process, controlled
 // through its management interface for dynamic (no-restart) user add/remove,
@@ -50,8 +53,11 @@ type OpenVPNCore struct {
 	DropICMPUnreachable bool
 
 	cmd        *exec.Cmd
-	mgmt       *ovpnMgmtClient
+	mgmt       atomic.Pointer[ovpnMgmtClient]
 	socketPath string
+
+	stdoutPipe *io.PipeWriter
+	stderrPipe *io.PipeWriter
 
 	users      *ovpnUserMap
 	sessions   sync.Map // cid -> *ovpnSession
@@ -62,55 +68,6 @@ type OpenVPNCore struct {
 
 	trafficMu sync.RWMutex
 	traffic   map[int]*UserTraffic // key: uid
-}
-
-type logRingBuffer struct {
-	mu    sync.Mutex
-	lines []string
-	size  int
-	pos   int
-	full  bool
-}
-
-func newLogRingBuffer(size int) *logRingBuffer {
-	return &logRingBuffer{
-		lines: make([]string, size),
-		size:  size,
-	}
-}
-
-func (r *logRingBuffer) Write(p []byte) (n int, err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	scanner := bufio.NewScanner(bytes.NewReader(p))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		r.lines[r.pos] = line
-		r.pos = (r.pos + 1) % r.size
-		if r.pos == 0 {
-			r.full = true
-		}
-	}
-	return len(p), nil
-}
-
-func (r *logRingBuffer) Dump() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.full {
-		res := make([]string, r.pos)
-		copy(res, r.lines[:r.pos])
-		return res
-	}
-	res := make([]string, r.size)
-	copy(res, r.lines[r.pos:])
-	copy(res[r.size-r.pos:], r.lines[:r.pos])
-	return res
 }
 
 type ovpnUserMap struct {
@@ -171,6 +128,23 @@ func NewOpenVPNCore(tag string, port int, proto, subnet, workDir, certFile, keyF
 	}, nil
 }
 
+func removeTunInterface(iface string) {
+	_ = execCommand(fmt.Sprintf("ip link set %s down", iface))
+	_ = execCommand(fmt.Sprintf("ip tuntap del mode tun dev %s", iface))
+	_ = execCommand(fmt.Sprintf("ip link delete %s", iface))
+}
+
+func (o *OpenVPNCore) closePipes() {
+	if o.stdoutPipe != nil {
+		_ = o.stdoutPipe.Close()
+		o.stdoutPipe = nil
+	}
+	if o.stderrPipe != nil {
+		_ = o.stderrPipe.Close()
+		o.stderrPipe = nil
+	}
+}
+
 // Start writes the server config, ensures cert/key/tls-crypt material exists,
 // launches the real openvpn binary, and connects to its management socket.
 func (o *OpenVPNCore) Start() error {
@@ -187,8 +161,7 @@ func (o *OpenVPNCore) Start() error {
 		return fmt.Errorf("write tls-crypt key: %w", err)
 	}
 	// OpenVPN re-reads ta.key after dropping privileges to nobody/nogroup;
-	// a root-owned 0600 file is unreadable at that point and kills the
-	// connection. Grant the unprivileged user access with minimal exposure.
+	// grant the unprivileged user access with minimal exposure.
 	makeReadableByUnprivilegedUser(taKeyPath)
 
 	confPath := filepath.Join(o.WorkDir, "server.conf")
@@ -199,18 +172,19 @@ func (o *OpenVPNCore) Start() error {
 	_ = os.Remove(o.socketPath) // stale socket from a previous run
 
 	// Clean up any stale interface left from a previous crash or unclean stop
-	_ = execCommand(fmt.Sprintf("ip link set %s down", o.InterfaceName))
-	_ = execCommand(fmt.Sprintf("ip tuntap del mode tun dev %s", o.InterfaceName))
-	_ = execCommand(fmt.Sprintf("ip link delete %s", o.InterfaceName))
+	removeTunInterface(o.InterfaceName)
 
 	o.cmd = exec.Command("openvpn", "--config", confPath)
 	o.logRing = newLogRingBuffer(50)
-	stdoutLogger := log.StandardLogger().WriterLevel(log.InfoLevel)
-	stderrLogger := log.StandardLogger().WriterLevel(log.WarnLevel)
-	o.cmd.Stdout = io.MultiWriter(stdoutLogger, o.logRing)
-	o.cmd.Stderr = io.MultiWriter(stderrLogger, o.logRing)
+	stdoutWriter := log.StandardLogger().WriterLevel(log.DebugLevel)
+	stderrWriter := log.StandardLogger().WriterLevel(log.WarnLevel)
+	o.stdoutPipe = stdoutWriter
+	o.stderrPipe = stderrWriter
+	o.cmd.Stdout = io.MultiWriter(stdoutWriter, o.logRing)
+	o.cmd.Stderr = io.MultiWriter(stderrWriter, o.logRing)
 
 	if err := o.cmd.Start(); err != nil {
+		o.closePipes()
 		return fmt.Errorf("start openvpn process: %w", err)
 	}
 
@@ -225,22 +199,22 @@ func (o *OpenVPNCore) Start() error {
 		if o.cmd.Process != nil {
 			_ = o.cmd.Process.Kill()
 			waitErr := o.cmd.Wait()
+			o.closePipes()
 			recentLogs := o.logRing.Dump()
 			log.WithFields(log.Fields{
 				"tag":         o.Tag,
 				"exit_error":  waitErr,
 				"recent_logs": recentLogs,
 			}).Error("OpenVPN process failed to initialize management socket")
+		} else {
+			o.closePipes()
 		}
 		o.teardownNAT()
 		return fmt.Errorf("connect to management socket: %w", err)
 	}
-	o.mgmt = mgmt
+	o.mgmt.Store(mgmt)
 
-	if err := o.mgmt.enableStateNotify(); err != nil {
-		log.WithError(err).Warn("openvpn: failed to enable state notifications")
-	}
-	if err := o.mgmt.enableByteCount(10); err != nil {
+	if err := mgmt.enableByteCount(10); err != nil {
 		log.WithError(err).Warn("openvpn: failed to enable bytecount reporting")
 	}
 
@@ -250,6 +224,7 @@ func (o *OpenVPNCore) Start() error {
 	go func() {
 		defer close(waitDone)
 		waitErr := o.cmd.Wait()
+		o.closePipes()
 		// Atomic CompareAndSwap to claim the shutdown without racing with Stop()
 		if o.running.CompareAndSwap(true, false) {
 			recentLogs := o.logRing.Dump()
@@ -258,8 +233,8 @@ func (o *OpenVPNCore) Start() error {
 				"exit_error":  waitErr,
 				"recent_logs": recentLogs,
 			}).Error("OpenVPN process exited unexpectedly")
-			if o.mgmt != nil {
-				_ = o.mgmt.Close()
+			if oldMgmt := o.mgmt.Swap(nil); oldMgmt != nil {
+				_ = oldMgmt.Close()
 			}
 			o.sessions.Range(func(key, _ interface{}) bool {
 				o.sessions.Delete(key)
@@ -267,7 +242,7 @@ func (o *OpenVPNCore) Start() error {
 			})
 		}
 	}()
-	go o.eventLoop()
+	go o.eventLoop(mgmt)
 
 	log.WithFields(log.Fields{
 		"tag":   o.Tag,
@@ -284,8 +259,8 @@ func (o *OpenVPNCore) Stop() error {
 
 	o.teardownNAT()
 
-	if o.mgmt != nil {
-		_ = o.mgmt.Close()
+	if oldMgmt := o.mgmt.Swap(nil); oldMgmt != nil {
+		_ = oldMgmt.Close()
 	}
 
 	if o.cmd != nil && o.cmd.Process != nil && o.waitDone != nil {
@@ -303,18 +278,7 @@ func (o *OpenVPNCore) Stop() error {
 
 	_ = os.Remove(o.socketPath)
 
-	// SIGKILL doesn't give OpenVPN a chance to run its own interface
-	// teardown, so the TUN/DCO interface can be left behind. The next
-	// Start() then fails to reattach to it (TUNSETIFF: Invalid argument)
-	// because its state doesn't match a fresh attach request. Force
-	// cleanup explicitly rather than relying on process death alone.
-	if err := execCommand(fmt.Sprintf("ip link delete %s", o.InterfaceName)); err != nil {
-		log.WithFields(log.Fields{
-			"tag":       o.Tag,
-			"interface": o.InterfaceName,
-			"err":       err,
-		}).Debug("ip link delete for openvpn interface failed (likely already gone, not fatal)")
-	}
+	removeTunInterface(o.InterfaceName)
 
 	log.WithField("tag", o.Tag).Info("OpenVPN server stopped")
 	return nil
@@ -354,9 +318,10 @@ func (o *OpenVPNCore) DelUsers(users []panel.UserInfo) {
 
 	o.sessions.Range(func(_, v interface{}) bool {
 		sess := v.(*ovpnSession)
+		mgmt := o.mgmt.Load()
 		for _, u := range users {
-			if sess.UUID == u.Uuid && o.mgmt != nil {
-				_ = o.mgmt.killClient(sess.CID)
+			if sess.UUID == u.Uuid && mgmt != nil {
+				_ = mgmt.killClient(sess.CID)
 			}
 		}
 		return true
@@ -388,15 +353,24 @@ func (o *OpenVPNCore) SetLimiter(l *limiter.Limiter) {
 }
 
 // eventLoop consumes management-socket events.
-func (o *OpenVPNCore) eventLoop() {
-	for ev := range o.mgmt.events {
+func (o *OpenVPNCore) eventLoop(mgmt ovpnResponder) {
+	if mgmt == nil {
+		return
+	}
+	var eventsChan <-chan ovpnEvent
+	if client, ok := mgmt.(*ovpnMgmtClient); ok && client != nil {
+		eventsChan = client.events
+	}
+	if eventsChan == nil {
+		return
+	}
+
+	for ev := range eventsChan {
 		switch ev.kind {
 		case "CLIENT_CONNECT":
-			o.handleClientConnect(ev, false)
+			o.handleClientConnect(ev, false, mgmt)
 		case "CLIENT_REAUTH":
-			o.handleClientConnect(ev, true)
-		case "CLIENT_ESTABLISHED":
-			// no-op
+			o.handleClientConnect(ev, true, mgmt)
 		case "CLIENT_DISCONNECT":
 			o.sessions.Delete(ev.cid)
 		case "BYTECOUNT_CLI":
@@ -405,7 +379,21 @@ func (o *OpenVPNCore) eventLoop() {
 	}
 }
 
-func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool) {
+func denyClientAsync(cid, kid, reason, tag string, resp ovpnResponder) {
+	go func() {
+		if resp == nil {
+			log.WithFields(log.Fields{
+				"tag": tag,
+				"cid": cid,
+				"kid": kid,
+			}).Error("OpenVPN: cannot deny, nil responder")
+			return
+		}
+		_ = resp.denyClient(cid, kid, reason)
+	}()
+}
+
+func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool, resp ovpnResponder) {
 	// management-client-auth defers auth to this handler.
 	// Users connect either with client certificates (CN = user UUID) or
 	// with UUID sent as username. Check username first, then fallback to common_name.
@@ -425,15 +413,26 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool) {
 	if !ok {
 		log.WithFields(log.Fields{"tag": o.Tag, "username": username, "ip": ip}).
 			Warn("OpenVPN auth rejected: unknown user")
-		go func(cid, kid string) {
-			if o.mgmt != nil {
-				_ = o.mgmt.denyClient(cid, kid, "unknown user")
-			}
-		}(ev.cid, ev.kid)
+		denyClientAsync(ev.cid, ev.kid, "unknown user", o.Tag, resp)
 		return
 	}
 
-	if o.limiterRef != nil {
+	// On TLS re-auth, if the session already exists with the same UUID, skip
+	// device limiter check so active users are not kicked at hourly renegotiation.
+	skipLimiter := false
+	var lastIn, lastOut int64
+	if isReauth {
+		if existing, ok := o.sessions.Load(ev.cid); ok {
+			sess := existing.(*ovpnSession)
+			if sess.UUID == username {
+				skipLimiter = true
+				lastIn = sess.LastBytesIn
+				lastOut = sess.LastBytesOut
+			}
+		}
+	}
+
+	if o.limiterRef != nil && !skipLimiter {
 		limiterTag := o.Tag
 		if o.LimiterTag != "" {
 			limiterTag = o.LimiterTag
@@ -443,21 +442,8 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool) {
 		if reject {
 			log.WithFields(log.Fields{"tag": o.Tag, "limiter_tag": limiterTag, "uid": uid, "ip": ip}).
 				Warn("OpenVPN auth rejected: device limit exceeded")
-			go func(cid, kid string) {
-				if o.mgmt != nil {
-					_ = o.mgmt.denyClient(cid, kid, "device limit exceeded")
-				}
-			}(ev.cid, ev.kid)
+			denyClientAsync(ev.cid, ev.kid, "device limit exceeded", o.Tag, resp)
 			return
-		}
-	}
-
-	var lastIn, lastOut int64
-	if isReauth {
-		if existing, ok := o.sessions.Load(ev.cid); ok {
-			sess := existing.(*ovpnSession)
-			lastIn = sess.LastBytesIn
-			lastOut = sess.LastBytesOut
 		}
 	}
 
@@ -471,19 +457,25 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool) {
 	})
 
 	// Authorize client asynchronously so eventLoop never blocks on send()
-	go func(cid, kid, tag string, uid int, ip string) {
-		if o.mgmt != nil {
-			if err := o.mgmt.authorizeClient(cid, kid); err != nil {
-				log.WithError(err).WithFields(log.Fields{
-					"tag": tag,
-					"cid": cid,
-					"kid": kid,
-				}).Error("OpenVPN: failed to send client-auth-nt")
-				return
-			}
+	go func(cid, kid, tag string, uid int, ip string, r ovpnResponder) {
+		if r == nil {
+			log.WithFields(log.Fields{
+				"tag": tag,
+				"cid": cid,
+				"kid": kid,
+			}).Error("OpenVPN: cannot authorize, nil responder")
+			return
+		}
+		if err := r.authorizeClient(cid, kid); err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"tag": tag,
+				"cid": cid,
+				"kid": kid,
+			}).Error("OpenVPN: failed to send client-auth-nt")
+			return
 		}
 		log.WithFields(log.Fields{"tag": tag, "uid": uid, "ip": ip}).Info("OpenVPN auth accepted")
-	}(ev.cid, ev.kid, o.Tag, uid, ip)
+	}(ev.cid, ev.kid, o.Tag, uid, ip, resp)
 }
 
 func (o *OpenVPNCore) handleByteCount(ev ovpnEvent) {

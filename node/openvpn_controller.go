@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -33,6 +35,10 @@ type OpenVPNController struct {
 	protocolIndex           int
 	isPrimaryReporter       bool
 	tproxyEnabled           bool
+
+	closed            atomic.Bool
+	reconcileMu       sync.Mutex
+	reconcileFailures map[string]int
 }
 
 func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *OpenVPNController {
@@ -44,6 +50,7 @@ func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, i
 		xrayCore:          xrayCore,
 		protocolIndex:     protocolIndex,
 		isPrimaryReporter: isPrimaryReporter,
+		reconcileFailures: make(map[string]int),
 	}
 }
 
@@ -202,6 +209,8 @@ func (c *OpenVPNController) Start() error {
 
 // Close stops the OpenVPN controller.
 func (c *OpenVPNController) Close() error {
+	c.closed.Store(true)
+
 	if c.userListMonitorPeriodic != nil {
 		c.userListMonitorPeriodic.Close()
 	}
@@ -246,19 +255,57 @@ func (c *OpenVPNController) startTasks() {
 	_ = c.userReportPeriodic.Start(false)
 }
 
-func (c *OpenVPNController) userListMonitor() error {
-	// Reconcile: self-heal any OpenVPN core that exited unexpectedly
+func (c *OpenVPNController) reconcileCores() {
+	if c.closed.Load() {
+		return
+	}
+
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+
 	for _, core := range c.openvpnCores {
-		if !core.IsRunning() {
-			log.WithField("tag", core.Tag).Warn("OpenVPN core died, reconciling (restarting)...")
-			if err := core.Restart(); err != nil {
-				log.WithError(err).WithField("tag", core.Tag).Error("Failed to restart dead OpenVPN core")
-			} else {
-				log.WithField("tag", core.Tag).Info("Successfully restarted dead OpenVPN core")
-				core.AddUsers(c.userList)
+		if core == nil || core.IsRunning() {
+			if c.reconcileFailures[core.Tag] > 0 {
+				c.reconcileFailures[core.Tag] = 0
 			}
+			continue
+		}
+
+		if c.closed.Load() {
+			return
+		}
+
+		c.reconcileFailures[core.Tag]++
+		failures := c.reconcileFailures[core.Tag]
+
+		// Throttled logging: log on 1st failure and every 10th failure
+		if failures == 1 || failures%10 == 0 {
+			log.WithFields(log.Fields{
+				"tag":      core.Tag,
+				"failures": failures,
+			}).Warn("OpenVPN core died, reconciling (restarting)...")
+		}
+
+		if err := core.Restart(); err != nil {
+			if failures == 1 || failures%10 == 0 {
+				log.WithError(err).WithFields(log.Fields{
+					"tag":      core.Tag,
+					"failures": failures,
+				}).Error("Failed to restart dead OpenVPN core")
+			}
+		} else {
+			log.WithField("tag", core.Tag).Info("Successfully restarted dead OpenVPN core")
+			c.reconcileFailures[core.Tag] = 0
 		}
 	}
+}
+
+func (c *OpenVPNController) userListMonitor() error {
+	if c.closed.Load() {
+		return nil
+	}
+
+	c.reconcileCores()
 
 	protoName := c.getIndexedProtocolName()
 	newUsers, err := c.apiClient.GetUserList(protoName)
