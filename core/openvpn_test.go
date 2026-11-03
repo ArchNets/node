@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -19,6 +20,7 @@ type fakeOvpnResponder struct {
 	kills          []string
 	authCh         chan struct{ cid, kid string }
 	denyCh         chan struct{ cid, kid, reason string }
+	authErr        error
 }
 
 func newFakeOvpnResponder() *fakeOvpnResponder {
@@ -31,9 +33,10 @@ func newFakeOvpnResponder() *fakeOvpnResponder {
 func (f *fakeOvpnResponder) authorizeClient(cid, kid string) error {
 	f.mu.Lock()
 	f.authorizations = append(f.authorizations, struct{ cid, kid string }{cid, kid})
+	err := f.authErr
 	f.mu.Unlock()
 	f.authCh <- struct{ cid, kid string }{cid, kid}
-	return nil
+	return err
 }
 
 func (f *fakeOvpnResponder) denyClient(cid, kid, reason string) error {
@@ -213,6 +216,49 @@ func TestOpenVPNHandleClientConnectAuth(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for denyClient")
+	}
+}
+
+func TestOpenVPNHandleClientConnectAuthFailureCleansSession(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ovpn-test-fail-auth")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	core, err := NewOpenVPNCore("test-ovpn-fail-auth", 1194, "udp", "10.9.0.0/24", tmpDir, "", "", "test-key")
+	if err != nil {
+		t.Fatalf("failed to create core: %v", err)
+	}
+
+	core.AddUsers([]panel.UserInfo{{Id: 77, Uuid: "uuid-user-77"}})
+	fakeResp := newFakeOvpnResponder()
+	fakeResp.authErr = fmt.Errorf("management socket closed")
+
+	ev := ovpnEvent{
+		kind: "CLIENT_CONNECT",
+		cid:  "cid-fail-77",
+		kid:  "0",
+		env: map[string]string{
+			"username":      "uuid-user-77",
+			"untrusted_ip": "1.2.3.4",
+		},
+	}
+	core.handleClientConnect(ev, false, fakeResp)
+
+	// Wait for authorizeClient call to complete
+	select {
+	case <-fakeResp.authCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for authorizeClient")
+	}
+
+	// Yield for goroutine to execute o.sessions.Delete
+	time.Sleep(20 * time.Millisecond)
+
+	// Session must NOT remain in o.sessions
+	if _, ok := core.sessions.Load("cid-fail-77"); ok {
+		t.Errorf("session should have been deleted upon authorizeClient failure")
 	}
 }
 

@@ -309,20 +309,21 @@ func (o *OpenVPNCore) AddUsers(users []panel.UserInfo) {
 
 // DelUsers removes credentials and kills any currently-active session.
 func (o *OpenVPNCore) DelUsers(users []panel.UserInfo) {
+	deletedUUIDs := make(map[string]bool, len(users))
+
 	o.users.mu.Lock()
 	for _, u := range users {
 		delete(o.users.uuidToID, u.Uuid)
 		delete(o.users.idToUUID, u.Id)
+		deletedUUIDs[u.Uuid] = true
 	}
 	o.users.mu.Unlock()
 
+	mgmt := o.mgmt.Load()
 	o.sessions.Range(func(_, v interface{}) bool {
 		sess := v.(*ovpnSession)
-		mgmt := o.mgmt.Load()
-		for _, u := range users {
-			if sess.UUID == u.Uuid && mgmt != nil {
-				_ = mgmt.killClient(sess.CID)
-			}
+		if deletedUUIDs[sess.UUID] && mgmt != nil {
+			_ = mgmt.killClient(sess.CID)
 		}
 		return true
 	})
@@ -459,6 +460,7 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool, resp ovpn
 	// Authorize client asynchronously so eventLoop never blocks on send()
 	go func(cid, kid, tag string, uid int, ip string, r ovpnResponder) {
 		if r == nil {
+			o.sessions.Delete(cid)
 			log.WithFields(log.Fields{
 				"tag": tag,
 				"cid": cid,
@@ -467,6 +469,7 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool, resp ovpn
 			return
 		}
 		if err := r.authorizeClient(cid, kid); err != nil {
+			o.sessions.Delete(cid)
 			log.WithError(err).WithFields(log.Fields{
 				"tag": tag,
 				"cid": cid,
