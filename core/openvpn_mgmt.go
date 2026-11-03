@@ -34,7 +34,8 @@ type ovpnMgmtClient struct {
 	conn   net.Conn
 	reader *bufio.Reader
 
-	writeMu sync.Mutex
+	writeMu   sync.Mutex
+	closeOnce sync.Once
 
 	// pendingReplies receives lines for synchronous command responses
 	// (anything not prefixed with '>').
@@ -65,8 +66,22 @@ func dialOpenVPNManagement(socketPath string) (*ovpnMgmtClient, error) {
 }
 
 func (c *ovpnMgmtClient) Close() error {
-	close(c.done)
-	return c.conn.Close()
+	var err error
+	c.closeOnce.Do(func() {
+		close(c.done)
+		err = c.conn.Close()
+	})
+	return err
+}
+
+func drainReplies(ch <-chan string) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // send writes a raw command line and returns the synchronous reply line
@@ -76,15 +91,7 @@ func (c *ovpnMgmtClient) send(cmd string) (string, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	// Drain any stale reply that arrived unexpectedly before our command
-	for {
-		select {
-		case <-c.pendingReplies:
-		default:
-			goto drained
-		}
-	}
-drained:
+	drainReplies(c.pendingReplies)
 
 	if _, err := c.conn.Write([]byte(cmd + "\n")); err != nil {
 		return "", err
@@ -92,6 +99,9 @@ drained:
 
 	select {
 	case reply := <-c.pendingReplies:
+		if strings.HasPrefix(reply, "ERROR:") {
+			return reply, fmt.Errorf("management command %q failed: %s", cmd, reply)
+		}
 		return reply, nil
 	case <-time.After(10 * time.Second):
 		return "", fmt.Errorf("management command %q timed out", cmd)
@@ -128,17 +138,6 @@ func (c *ovpnMgmtClient) denyClient(cid, kid, reason string) error {
 func (c *ovpnMgmtClient) killClient(cid string) error {
 	_, err := c.send(fmt.Sprintf("client-kill %s", cid))
 	return err
-}
-
-func (c *ovpnMgmtClient) pushEvent(ev ovpnEvent) {
-	select {
-	case c.events <- ev:
-	default:
-		log.WithFields(log.Fields{
-			"kind": ev.kind,
-			"cid":  ev.cid,
-		}).Warn("openvpn management: events buffer full, dropping event to prevent deadlock")
-	}
 }
 
 // readLoop continuously reads lines from the socket.
@@ -185,13 +184,18 @@ func (c *ovpnMgmtClient) readLoop() {
 			rest := strings.SplitN(fields[1], ",", 2)
 			pendingCID, pendingKID = rest[0], rest[1]
 			pendingEnv = make(map[string]string)
-			pendingKind = "CLIENT_CONNECT" // treat re-auth same as connect
+			pendingKind = "CLIENT_REAUTH"
 
 		case strings.HasPrefix(body, "CLIENT:ENV,"):
 			kv := strings.TrimPrefix(body, "CLIENT:ENV,")
 			if kv == "END" {
 				if pendingEnv != nil {
-					c.pushEvent(ovpnEvent{kind: pendingKind, cid: pendingCID, kid: pendingKID, env: pendingEnv})
+					ev := ovpnEvent{kind: pendingKind, cid: pendingCID, kid: pendingKID, env: pendingEnv}
+					select {
+					case c.events <- ev:
+					case <-c.done:
+						return
+					}
 				}
 				pendingEnv = nil
 				continue
@@ -205,12 +209,20 @@ func (c *ovpnMgmtClient) readLoop() {
 
 		case strings.HasPrefix(body, "CLIENT:ESTABLISHED,"):
 			cid := strings.TrimPrefix(body, "CLIENT:ESTABLISHED,")
-			c.pushEvent(ovpnEvent{kind: "CLIENT_ESTABLISHED", cid: cid})
+			select {
+			case c.events <- ovpnEvent{kind: "CLIENT_ESTABLISHED", cid: cid}:
+			case <-c.done:
+				return
+			}
 
 		case strings.HasPrefix(body, "CLIENT:DISCONNECT,"):
 			fields := strings.SplitN(body, ",", 2)
 			cid := fields[1]
-			c.pushEvent(ovpnEvent{kind: "CLIENT_DISCONNECT", cid: cid, env: map[string]string{}})
+			select {
+			case c.events <- ovpnEvent{kind: "CLIENT_DISCONNECT", cid: cid, env: map[string]string{}}:
+			case <-c.done:
+				return
+			}
 
 		case strings.HasPrefix(body, "BYTECOUNT_CLI:"):
 			// Format: >BYTECOUNT_CLI:<CID>,<BYTES_IN>,<BYTES_OUT>
@@ -219,7 +231,13 @@ func (c *ovpnMgmtClient) readLoop() {
 			if len(parts) == 3 {
 				in, _ := strconv.ParseInt(parts[1], 10, 64)
 				out, _ := strconv.ParseInt(parts[2], 10, 64)
-				c.pushEvent(ovpnEvent{kind: "BYTECOUNT_CLI", cid: parts[0], in: in, out: out})
+				ev := ovpnEvent{kind: "BYTECOUNT_CLI", cid: parts[0], in: in, out: out}
+				select {
+				case c.events <- ev:
+				default:
+					// BYTECOUNT_CLI is cumulative, so skipping an intermediate sample under load is safe
+					log.WithField("cid", parts[0]).Warn("openvpn management: events buffer full, dropped BYTECOUNT_CLI sample")
+				}
 			} else {
 				// Don't drop silently -- if a future OpenVPN version ever
 				// changes this format, we want it visible instead of

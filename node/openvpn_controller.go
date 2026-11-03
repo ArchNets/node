@@ -247,6 +247,19 @@ func (c *OpenVPNController) startTasks() {
 }
 
 func (c *OpenVPNController) userListMonitor() error {
+	// Reconcile: self-heal any OpenVPN core that exited unexpectedly
+	for _, core := range c.openvpnCores {
+		if !core.IsRunning() {
+			log.WithField("tag", core.Tag).Warn("OpenVPN core died, reconciling (restarting)...")
+			if err := core.Restart(); err != nil {
+				log.WithError(err).WithField("tag", core.Tag).Error("Failed to restart dead OpenVPN core")
+			} else {
+				log.WithField("tag", core.Tag).Info("Successfully restarted dead OpenVPN core")
+				core.AddUsers(c.userList)
+			}
+		}
+	}
+
 	protoName := c.getIndexedProtocolName()
 	newUsers, err := c.apiClient.GetUserList(protoName)
 	if err != nil {

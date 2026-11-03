@@ -1,6 +1,7 @@
 package core
 
 import (
+	"net"
 	"os"
 	"testing"
 
@@ -135,5 +136,137 @@ func TestOpenVPNHandleClientConnectAuth(t *testing.T) {
 	core.users.mu.RUnlock()
 	if !ok || uid != 10 {
 		t.Errorf("expected user ID 10 for uuid-user-10, got %d, ok=%v", uid, ok)
+	}
+}
+
+func TestOpenVPNMgmtDoubleClose(t *testing.T) {
+	// Create a dummy in-memory net.Pipe to test mgmt client lifecycle
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &ovpnMgmtClient{
+		conn:           clientConn,
+		pendingReplies: make(chan string, 16),
+		events:         make(chan ovpnEvent, 16),
+		done:           make(chan struct{}),
+	}
+
+	// First Close should succeed
+	if err := c.Close(); err != nil {
+		t.Errorf("first Close() failed: %v", err)
+	}
+
+	// Second Close must not panic and must succeed cleanly
+	if err := c.Close(); err != nil {
+		t.Errorf("second Close() failed: %v", err)
+	}
+}
+
+func TestOpenVPNReauthTrafficCounterPreservation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ovpn-test-reauth")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	core, err := NewOpenVPNCore("test-ovpn-reauth", 1194, "udp", "10.9.0.0/24", tmpDir, "", "", "test-key")
+	if err != nil {
+		t.Fatalf("failed to create core: %v", err)
+	}
+
+	core.AddUsers([]panel.UserInfo{{Id: 99, Uuid: "test-reauth-uuid"}})
+
+	// 1. Initial connect
+	evConnect := ovpnEvent{
+		kind: "CLIENT_CONNECT",
+		cid:  "cid-reauth-1",
+		kid:  "0",
+		env: map[string]string{
+			"username":      "test-reauth-uuid",
+			"untrusted_ip": "1.2.3.4",
+		},
+	}
+	core.handleClientConnect(evConnect, false)
+
+	// Verify session stored with 0 byte counts
+	val, ok := core.sessions.Load("cid-reauth-1")
+	if !ok {
+		t.Fatalf("session not stored after initial connect")
+	}
+	sess := val.(*ovpnSession)
+	if sess.LastBytesIn != 0 || sess.LastBytesOut != 0 {
+		t.Errorf("expected initial 0 bytes, got in=%d out=%d", sess.LastBytesIn, sess.LastBytesOut)
+	}
+
+	// 2. Transmit 500 MB in, 200 MB out
+	core.handleByteCount(ovpnEvent{
+		kind: "BYTECOUNT_CLI",
+		cid:  "cid-reauth-1",
+		in:   500 * 1024 * 1024,
+		out:  200 * 1024 * 1024,
+	})
+
+	traffic1 := core.GetTrafficAndReset()
+	if traffic1[99].Upload != 500*1024*1024 || traffic1[99].Download != 200*1024*1024 {
+		t.Fatalf("unexpected traffic recorded: %+v", traffic1[99])
+	}
+
+	// 3. One hour later: TLS Renegotiation triggers CLIENT_REAUTH with kid=1
+	evReauth := ovpnEvent{
+		kind: "CLIENT_REAUTH",
+		cid:  "cid-reauth-1",
+		kid:  "1",
+		env: map[string]string{
+			"username":      "test-reauth-uuid",
+			"untrusted_ip": "1.2.3.4",
+		},
+	}
+	core.handleClientConnect(evReauth, true)
+
+	// Check that previous counters were preserved!
+	val2, ok := core.sessions.Load("cid-reauth-1")
+	if !ok {
+		t.Fatalf("session missing after reauth")
+	}
+	sess2 := val2.(*ovpnSession)
+	if sess2.LastBytesIn != 500*1024*1024 || sess2.LastBytesOut != 200*1024*1024 {
+		t.Errorf("reauth lost prior byte counters: got in=%d, out=%d", sess2.LastBytesIn, sess2.LastBytesOut)
+	}
+
+	// 4. Next bytecount report after reauth has slightly increased traffic
+	core.handleByteCount(ovpnEvent{
+		kind: "BYTECOUNT_CLI",
+		cid:  "cid-reauth-1",
+		in:   505 * 1024 * 1024, // +5 MB
+		out:  202 * 1024 * 1024, // +2 MB
+	})
+
+	traffic2 := core.GetTrafficAndReset()
+	if traffic2[99].Upload != 5*1024*1024 {
+		t.Errorf("traffic double-counted after reauth! Expected 5MB upload, got %d", traffic2[99].Upload)
+	}
+	if traffic2[99].Download != 2*1024*1024 {
+		t.Errorf("traffic double-counted after reauth! Expected 2MB download, got %d", traffic2[99].Download)
+	}
+}
+
+func TestLogRingBuffer(t *testing.T) {
+	ring := newLogRingBuffer(3)
+
+	_, _ = ring.Write([]byte("line 1\nline 2\n"))
+	dump1 := ring.Dump()
+	if len(dump1) != 2 || dump1[0] != "line 1" || dump1[1] != "line 2" {
+		t.Fatalf("dump1 unexpected: %v", dump1)
+	}
+
+	// Overwrite ring buffer capacity (capacity = 3)
+	_, _ = ring.Write([]byte("line 3\nline 4\n"))
+	dump2 := ring.Dump()
+	if len(dump2) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %v", len(dump2), dump2)
+	}
+	// Oldest "line 1" was discarded; should be [line 2, line 3, line 4]
+	if dump2[0] != "line 2" || dump2[1] != "line 3" || dump2[2] != "line 4" {
+		t.Errorf("unexpected ring buffer ordering: %v", dump2)
 	}
 }
