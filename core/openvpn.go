@@ -52,6 +52,7 @@ type OpenVPNCore struct {
 	sessions   sync.Map // cid -> *ovpnSession
 	limiterRef *limiter.Limiter
 	running    atomic.Bool
+	waitDone   chan struct{}
 
 	trafficMu sync.RWMutex
 	traffic   map[int]*UserTraffic // key: uid
@@ -148,7 +149,7 @@ func (o *OpenVPNCore) Start() error {
 	_ = execCommand(fmt.Sprintf("ip link delete %s", o.InterfaceName))
 
 	o.cmd = exec.Command("openvpn", "--config", confPath)
-	o.cmd.Stdout = log.StandardLogger().WriterLevel(log.DebugLevel)
+	o.cmd.Stdout = log.StandardLogger().WriterLevel(log.InfoLevel)
 	o.cmd.Stderr = log.StandardLogger().WriterLevel(log.WarnLevel)
 
 	if err := o.cmd.Start(); err != nil {
@@ -181,6 +182,26 @@ func (o *OpenVPNCore) Start() error {
 	}
 
 	o.running.Store(true)
+	waitDone := make(chan struct{})
+	o.waitDone = waitDone
+	go func() {
+		defer close(waitDone)
+		waitErr := o.cmd.Wait()
+		if o.running.Load() {
+			o.running.Store(false)
+			log.WithFields(log.Fields{
+				"tag":        o.Tag,
+				"exit_error": waitErr,
+			}).Error("OpenVPN process exited unexpectedly")
+			if o.mgmt != nil {
+				_ = o.mgmt.Close()
+			}
+			o.sessions.Range(func(key, _ interface{}) bool {
+				o.sessions.Delete(key)
+				return true
+			})
+		}
+	}()
 	go o.eventLoop()
 
 	log.WithFields(log.Fields{
@@ -203,7 +224,10 @@ func (o *OpenVPNCore) Stop() error {
 	}
 	if o.cmd != nil && o.cmd.Process != nil {
 		_ = o.cmd.Process.Kill()
-		_ = o.cmd.Wait()
+	}
+	if o.waitDone != nil {
+		<-o.waitDone
+		o.waitDone = nil
 	}
 	_ = os.Remove(o.socketPath)
 
@@ -222,6 +246,10 @@ func (o *OpenVPNCore) Stop() error {
 
 	log.WithField("tag", o.Tag).Info("OpenVPN server stopped")
 	return nil
+}
+
+func (o *OpenVPNCore) IsRunning() bool {
+	return o.running.Load()
 }
 
 // AddUsers registers users as valid credentials.
@@ -403,6 +431,7 @@ func (o *OpenVPNCore) ensureCertMaterial() (caFile, serverCertFile, serverKeyFil
 	if err := generateServerCert(caCert, caKey, srvCertPath, srvKeyPath); err != nil {
 		return "", "", "", fmt.Errorf("generate server cert: %w", err)
 	}
+	makeReadableByUnprivilegedUser(srvKeyPath)
 
 	log.WithField("tag", o.Tag).Info("OpenVPN server certificate generated and signed by CA")
 	return o.CertFile, srvCertPath, srvKeyPath, nil
@@ -520,6 +549,7 @@ func (o *OpenVPNCore) writeServerConf(path, caFile, certFile, keyFile, taKeyPath
 proto %s
 dev %s
 dev-type tun
+disable-dco
 
 ca %s
 cert %s
@@ -553,6 +583,9 @@ auth SHA256
 
 user nobody
 group nogroup
+# Keep key material in memory across SIGUSR1/ping-restart soft restarts
+# so the unprivileged nobody user does not fail on re-reading key files.
+persist-key
 
 verb 3
 `, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask)

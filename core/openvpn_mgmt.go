@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -55,7 +56,7 @@ func dialOpenVPNManagement(socketPath string) (*ovpnMgmtClient, error) {
 		conn:           conn,
 		reader:         bufio.NewReader(conn),
 		pendingReplies: make(chan string, 16),
-		events:         make(chan ovpnEvent, 64),
+		events:         make(chan ovpnEvent, 256),
 		done:           make(chan struct{}),
 	}
 
@@ -69,18 +70,31 @@ func (c *ovpnMgmtClient) Close() error {
 }
 
 // send writes a raw command line and returns the synchronous reply line
-// (e.g. "SUCCESS: ...").
+// (e.g. "SUCCESS: ..."). The mutex covers the full write-and-read transaction
+// to prevent concurrent callers from interleaving command replies.
 func (c *ovpnMgmtClient) send(cmd string) (string, error) {
 	c.writeMu.Lock()
-	_, err := c.conn.Write([]byte(cmd + "\n"))
-	c.writeMu.Unlock()
-	if err != nil {
+	defer c.writeMu.Unlock()
+
+	// Drain any stale reply that arrived unexpectedly before our command
+	for {
+		select {
+		case <-c.pendingReplies:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	if _, err := c.conn.Write([]byte(cmd + "\n")); err != nil {
 		return "", err
 	}
 
 	select {
 	case reply := <-c.pendingReplies:
 		return reply, nil
+	case <-time.After(10 * time.Second):
+		return "", fmt.Errorf("management command %q timed out", cmd)
 	case <-c.done:
 		return "", fmt.Errorf("management client closed")
 	}
@@ -114,6 +128,17 @@ func (c *ovpnMgmtClient) denyClient(cid, kid, reason string) error {
 func (c *ovpnMgmtClient) killClient(cid string) error {
 	_, err := c.send(fmt.Sprintf("client-kill %s", cid))
 	return err
+}
+
+func (c *ovpnMgmtClient) pushEvent(ev ovpnEvent) {
+	select {
+	case c.events <- ev:
+	default:
+		log.WithFields(log.Fields{
+			"kind": ev.kind,
+			"cid":  ev.cid,
+		}).Warn("openvpn management: events buffer full, dropping event to prevent deadlock")
+	}
 }
 
 // readLoop continuously reads lines from the socket.
@@ -166,7 +191,7 @@ func (c *ovpnMgmtClient) readLoop() {
 			kv := strings.TrimPrefix(body, "CLIENT:ENV,")
 			if kv == "END" {
 				if pendingEnv != nil {
-					c.events <- ovpnEvent{kind: pendingKind, cid: pendingCID, kid: pendingKID, env: pendingEnv}
+					c.pushEvent(ovpnEvent{kind: pendingKind, cid: pendingCID, kid: pendingKID, env: pendingEnv})
 				}
 				pendingEnv = nil
 				continue
@@ -180,12 +205,12 @@ func (c *ovpnMgmtClient) readLoop() {
 
 		case strings.HasPrefix(body, "CLIENT:ESTABLISHED,"):
 			cid := strings.TrimPrefix(body, "CLIENT:ESTABLISHED,")
-			c.events <- ovpnEvent{kind: "CLIENT_ESTABLISHED", cid: cid}
+			c.pushEvent(ovpnEvent{kind: "CLIENT_ESTABLISHED", cid: cid})
 
 		case strings.HasPrefix(body, "CLIENT:DISCONNECT,"):
 			fields := strings.SplitN(body, ",", 2)
 			cid := fields[1]
-			c.events <- ovpnEvent{kind: "CLIENT_DISCONNECT", cid: cid, env: map[string]string{}}
+			c.pushEvent(ovpnEvent{kind: "CLIENT_DISCONNECT", cid: cid, env: map[string]string{}})
 
 		case strings.HasPrefix(body, "BYTECOUNT_CLI:"):
 			// Format: >BYTECOUNT_CLI:<CID>,<BYTES_IN>,<BYTES_OUT>
@@ -194,7 +219,7 @@ func (c *ovpnMgmtClient) readLoop() {
 			if len(parts) == 3 {
 				in, _ := strconv.ParseInt(parts[1], 10, 64)
 				out, _ := strconv.ParseInt(parts[2], 10, 64)
-				c.events <- ovpnEvent{kind: "BYTECOUNT_CLI", cid: parts[0], in: in, out: out}
+				c.pushEvent(ovpnEvent{kind: "BYTECOUNT_CLI", cid: parts[0], in: in, out: out})
 			} else {
 				// Don't drop silently -- if a future OpenVPN version ever
 				// changes this format, we want it visible instead of
