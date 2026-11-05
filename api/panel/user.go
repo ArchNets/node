@@ -114,6 +114,7 @@ func (c *ClientV1) GetUserAlive() (map[int]int, error) {
 }
 
 type ServerPushUserTrafficRequest struct {
+	BatchID string        `json:"batch_id,omitempty"`
 	Traffic []UserTraffic `json:"traffic"`
 }
 
@@ -124,6 +125,12 @@ type UserTraffic struct {
 }
 
 func (c *ClientV1) ReportUserTraffic(protocolName string, userTraffic *[]UserTraffic) error {
+	return c.ReportUserTrafficBatch(protocolName, "", userTraffic)
+}
+
+// ReportUserTrafficBatch submits an idempotency key with a traffic batch.
+// The backend may safely ignore a repeated batch ID after an ambiguous response.
+func (c *ClientV1) ReportUserTrafficBatch(protocolName, batchID string, userTraffic *[]UserTraffic) error {
 	traffic := make([]UserTraffic, 0)
 	for _, t := range *userTraffic {
 		traffic = append(traffic, UserTraffic{
@@ -134,6 +141,7 @@ func (c *ClientV1) ReportUserTraffic(protocolName string, userTraffic *[]UserTra
 	}
 	p := "/v1/server/push"
 	req := ServerPushUserTrafficRequest{
+		BatchID: batchID,
 		Traffic: traffic,
 	}
 	r, err := c.Client.R().
@@ -240,4 +248,3 @@ func (c *ClientV1) PushDestinationTelemetry(records []DestinationRecord) error {
 	}
 	return nil
 }
-

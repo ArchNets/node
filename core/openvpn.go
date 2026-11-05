@@ -16,6 +16,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -37,20 +38,22 @@ type ovpnResponder interface {
 // through its management interface for dynamic (no-restart) user add/remove,
 // auth decisions, and traffic accounting.
 type OpenVPNCore struct {
-	Tag           string
-	LimiterTag    string // Base node tag used for limiter lookup (e.g. "openvpn-1-1194")
-	Port          int
-	Proto         string // "udp" or "tcp"
-	Subnet        string // client pool in CIDR notation
-	WorkDir       string // per-node directory for config/certs/socket
-	CertFile      string // real cert path (from panel CertMode="file"/"acme"), optional
-	KeyFile       string // real key path, optional
-	TlsCryptKey   string // tls-crypt static key content, optional
-	InterfaceName string
+	Tag                 string
+	LimiterTag          string // Base node tag used for limiter lookup (e.g. "openvpn-1-1194")
+	Port                int
+	Proto               string // "udp" or "tcp"
+	Subnet              string // client pool in CIDR notation
+	WorkDir             string // per-node directory for config/certs/socket
+	CertFile            string // real cert path (from panel CertMode="file"/"acme"), optional
+	KeyFile             string // real key path, optional
+	TlsCryptKey         string // tls-crypt static key content, optional
+	InterfaceName       string
 	TProxyPort          int
 	TProxySubnet        string
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
+	ByteCountInterval   int
+	OnUnexpectedExit    func()
 
 	cmd        *exec.Cmd
 	mgmt       atomic.Pointer[ovpnMgmtClient]
@@ -90,9 +93,13 @@ func NewOpenVPNCore(tag string, port int, proto, subnet, workDir, certFile, keyF
 	if proto != "udp" && proto != "tcp" {
 		proto = "udp"
 	}
-	if subnet == "" { subnet = "10.9.0.0/24" }
+	if subnet == "" {
+		subnet = "10.9.0.0/24"
+	}
 	_, pool, err := net.ParseCIDR(subnet)
-	if err != nil { return nil, fmt.Errorf("invalid OpenVPN subnet %q: %w", subnet, err) }
+	if err != nil {
+		return nil, fmt.Errorf("invalid OpenVPN subnet %q: %w", subnet, err)
+	}
 	subnet = pool.String()
 	// 0711 (not 0700): the openvpn process drops privileges to
 	// nobody/nogroup (see writeServerConf) and re-reads key material after
@@ -213,8 +220,23 @@ func (o *OpenVPNCore) Start() error {
 		return fmt.Errorf("connect to management socket: %w", err)
 	}
 	o.mgmt.Store(mgmt)
+	if err := o.verifyDCOActive(); err != nil {
+		_ = mgmt.Close()
+		o.mgmt.Store(nil)
+		if o.cmd.Process != nil {
+			_ = o.cmd.Process.Kill()
+			_ = o.cmd.Wait()
+		}
+		o.closePipes()
+		o.teardownNAT()
+		return fmt.Errorf("OpenVPN DCO is required but not active: %w", err)
+	}
 
-	if err := mgmt.enableByteCount(10); err != nil {
+	byteCountInterval := o.ByteCountInterval
+	if byteCountInterval <= 0 {
+		byteCountInterval = 30
+	}
+	if err := mgmt.enableByteCount(byteCountInterval); err != nil {
 		log.WithError(err).Warn("openvpn: failed to enable bytecount reporting")
 	}
 
@@ -240,6 +262,9 @@ func (o *OpenVPNCore) Start() error {
 				o.sessions.Delete(key)
 				return true
 			})
+			if o.OnUnexpectedExit != nil {
+				o.OnUnexpectedExit()
+			}
 		}
 	}()
 	go o.eventLoop(mgmt)
@@ -647,15 +672,19 @@ func generateServerCert(caCert *x509.Certificate, caKey interface{}, certPath, k
 
 func (o *OpenVPNCore) writeServerConf(path, caFile, certFile, keyFile, taKeyPath string) error {
 	poolIP, pool, err := net.ParseCIDR(o.Subnet)
-	if err != nil { return fmt.Errorf("invalid OpenVPN subnet %q: %w", o.Subnet, err) }
+	if err != nil {
+		return fmt.Errorf("invalid OpenVPN subnet %q: %w", o.Subnet, err)
+	}
 	mask := net.IP(pool.Mask).String()
-	if mask == "<nil>" { return fmt.Errorf("OpenVPN subnet %q is not IPv4", o.Subnet) }
+	if mask == "<nil>" {
+		return fmt.Errorf("OpenVPN subnet %q is not IPv4", o.Subnet)
+	}
 	serverNetwork := poolIP.Mask(pool.Mask).String()
 	conf := fmt.Sprintf(`port %d
 proto %s
 dev %s
 dev-type tun
-disable-dco
+max-clients 10000
 
 ca %s
 cert %s
@@ -697,6 +726,26 @@ verb 3
 `, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask)
 
 	return os.WriteFile(path, []byte(conf), 0600)
+}
+
+// verifyDCOActive checks the created tunnel's kernel link kind. OpenVPN may
+// silently fall back to a userspace TUN when DCO is unavailable, which is not
+// acceptable for production nodes configured to require DCO.
+func (o *OpenVPNCore) verifyDCOActive() error {
+	output, err := exec.Command("ip", "-d", "link", "show", "dev", o.InterfaceName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("inspect tunnel interface %q: %w: %s", o.InterfaceName, err, strings.TrimSpace(string(output)))
+	}
+	info := string(output)
+	if strings.Contains(info, "kind ovpn\n") || strings.Contains(info, "kind ovpn ") || strings.Contains(info, "kind ovpn-dco") {
+		log.WithFields(log.Fields{"tag": o.Tag, "interface": o.InterfaceName, "link_info": strings.TrimSpace(info)}).Info("OpenVPN DCO active")
+		return nil
+	}
+	return fmt.Errorf("interface %q is not an OpenVPN DCO link: %s", o.InterfaceName, strings.TrimSpace(info))
+}
+
+func (o *OpenVPNCore) SetByteCountInterval(seconds int) {
+	o.ByteCountInterval = seconds
 }
 
 func waitForManagementSocket(path string, timeout time.Duration) (*ovpnMgmtClient, error) {
@@ -785,7 +834,9 @@ func (o *OpenVPNCore) setupNAT() error {
 	}
 
 	tproxySubnet := o.TProxySubnet
-	if tproxySubnet == "" { tproxySubnet = subnet }
+	if tproxySubnet == "" {
+		tproxySubnet = subnet
+	}
 
 	if o.TProxyPort > 0 {
 		tproxyAvailable := execCommand("iptables -w 5 -t mangle -m TPROXY -h") == nil ||

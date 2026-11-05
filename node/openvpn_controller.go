@@ -1,8 +1,12 @@
 package node
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,6 +43,17 @@ type OpenVPNController struct {
 	closed            atomic.Bool
 	reconcileMu       sync.Mutex
 	reconcileFailures map[string]int
+	recoveryActive    map[string]bool
+	reportMu          sync.Mutex
+	pendingTraffic    []panel.UserTraffic
+	pendingBatchID    string
+	pendingProtocol   string
+}
+
+type openVPNTrafficBatch struct {
+	ID       string              `json:"id"`
+	Protocol string              `json:"protocol"`
+	Traffic  []panel.UserTraffic `json:"traffic"`
 }
 
 func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, info *panel.NodeInfo, protocolIndex int, isPrimaryReporter bool) *OpenVPNController {
@@ -51,6 +66,7 @@ func NewOpenVPNController(xrayCore *vCore.XrayCore, apiClient *panel.ClientV1, i
 		protocolIndex:     protocolIndex,
 		isPrimaryReporter: isPrimaryReporter,
 		reconcileFailures: make(map[string]int),
+		recoveryActive:    make(map[string]bool),
 	}
 }
 
@@ -75,6 +91,10 @@ func generateOpenVPNXrayTag(info *panel.NodeInfo) string {
 
 // Start starts the OpenVPN controller.
 func (c *OpenVPNController) Start() error {
+	if err := c.loadPendingTraffic(); err != nil {
+		return fmt.Errorf("load pending OpenVPN traffic batch: %w", err)
+	}
+
 	protoName := c.getIndexedProtocolName()
 	users, err := c.apiClient.GetUserList(protoName)
 	if err != nil {
@@ -171,6 +191,17 @@ func (c *OpenVPNController) Start() error {
 
 		openvpnCore.LimiterTag = c.tag
 		openvpnCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
+		byteCountInterval := c.info.PushInterval
+		if byteCountInterval < 30 {
+			byteCountInterval = 30
+		} else if byteCountInterval > 60 {
+			byteCountInterval = 60
+		}
+		openvpnCore.SetByteCountInterval(byteCountInterval)
+		core := openvpnCore
+		core.OnUnexpectedExit = func() {
+			c.scheduleUnexpectedRestart(core)
+		}
 
 		if c.tproxyEnabled {
 			tproxySubnet := inst.subnet
@@ -205,6 +236,64 @@ func (c *OpenVPNController) Start() error {
 	}).Info("OpenVPN controller started")
 
 	return nil
+}
+
+func (c *OpenVPNController) scheduleUnexpectedRestart(core *vCore.OpenVPNCore) {
+	c.reconcileMu.Lock()
+	if c.closed.Load() || c.recoveryActive[core.Tag] {
+		c.reconcileMu.Unlock()
+		return
+	}
+	if c.recoveryActive == nil {
+		c.recoveryActive = make(map[string]bool)
+	}
+	c.recoveryActive[core.Tag] = true
+	c.reconcileMu.Unlock()
+	go c.restartAfterUnexpectedExit(core)
+}
+
+func (c *OpenVPNController) restartAfterUnexpectedExit(core *vCore.OpenVPNCore) {
+	defer func() {
+		c.reconcileMu.Lock()
+		delete(c.recoveryActive, core.Tag)
+		c.reconcileMu.Unlock()
+	}()
+
+	delay := time.Second
+	for {
+		if c.closed.Load() {
+			return
+		}
+
+		c.reconcileMu.Lock()
+		if c.closed.Load() || core.IsRunning() {
+			c.reconcileMu.Unlock()
+			return
+		}
+		err := core.Restart()
+		if err == nil {
+			c.reconcileFailures[core.Tag] = 0
+			c.reconcileMu.Unlock()
+			log.WithField("tag", core.Tag).Info("OpenVPN core recovered after unexpected exit")
+			return
+		}
+
+		c.reconcileFailures[core.Tag]++
+		failures := c.reconcileFailures[core.Tag]
+		c.reconcileMu.Unlock()
+		log.WithError(err).WithFields(log.Fields{
+			"tag":      core.Tag,
+			"retry_in": delay.String(),
+			"failures": failures,
+		}).Error("OpenVPN recovery attempt failed")
+		time.Sleep(delay)
+		if delay < time.Minute {
+			delay *= 2
+			if delay > time.Minute {
+				delay = time.Minute
+			}
+		}
+	}
 }
 
 // Close stops the OpenVPN controller.
@@ -267,7 +356,13 @@ func (c *OpenVPNController) reconcileCores() {
 	defer c.reconcileMu.Unlock()
 
 	for _, core := range c.openvpnCores {
-		if core == nil || core.IsRunning() {
+		if core == nil {
+			continue
+		}
+		if c.recoveryActive[core.Tag] {
+			continue
+		}
+		if core.IsRunning() {
 			if c.reconcileFailures[core.Tag] > 0 {
 				c.reconcileFailures[core.Tag] = 0
 			}
@@ -357,73 +452,83 @@ func (c *OpenVPNController) reportTask() error {
 	if c.closed.Load() {
 		return nil
 	}
+	c.reportMu.Lock()
+	defer c.reportMu.Unlock()
 
 	reportMin := 0
 	if c.info.TrafficReportThreshold > 0 {
 		reportMin = c.info.TrafficReportThreshold
 	}
 
-	trafficMap := make(map[int]*vCore.UserTraffic)
-	for _, core := range c.openvpnCores {
-		for uid, t := range core.GetTrafficAndReset() {
-			if existing, ok := trafficMap[uid]; ok {
-				existing.Upload += t.Upload
-				existing.Download += t.Download
-			} else {
-				trafficMap[uid] = &vCore.UserTraffic{
-					Upload:   t.Upload,
-					Download: t.Download,
+	// Do not drain more counters while a batch is waiting for acknowledgement.
+	// Keeping the same batch ID across retries lets the backend deduplicate an
+	// accepted request whose response was lost.
+	if len(c.pendingTraffic) == 0 {
+		var batchID [16]byte
+		if _, err := rand.Read(batchID[:]); err != nil {
+			return fmt.Errorf("generate OpenVPN traffic batch ID: %w", err)
+		}
+		trafficMap := make(map[int]*vCore.UserTraffic)
+		for _, core := range c.openvpnCores {
+			for uid, t := range core.GetTrafficAndReset() {
+				if existing, ok := trafficMap[uid]; ok {
+					existing.Upload += t.Upload
+					existing.Download += t.Download
+				} else {
+					trafficMap[uid] = &vCore.UserTraffic{Upload: t.Upload, Download: t.Download}
 				}
+			}
+		}
+
+		for uid, traffic := range trafficMap {
+			if traffic.Upload+traffic.Download >= int64(reportMin) {
+				c.pendingTraffic = append(c.pendingTraffic, panel.UserTraffic{
+					UID: uid, Upload: traffic.Upload, Download: traffic.Download,
+				})
+			}
+		}
+		if len(c.pendingTraffic) > 0 {
+			c.pendingBatchID = hex.EncodeToString(batchID[:])
+			c.pendingProtocol = c.getIndexedProtocolName()
+		}
+	}
+
+	if len(c.pendingTraffic) > 0 {
+		if err := c.persistPendingTraffic(); err != nil {
+			return fmt.Errorf("persist OpenVPN traffic batch before send: %w", err)
+		}
+		if err := c.apiClient.ReportUserTrafficBatch(c.pendingProtocol, c.pendingBatchID, &c.pendingTraffic); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "batch_id": c.pendingBatchID, "err": err}).Warn("OpenVPN: traffic batch retained for retry")
+		} else {
+			log.WithField("node", c.tag).Infof("OpenVPN: Reported traffic batch for %d users", len(c.pendingTraffic))
+			if err := c.removePendingTraffic(); err != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "batch_id": c.pendingBatchID, "err": err}).Warn("OpenVPN: acknowledged batch journal could not be removed; it will be retried idempotently")
+			} else {
+				c.pendingTraffic = nil
+				c.pendingBatchID = ""
+				c.pendingProtocol = ""
 			}
 		}
 	}
 
-	var userTraffic []panel.UserTraffic
-	for uid, traffic := range trafficMap {
-		total := traffic.Upload + traffic.Download
-		if total >= int64(reportMin) {
-			userTraffic = append(userTraffic, panel.UserTraffic{UID: uid, Upload: traffic.Upload, Download: traffic.Download})
-		}
-	}
-
-	if len(userTraffic) > 0 {
-		if err := c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("OpenVPN: Report user traffic failed")
-		} else {
-			log.WithField("node", c.tag).Infof("OpenVPN: Reported traffic for %d users", len(userTraffic))
-		}
-	}
-
 	var onlineUsers []panel.OnlineUser
-	seenOnline := make(map[int]bool)
+	seenOnline := make(map[string]bool)
 	for _, core := range c.openvpnCores {
 		for _, ou := range core.GetOnlineUsers() {
-			if !seenOnline[ou.UID] {
-				seenOnline[ou.UID] = true
+			key := strconv.Itoa(ou.UID) + "\x00" + ou.IP
+			if !seenOnline[key] {
+				seenOnline[key] = true
 				onlineUsers = append(onlineUsers, ou)
 			}
 		}
 	}
 
-	var result []panel.OnlineUser
-	trafficUIDs := make(map[int]bool)
-	for _, t := range userTraffic {
-		if t.Upload+t.Download > 0 {
-			trafficUIDs[t.UID] = true
-		}
-	}
-	for _, online := range onlineUsers {
-		if trafficUIDs[online.UID] {
-			result = append(result, online)
-		}
-	}
-
 	// Report online users
 	protocolName := c.getIndexedProtocolName()
-	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &result); err != nil {
+	if err := c.apiClient.ReportNodeOnlineUsers(protocolName, &onlineUsers); err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Info("OpenVPN: Report online users failed")
 	} else {
-		log.WithField("node", c.tag).Infof("OpenVPN: Total %d online users, %d reported", len(onlineUsers), len(result))
+		log.WithField("node", c.tag).Infof("OpenVPN: Reported %d online sessions", len(onlineUsers))
 	}
 
 	if c.isPrimaryReporter {
@@ -437,6 +542,83 @@ func (c *OpenVPNController) reportTask() error {
 	}
 
 	return nil
+}
+
+func (c *OpenVPNController) trafficBatchPath() string {
+	return filepath.Join("/etc/archnets/openvpn", c.tag+".traffic-pending.json")
+}
+
+func (c *OpenVPNController) loadPendingTraffic() error {
+	data, err := os.ReadFile(c.trafficBatchPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var batch openVPNTrafficBatch
+	if err := json.Unmarshal(data, &batch); err != nil {
+		return err
+	}
+	if batch.ID == "" || batch.Protocol == "" || len(batch.Traffic) == 0 {
+		return fmt.Errorf("pending batch journal is missing its ID, protocol, or traffic entries")
+	}
+	c.pendingBatchID = batch.ID
+	c.pendingProtocol = batch.Protocol
+	c.pendingTraffic = batch.Traffic
+	return nil
+}
+
+func (c *OpenVPNController) persistPendingTraffic() error {
+	path := c.trafficBatchPath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".traffic-pending-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := json.NewEncoder(tmp).Encode(openVPNTrafficBatch{
+		ID: c.pendingBatchID, Protocol: c.pendingProtocol, Traffic: c.pendingTraffic,
+	}); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
+}
+
+func (c *OpenVPNController) removePendingTraffic() error {
+	path := c.trafficBatchPath()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (c *OpenVPNController) getIndexedProtocolName() string {
