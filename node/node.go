@@ -260,7 +260,7 @@ func (n *Node) Start() error {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Error("Failed to start OpenVPN node (openvpn binary may not be installed)")
+			}).Error("Failed to start OpenVPN node")
 		}
 		return nil
 	})

@@ -737,11 +737,35 @@ func (o *OpenVPNCore) verifyDCOActive() error {
 		return fmt.Errorf("inspect tunnel interface %q: %w: %s", o.InterfaceName, err, strings.TrimSpace(string(output)))
 	}
 	info := string(output)
-	if strings.Contains(info, "kind ovpn\n") || strings.Contains(info, "kind ovpn ") || strings.Contains(info, "kind ovpn-dco") {
+	if isOpenVPNDCOInterfaceInfo(info) {
 		log.WithFields(log.Fields{"tag": o.Tag, "interface": o.InterfaceName, "link_info": strings.TrimSpace(info)}).Info("OpenVPN DCO active")
 		return nil
 	}
 	return fmt.Errorf("interface %q is not an OpenVPN DCO link: %s", o.InterfaceName, strings.TrimSpace(info))
+}
+
+// iproute2 versions format link kinds differently. The legacy ovpn-dco
+// module reports a standalone "ovpn-dco ..." line, while other versions may
+// print "kind ovpn" or "kind ovpn-dco". Inspect the first token on each line
+// so the interface name itself cannot accidentally satisfy this check.
+func isOpenVPNDCOInterfaceInfo(info string) bool {
+	for _, line := range strings.Split(info, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		kind := strings.TrimSuffix(fields[0], ":")
+		if kind == "kind" {
+			if len(fields) > 1 && (fields[1] == "ovpn" || fields[1] == "ovpn-dco") {
+				return true
+			}
+			continue
+		}
+		if kind == "ovpn" || kind == "ovpn-dco" || kind == "link/ovpn" || kind == "link/ovpn-dco" {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *OpenVPNCore) SetByteCountInterval(seconds int) {
