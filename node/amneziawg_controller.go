@@ -295,17 +295,20 @@ func (c *AmneziaWGController) reportTask() error {
 	// Get online users from AmneziaWG core
 	onlineUsers := c.wgCore.GetOnlineUsers()
 
-	// Filter out users with no actual traffic if needed, but getOnlineUsers usually based on handshake
-	// However, mimicking wireguard controller logic:
+	// Filter out users with no actual payload traffic.
+	// We require at least 16 KB of transferred data within the push interval to consider a peer
+	// genuinely active for location presence. Background keepalives and url-test checks generate < 4 KB
+	// and would otherwise falsely report the user as online on every server in their multi-node subscription.
+	const minActiveBytes = 16384
 	var result []panel.OnlineUser
 	trafficUIDs := make(map[int]bool)
 	for _, t := range userTraffic {
-		if t.Upload+t.Download > 0 {
+		if t.Upload+t.Download >= minActiveBytes {
 			trafficUIDs[t.UID] = true
 		}
 	}
 	for _, online := range onlineUsers {
-		if trafficUIDs[online.UID] {
+		if trafficUIDs[online.UID] && online.IP != "" {
 			result = append(result, online)
 		}
 	}

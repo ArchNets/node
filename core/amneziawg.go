@@ -295,9 +295,8 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 		w.users.ipToUID[assignedIP] = user.Id
 		RegisterTunnelUser(assignedIP, user.Id, user.Uuid, w.Tag)
 
-		// Execute awg command
-		// awg set <iface> peer <key> allowed-ips <ip>/32
-		cmd := fmt.Sprintf("awg set %s peer %s allowed-ips %s/32", w.InterfaceName, peerPublicKey.String(), assignedIP)
+		// Execute awg command with persistent-keepalive 25 to prevent NAT timeout
+		cmd := fmt.Sprintf("awg set %s peer %s allowed-ips %s/32 persistent-keepalive 25", w.InterfaceName, peerPublicKey.String(), assignedIP)
 		if err := execCommand(cmd); err != nil {
 			log.WithError(err).Errorf("Failed to add peer %s", user.Uuid)
 		}
@@ -614,6 +613,13 @@ func (w *AmneziaWGCore) collectStats() {
 			continue
 		}
 
+		rawEndpoint := parts[2]
+		if rawEndpoint != "" && rawEndpoint != "(none)" && assignedIP != "" {
+			if host, _, err := net.SplitHostPort(rawEndpoint); err == nil && host != "" {
+				UpdateTunnelUserEndpoint(assignedIP, host)
+			}
+		}
+
 		peerKey := pubKey
 		lastStats, exists := w.lastPeerStats[peerKey]
 		if !exists {
@@ -692,13 +698,25 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 			continue
 		}
 
+		rawEndpoint := parts[2]
+		clientIP := ""
+		if rawEndpoint != "" && rawEndpoint != "(none)" {
+			if host, _, err := net.SplitHostPort(rawEndpoint); err == nil && host != "" {
+				clientIP = host
+			}
+		}
+
 		// Find user
 		w.peers.Range(func(key, value interface{}) bool {
 			peer := value.(*WireGuardPeer)
 			if peer.PublicKey.String() == pubKey {
+				userIP := clientIP
+				if userIP == "" {
+					userIP = peer.IP
+				}
 				online = append(online, panel.OnlineUser{
 					UID: peer.UID,
-					IP:  peer.IP,
+					IP:  userIP,
 				})
 				return false
 			}
@@ -772,23 +790,34 @@ func (w *AmneziaWGCore) setupNAT() error {
 		}
 	}
 
-	// Always add TCPMSS clamping rule for forwarded / outbound traffic to prevent MTU blackholing
-	if err := execCommand("iptables -w 5 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"); err != nil {
-		_ = execCommand("iptables -w 5 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
+	tcpmss := w.MTU - 80
+	if tcpmss <= 0 {
+		tcpmss = 1240
+	}
+
+	// Always add TCPMSS clamping rules to prevent MTU blackholing:
+	// 1. In PREROUTING so incoming TCP SYN packets are clamped BEFORE TProxy redirects them to Xray!
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I PREROUTING 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	}
+	// 2. In FORWARD for kernel forwarded packets in both directions
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
 	}
 
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
 	// Must be inserted at head of chain (index 1) BEFORE the ACCEPT rules so they take effect
 	if w.DropICMPUnreachable {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		}
+		// Allow Path MTU Discovery (ICMP fragmentation-needed) so MTU detection doesn't blackhole
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
+
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 	}
 
 	tproxySubnet := w.TProxySubnet
@@ -837,7 +866,16 @@ func (w *AmneziaWGCore) setupNAT() error {
 
 		checkCmd := fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -j %s", w.InterfaceName, chainName)
 		if err := execCommand(checkCmd); err != nil {
-			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
+		 execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
+		}
+
+		// Add INPUT rule for TProxy marked packets (required when default INPUT policy is DROP/UFW)
+		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+		if err := execCommand(inputCheck); err != nil {
+		 inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+		 if err := execCommand(inputAdd); err != nil {
+		  return fmt.Errorf("add AmneziaWG TProxy INPUT rule: %w", err)
+		 }
 		}
 
 		// Also add MASQUERADE so Xray outbound traffic can reach external endpoints
@@ -863,19 +901,33 @@ func (w *AmneziaWGCore) setupMasquerade(subnet, defaultIface string) error {
 
 func (w *AmneziaWGCore) teardownNAT() {
 	subnet := getPoolSubnet(w.Address)
+	tproxySubnet := w.TProxySubnet
+	if tproxySubnet == "" {
+		tproxySubnet = subnet
+	}
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
 		defaultIface = "eth0"
 	}
 
+	tcpmss := w.MTU - 80
+	if tcpmss <= 0 {
+		tcpmss = 1240
+	}
+
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+
 	// Always clean up FORWARD and INPUT rules (added in both paths)
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", w.InterfaceName))
-	_ = execCommand("iptables -w 5 -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
 
 	if w.DropICMPUnreachable {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
@@ -887,6 +939,7 @@ func (w *AmneziaWGCore) teardownNAT() {
 	}
 
 	if w.TProxyPort > 0 {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet))
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))

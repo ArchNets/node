@@ -7,13 +7,14 @@ import (
 // TunnelUser stores identity attributes for a user connecting through a tunnel
 // interface (WireGuard, OpenVPN, IPsec) intercepted via TPROXY.
 type TunnelUser struct {
-	UID  int
-	UUID string
-	Tag  string
+	UID      int
+	UUID     string
+	Tag      string
+	ClientIP string // Real external IP of the connecting client (e.g. from WireGuard endpoint or OpenVPN remote)
 }
 
 var (
-	tunnelIPMap sync.Map // key: string (IP literal), value: TunnelUser
+	tunnelIPMap sync.Map // key: string (internal IP literal), value: TunnelUser
 )
 
 // RegisterTunnelUser records an internal tunnel IP to user mapping.
@@ -26,6 +27,18 @@ func RegisterTunnelUser(ip string, uid int, uuid string, tag string) {
 		UUID: uuid,
 		Tag:  tag,
 	})
+}
+
+// UpdateTunnelUserEndpoint updates the real external client IP for an internal tunnel IP.
+func UpdateTunnelUserEndpoint(internalIP string, externalClientIP string) {
+	if internalIP == "" || externalClientIP == "" {
+		return
+	}
+	if v, ok := tunnelIPMap.Load(internalIP); ok {
+		tu := v.(TunnelUser)
+		tu.ClientIP = externalClientIP
+		tunnelIPMap.Store(internalIP, tu)
+	}
 }
 
 // UnregisterTunnelUser removes an internal tunnel IP mapping.

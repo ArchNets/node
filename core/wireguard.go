@@ -203,6 +203,8 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 	w.users.mu.Lock()
 	defer w.users.mu.Unlock()
 
+	var newPeers []wgtypes.PeerConfig
+
 	// Structure for parsing the JSON service_id
 	type ServiceIdentity struct {
 		WireGuard *struct {
@@ -269,11 +271,26 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		w.users.idToUUID[user.Id] = user.Uuid
 		w.users.ipToUID[assignedIP] = user.Id
 		RegisterTunnelUser(assignedIP, user.Id, user.Uuid, w.Tag)
+
+		keepalive := 25 * time.Second
+		newPeers = append(newPeers, wgtypes.PeerConfig{
+			PublicKey:                   peerPublicKey,
+			AllowedIPs:                  []net.IPNet{*ipnet},
+			ReplaceAllowedIPs:           true,
+			PersistentKeepaliveInterval: &keepalive,
+		})
 	}
 
-	// Update WireGuard configuration with new peers
-	if err := w.updatePeers(); err != nil {
-		log.WithError(err).Error("Failed to update WireGuard peers")
+	// Update WireGuard configuration incrementally with ONLY the new/changed peers.
+	// ReplacePeers: false ensures existing connected peers' session keys and endpoints are NOT wiped.
+	if len(newPeers) > 0 {
+		config := wgtypes.Config{
+			Peers:        newPeers,
+			ReplacePeers: false,
+		}
+		if err := w.wgClient.ConfigureDevice(w.InterfaceName, config); err != nil {
+			log.WithError(err).Error("Failed to incrementally add WireGuard peers")
+		}
 	}
 
 	log.WithFields(log.Fields{
@@ -287,12 +304,19 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 	w.users.mu.Lock()
 	defer w.users.mu.Unlock()
 
+	var removedPeers []wgtypes.PeerConfig
+
 	for _, user := range users {
-		// Get assigned IP for cleanup
+		// Get assigned IP and public key for cleanup
 		assignedIP := ""
 		if uuid, exists := w.users.idToUUID[user.Id]; exists {
 			if peer, ok := w.peers.Load(uuid); ok {
-				assignedIP = peer.(*WireGuardPeer).IP
+				wgPeer := peer.(*WireGuardPeer)
+				assignedIP = wgPeer.IP
+				removedPeers = append(removedPeers, wgtypes.PeerConfig{
+					PublicKey: wgPeer.PublicKey,
+					Remove:    true,
+				})
 			}
 		}
 
@@ -306,9 +330,15 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 		}
 	}
 
-	// Update WireGuard configuration
-	if err := w.updatePeers(); err != nil {
-		log.WithError(err).Error("Failed to update WireGuard peers after deletion")
+	// Remove peers incrementally without wiping remaining connected peers
+	if len(removedPeers) > 0 {
+		config := wgtypes.Config{
+			Peers:        removedPeers,
+			ReplacePeers: false,
+		}
+		if err := w.wgClient.ConfigureDevice(w.InterfaceName, config); err != nil {
+			log.WithError(err).Error("Failed to incrementally remove WireGuard peers")
+		}
 	}
 
 	log.WithFields(log.Fields{
@@ -349,9 +379,16 @@ func (w *WireGuardCore) GetOnlineUsers() []panel.OnlineUser {
 		w.peers.Range(func(key, value interface{}) bool {
 			wgPeer := value.(*WireGuardPeer)
 			if wgPeer.PublicKey == peer.PublicKey {
+				clientIP := ""
+				if peer.Endpoint != nil && peer.Endpoint.IP != nil {
+					clientIP = peer.Endpoint.IP.String()
+				}
+				if clientIP == "" {
+					clientIP = wgPeer.IP
+				}
 				online = append(online, panel.OnlineUser{
 					UID: wgPeer.UID,
-					IP:  wgPeer.IP,
+					IP:  clientIP,
 				})
 				return false // Stop searching
 			}
@@ -559,6 +596,19 @@ func (w *WireGuardCore) collectStats() {
 		downloadDelta := peer.ReceiveBytes - lastStats.ReceiveBytes
 		uploadDelta := peer.TransmitBytes - lastStats.TransmitBytes
 
+		// Negative delta protection (in case device counters reset)
+		if downloadDelta < 0 {
+			downloadDelta = peer.ReceiveBytes
+		}
+		if uploadDelta < 0 {
+			uploadDelta = peer.TransmitBytes
+		}
+
+		// Update real client IP in tunnel registry whenever endpoint is available
+		if peer.Endpoint != nil && peer.Endpoint.IP != nil {
+			UpdateTunnelUserEndpoint(assignedIP, peer.Endpoint.IP.String())
+		}
+
 		// Update last stats
 		lastStats.ReceiveBytes = peer.ReceiveBytes
 		lastStats.TransmitBytes = peer.TransmitBytes
@@ -650,23 +700,34 @@ func (w *WireGuardCore) setupNAT() error {
 		}
 	}
 
-	// Always add TCPMSS clamping rule for forwarded / outbound traffic to prevent MTU blackholing
-	if err := execCommand("iptables -w 5 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"); err != nil {
-		_ = execCommand("iptables -w 5 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
+	tcpmss := w.MTU - 80
+	if tcpmss <= 0 {
+		tcpmss = 1240
+	}
+
+	// Always add TCPMSS clamping rules to prevent MTU blackholing:
+	// 1. In PREROUTING so incoming TCP SYN packets are clamped BEFORE TProxy redirects them to Xray!
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I PREROUTING 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	}
+	// 2. In FORWARD for kernel forwarded packets in both directions
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
 	}
 
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
 	// Must be inserted at head of chain (index 1) BEFORE the ACCEPT rules so they take effect
 	if w.DropICMPUnreachable {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		}
+		// Allow Path MTU Discovery (ICMP fragmentation-needed) so MTU detection doesn't blackhole
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
+
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 	}
 
 	tproxySubnet := w.TProxySubnet
@@ -728,6 +789,15 @@ func (w *WireGuardCore) setupNAT() error {
 			execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A PREROUTING -i %s -j %s", w.InterfaceName, chainName))
 		}
 
+		// Add INPUT rule for TProxy marked packets (required when default INPUT policy is DROP/UFW)
+		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+		if err := execCommand(inputCheck); err != nil {
+			inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+			if err := execCommand(inputAdd); err != nil {
+				return fmt.Errorf("add WireGuard TProxy INPUT rule: %w", err)
+			}
+		}
+
 		// Also add MASQUERADE for the WG subnet so Xray outbound traffic
 		// (e.g. WARP WireGuard) can reach external endpoints
 		_ = w.setupMasquerade(subnet, defaultIface)
@@ -754,19 +824,33 @@ func (w *WireGuardCore) setupMasquerade(subnet, defaultIface string) error {
 // teardownNAT removes NAT rules invoked by setupNAT
 func (w *WireGuardCore) teardownNAT() {
 	subnet := getPoolSubnet(w.Address)
+	tproxySubnet := w.TProxySubnet
+	if tproxySubnet == "" {
+		tproxySubnet = subnet
+	}
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
 		defaultIface = "eth0"
 	}
 
+	tcpmss := w.MTU - 80
+	if tcpmss <= 0 {
+		tcpmss = 1240
+	}
+
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+
 	// Always clean up FORWARD and INPUT rules (added in both paths)
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", w.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", w.InterfaceName))
-	_ = execCommand("iptables -w 5 -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
 
 	if w.DropICMPUnreachable {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
@@ -778,6 +862,7 @@ func (w *WireGuardCore) teardownNAT() {
 	}
 
 	if w.TProxyPort > 0 {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet))
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 		// Remove PREROUTING jump
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))

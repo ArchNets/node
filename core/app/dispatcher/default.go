@@ -113,9 +113,10 @@ type DefaultDispatcher struct {
 
 // UserDetails contains resolved user identity attributes for access logging.
 type UserDetails struct {
-	UID  int
-	UUID string
-	Tag  string
+	UID      int
+	UUID     string
+	Tag      string
+	ClientIP string
 }
 
 // UserResolver resolves a user from their email (proxy inbounds) or client IP (tunnel inbounds).
@@ -741,9 +742,13 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				}
 				destTag := strings.ToLower(handler.Tag())
 				isBlocked := destTag == "block" || strings.Contains(destTag, "block")
+				effectiveClientIP := clientIPStr
+				if userDetails.ClientIP != "" {
+					effectiveClientIP = userDetails.ClientIP
+				}
 				recordTelemetry(TelemetryRecord{
 					UID:             int64(userDetails.UID),
-					ClientIP:        clientIPStr,
+					ClientIP:        effectiveClientIP,
 					DestinationHost: destHost,
 					DestinationIP:   destIP,
 					Port:            int(destination.Port),

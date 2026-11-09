@@ -131,9 +131,10 @@ func (v *XrayCore) Start(serverconfig *panel.ServerConfigResponse) error {
 		if clientIP != "" {
 			if tu, ok := LookupTunnelUser(clientIP); ok {
 				return dispatcher.UserDetails{
-					UID:  tu.UID,
-					UUID: tu.UUID,
-					Tag:  tu.Tag,
+					UID:      tu.UID,
+					UUID:     tu.UUID,
+					Tag:      tu.Tag,
+					ClientIP: tu.ClientIP,
 				}, true
 			}
 		}
