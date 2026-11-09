@@ -553,3 +553,40 @@ func TestOpenVPNCoreDoubleStop(t *testing.T) {
 		t.Errorf("second Stop() failed: %v", err)
 	}
 }
+
+func TestExtractOpenVPNClientIP(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "standard IPv4 in untrusted_ip",
+			env:  map[string]string{"untrusted_ip": "5.188.190.113"},
+			want: "5.188.190.113",
+		},
+		{
+			name: "dual-stack IPv4-mapped IPv6 in untrusted_ip6",
+			env:  map[string]string{"untrusted_ip6": "::ffff:5.188.190.113"},
+			want: "5.188.190.113",
+		},
+		{
+			name: "native IPv6 in untrusted_ip6 without port must not strip last segment",
+			env:  map[string]string{"untrusted_ip6": "2a01:4f8:1c1b:186d::1"},
+			want: "2a01:4f8:1c1b:186d::1",
+		},
+		{
+			name: "bracketed IPv6 with port",
+			env:  map[string]string{"trusted_ip6": "[2a01:4f8:1c1b:186d::1]:54321"},
+			want: "2a01:4f8:1c1b:186d::1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractOpenVPNClientIP(tt.env); got != tt.want {
+				t.Errorf("extractOpenVPNClientIP(%v) = %q, want %q", tt.env, got, tt.want)
+			}
+		})
+	}
+}

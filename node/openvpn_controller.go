@@ -91,7 +91,8 @@ func generateOpenVPNXrayTag(info *panel.NodeInfo) string {
 // Start starts the OpenVPN controller.
 func (c *OpenVPNController) Start() error {
 	if err := c.loadPendingTraffic(); err != nil {
-		return fmt.Errorf("load pending OpenVPN traffic batch: %w", err)
+		log.WithError(err).WithField("tag", c.tag).Warn("OpenVPN: failed to load pending traffic batch journal; discarding corrupt file")
+		_ = c.removePendingTraffic()
 	}
 
 	protoName := c.getIndexedProtocolName()
@@ -467,7 +468,8 @@ func (c *OpenVPNController) reportTask() error {
 	if len(c.pendingTraffic) == 0 {
 		var batchID [16]byte
 		if _, err := rand.Read(batchID[:]); err != nil {
-			return fmt.Errorf("generate OpenVPN traffic batch ID: %w", err)
+			log.WithError(err).WithField("tag", c.tag).Error("OpenVPN: failed to generate traffic batch ID")
+			return nil
 		}
 		trafficMap := make(map[int]*vCore.UserTraffic)
 		for _, core := range c.openvpnCores {
@@ -496,7 +498,7 @@ func (c *OpenVPNController) reportTask() error {
 
 	if len(c.pendingTraffic) > 0 {
 		if err := c.persistPendingTraffic(); err != nil {
-			return fmt.Errorf("persist OpenVPN traffic batch before send: %w", err)
+			log.WithError(err).WithField("tag", c.tag).Warn("OpenVPN: failed to persist pending traffic batch before send")
 		}
 		if err := c.apiClient.ReportUserTrafficBatch(c.pendingProtocol, c.pendingBatchID, &c.pendingTraffic); err != nil {
 			log.WithFields(log.Fields{"tag": c.tag, "batch_id": c.pendingBatchID, "err": err}).Warn("OpenVPN: traffic batch retained for retry")

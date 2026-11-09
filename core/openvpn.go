@@ -412,7 +412,9 @@ func (o *OpenVPNCore) GetOnlineUsers() []panel.OnlineUser {
 	var online []panel.OnlineUser
 	o.sessions.Range(func(_, v interface{}) bool {
 		sess := v.(*ovpnSession)
-		online = append(online, panel.OnlineUser{UID: sess.UID, IP: sess.IP})
+		if sess.UID > 0 && sess.IP != "" {
+			online = append(online, panel.OnlineUser{UID: sess.UID, IP: sess.IP})
+		}
 		return true
 	})
 	return online
@@ -463,6 +465,29 @@ func denyClientAsync(cid, kid, reason, tag string, resp ovpnResponder) {
 	}()
 }
 
+func extractOpenVPNClientIP(env map[string]string) string {
+	for _, key := range []string{"untrusted_ip", "untrusted_ip6", "trusted_ip", "trusted_ip6"} {
+		raw := strings.TrimSpace(env[key])
+		if raw == "" {
+			continue
+		}
+		if host, _, err := net.SplitHostPort(raw); err == nil && host != "" {
+			raw = host
+		}
+		raw = strings.TrimPrefix(raw, "[")
+		raw = strings.TrimSuffix(raw, "]")
+		raw = strings.TrimPrefix(raw, "::ffff:")
+		if parsed := net.ParseIP(raw); parsed != nil {
+			if v4 := parsed.To4(); v4 != nil {
+				return v4.String()
+			}
+			return parsed.String()
+		}
+		return raw
+	}
+	return ""
+}
+
 func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool, resp ovpnResponder) {
 	// management-client-auth defers auth to this handler.
 	// Users connect either with client certificates (CN = user UUID) or
@@ -471,10 +496,7 @@ func (o *OpenVPNCore) handleClientConnect(ev ovpnEvent, isReauth bool, resp ovpn
 	if username == "" {
 		username = ev.env["common_name"]
 	}
-	ip := extractIP(ev.env["untrusted_ip"])
-	if ip == "" {
-		ip = extractIP(ev.env["trusted_ip"])
-	}
+	ip := extractOpenVPNClientIP(ev.env)
 
 	o.users.mu.RLock()
 	uid, ok := o.users.uuidToID[username]
