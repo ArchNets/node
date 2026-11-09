@@ -45,6 +45,7 @@ type WireGuardCore struct {
 	TProxySubnet        string
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
+	OnPeerActive        func()
 }
 
 // WireGuardPeer represents a connected peer (user)
@@ -69,6 +70,7 @@ type peerStats struct {
 	ReceiveBytes  int64
 	TransmitBytes int64
 	LastHandshake time.Time
+	LastDataTime  time.Time
 }
 
 // statsCollectorTask periodically collects stats from WireGuard
@@ -349,12 +351,25 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 
 // GetTrafficAndReset returns traffic stats and resets counters
 func (w *WireGuardCore) GetTrafficAndReset() map[int]*UserTraffic {
+	// Ensure latest kernel stats are collected before draining
+	w.collectStats()
+
 	w.trafficMu.Lock()
 	defer w.trafficMu.Unlock()
 
 	result := w.traffic
 	w.traffic = make(map[int]*UserTraffic)
 	return result
+}
+
+func normalizeWGEndpointIP(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return strings.TrimPrefix(ip.String(), "::ffff:")
 }
 
 // GetOnlineUsers returns list of currently connected users
@@ -367,12 +382,24 @@ func (w *WireGuardCore) GetOnlineUsers() []panel.OnlineUser {
 		return online
 	}
 
-	// A peer is considered online if it had a recent handshake
+	// A peer is considered online if it had a recent handshake AND transferred real data
+	// within the last 3 minutes (filtering out empty 32-byte keepalive-only connections).
 	recentThreshold := time.Now().Add(-3 * time.Minute)
+
+	w.trafficMu.RLock()
+	defer w.trafficMu.RUnlock()
 
 	for _, peer := range device.Peers {
 		if peer.LastHandshakeTime.Before(recentThreshold) {
 			continue // Not recently active
+		}
+
+		peerKey := peer.PublicKey.String()
+		st, hasStats := w.lastPeerStats[peerKey]
+		// Require either recent real data (> 1KB in last 3m) or > 2KB total bytes on the peer
+		hasActiveData := (hasStats && st.LastDataTime.After(recentThreshold)) || (peer.ReceiveBytes+peer.TransmitBytes > 2048)
+		if !hasActiveData {
+			continue
 		}
 
 		// Find user by public key
@@ -381,7 +408,7 @@ func (w *WireGuardCore) GetOnlineUsers() []panel.OnlineUser {
 			if wgPeer.PublicKey == peer.PublicKey {
 				clientIP := ""
 				if peer.Endpoint != nil && peer.Endpoint.IP != nil {
-					clientIP = peer.Endpoint.IP.String()
+					clientIP = normalizeWGEndpointIP(peer.Endpoint.IP)
 				}
 				if clientIP == "" {
 					clientIP = wgPeer.IP
@@ -565,7 +592,7 @@ func (w *WireGuardCore) collectStats() {
 	}
 
 	w.trafficMu.Lock()
-	defer w.trafficMu.Unlock()
+	var newlyActive bool
 
 	for _, peer := range device.Peers {
 		// Find the user ID for this peer
@@ -605,8 +632,18 @@ func (w *WireGuardCore) collectStats() {
 		}
 
 		// Update real client IP in tunnel registry whenever endpoint is available
+		clientEndpointIP := ""
 		if peer.Endpoint != nil && peer.Endpoint.IP != nil {
-			UpdateTunnelUserEndpoint(assignedIP, peer.Endpoint.IP.String())
+			clientEndpointIP = normalizeWGEndpointIP(peer.Endpoint.IP)
+			UpdateTunnelUserEndpoint(assignedIP, clientEndpointIP)
+		}
+
+		// Track when this peer last transferred actual payload data (> 1 KB in 10s window, ignoring 32-byte keepalives)
+		if downloadDelta+uploadDelta > 1024 {
+			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > 3*time.Minute {
+				newlyActive = true
+			}
+			lastStats.LastDataTime = time.Now()
 		}
 
 		// Update last stats
@@ -617,9 +654,13 @@ func (w *WireGuardCore) collectStats() {
 		if !peer.LastHandshakeTime.Equal(lastStats.LastHandshake) {
 			// If previous handshake was zero or very old, this is a new active session
 			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > 3*time.Minute {
+				if peer.ReceiveBytes+peer.TransmitBytes > 1024 {
+					newlyActive = true
+				}
 				log.WithFields(log.Fields{
-					"uid": uid,
-					"ip":  assignedIP,
+					"uid":       uid,
+					"ip":        assignedIP,
+					"client_ip": clientEndpointIP,
 				}).Info("WireGuard peer connected")
 			}
 		}
@@ -631,6 +672,11 @@ func (w *WireGuardCore) collectStats() {
 		}
 		w.traffic[uid].Download += downloadDelta
 		w.traffic[uid].Upload += uploadDelta
+	}
+	w.trafficMu.Unlock()
+
+	if newlyActive && w.OnPeerActive != nil {
+		go w.OnPeerActive()
 	}
 }
 

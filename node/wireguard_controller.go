@@ -94,6 +94,19 @@ func (c *WireGuardController) Start() error {
 	c.wgCore = wgCore
 	c.wgCore.SetLimiter(c.limiter)
 	c.wgCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
+	c.wgCore.OnPeerActive = func() {
+		onlineUsers := c.wgCore.GetOnlineUsers()
+		var result []panel.OnlineUser
+		for _, online := range onlineUsers {
+			if online.IP != "" {
+				result = append(result, online)
+			}
+		}
+		if len(result) > 0 {
+			protocolName := c.getIndexedProtocolName()
+			_ = c.apiClient.ReportNodeOnlineUsers(protocolName, &result)
+		}
+	}
 
 	if c.info.Protocol.EnableTProxy {
 		tproxyPort, err := addTProxyInbound(c.xrayCore, c.tag, c.info.Protocol.TProxyPort)
@@ -265,24 +278,12 @@ func (c *WireGuardController) reportTask() error {
 		}
 	}
 
-	// Get online users from WireGuard core
+	// Get online users from WireGuard core (already filtered for recent handshake + active data within 3m)
 	onlineUsers := c.wgCore.GetOnlineUsers()
 
-	// Filter out users with no actual payload traffic.
-	// We require at least 16 KB of transferred data within the push interval to consider a peer
-	// genuinely active for location presence. Background WireGuard keepalives (empty 32-byte UDP packets)
-	// and Clash url-test health checks generate < 4 KB and would otherwise falsely report the user as
-	// online on every server in their multi-node subscription!
-	const minActiveBytes = 16384
 	var result []panel.OnlineUser
-	trafficUIDs := make(map[int]bool)
-	for _, t := range userTraffic {
-		if t.Upload+t.Download >= minActiveBytes {
-			trafficUIDs[t.UID] = true
-		}
-	}
 	for _, online := range onlineUsers {
-		if trafficUIDs[online.UID] && online.IP != "" {
+		if online.IP != "" {
 			result = append(result, online)
 		}
 	}

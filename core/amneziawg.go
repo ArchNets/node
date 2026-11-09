@@ -101,6 +101,7 @@ type AmneziaWGCore struct {
 	TProxySubnet        string
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
+	OnPeerActive        func()
 }
 
 // SetTProxyConfig sets the local Xray port to route traffic to, subnet, and routing options
@@ -579,7 +580,7 @@ func (w *AmneziaWGCore) collectStats() {
 
 	lines := strings.Split(string(output), "\n")
 	w.trafficMu.Lock()
-	defer w.trafficMu.Unlock()
+	var newlyActive bool
 
 	for _, line := range lines {
 		parts := strings.Fields(line)
@@ -614,9 +615,11 @@ func (w *AmneziaWGCore) collectStats() {
 		}
 
 		rawEndpoint := parts[2]
+		clientEndpointIP := ""
 		if rawEndpoint != "" && rawEndpoint != "(none)" && assignedIP != "" {
 			if host, _, err := net.SplitHostPort(rawEndpoint); err == nil && host != "" {
-				UpdateTunnelUserEndpoint(assignedIP, host)
+				clientEndpointIP = strings.TrimPrefix(host, "::ffff:")
+				UpdateTunnelUserEndpoint(assignedIP, clientEndpointIP)
 			}
 		}
 
@@ -631,10 +634,17 @@ func (w *AmneziaWGCore) collectStats() {
 		uploadDelta := tx - lastStats.TransmitBytes
 
 		if downloadDelta < 0 {
-			downloadDelta = 0
+			downloadDelta = rx
 		} // Handle restarts
 		if uploadDelta < 0 {
-			uploadDelta = 0
+			uploadDelta = tx
+		}
+
+		if downloadDelta+uploadDelta > 1024 {
+			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > 3*time.Minute {
+				newlyActive = true
+			}
+			lastStats.LastDataTime = time.Now()
 		}
 
 		lastStats.ReceiveBytes = rx
@@ -644,9 +654,13 @@ func (w *AmneziaWGCore) collectStats() {
 
 		if lastHandshakeTime.After(lastStats.LastHandshake) {
 			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > 3*time.Minute {
+				if rx+tx > 1024 {
+					newlyActive = true
+				}
 				log.WithFields(log.Fields{
-					"uid": uid,
-					"ip":  assignedIP,
+					"uid":       uid,
+					"ip":        assignedIP,
+					"client_ip": clientEndpointIP,
 				}).Info("AmneziaWG peer connected")
 			}
 			lastStats.LastHandshake = lastHandshakeTime
@@ -658,10 +672,17 @@ func (w *AmneziaWGCore) collectStats() {
 		w.traffic[uid].Download += downloadDelta
 		w.traffic[uid].Upload += uploadDelta
 	}
+	w.trafficMu.Unlock()
+
+	if newlyActive && w.OnPeerActive != nil {
+		go w.OnPeerActive()
+	}
 }
 
 // GetTrafficAndReset returns traffic stats and resets counters
 func (w *AmneziaWGCore) GetTrafficAndReset() map[int]*UserTraffic {
+	w.collectStats()
+
 	w.trafficMu.Lock()
 	defer w.trafficMu.Unlock()
 
@@ -682,6 +703,9 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 	var online []panel.OnlineUser
 	recentThreshold := time.Now().Add(-3 * time.Minute)
 
+	w.trafficMu.RLock()
+	defer w.trafficMu.RUnlock()
+
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		parts := strings.Fields(line)
@@ -691,10 +715,20 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 
 		pubKey := parts[0]
 		handshakeStr := parts[4]
+		rxStr := parts[5]
+		txStr := parts[6]
 		handshake, _ := strconv.ParseInt(handshakeStr, 10, 64)
+		rx, _ := strconv.ParseInt(rxStr, 10, 64)
+		tx, _ := strconv.ParseInt(txStr, 10, 64)
 		lastHandshakeTime := time.Unix(handshake, 0)
 
 		if lastHandshakeTime.Before(recentThreshold) {
+			continue
+		}
+
+		st, hasStats := w.lastPeerStats[pubKey]
+		hasActiveData := (hasStats && st.LastDataTime.After(recentThreshold)) || (rx+tx > 2048)
+		if !hasActiveData {
 			continue
 		}
 
@@ -702,7 +736,7 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 		clientIP := ""
 		if rawEndpoint != "" && rawEndpoint != "(none)" {
 			if host, _, err := net.SplitHostPort(rawEndpoint); err == nil && host != "" {
-				clientIP = host
+				clientIP = strings.TrimPrefix(host, "::ffff:")
 			}
 		}
 
