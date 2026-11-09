@@ -8,7 +8,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"os"
@@ -59,8 +58,7 @@ type OpenVPNCore struct {
 	mgmt       atomic.Pointer[ovpnMgmtClient]
 	socketPath string
 
-	stdoutPipe *io.PipeWriter
-	stderrPipe *io.PipeWriter
+	logWriter *openvpnLogWriter
 
 	users      *ovpnUserMap
 	sessions   sync.Map // cid -> *ovpnSession
@@ -135,6 +133,69 @@ func NewOpenVPNCore(tag string, port int, proto, subnet, workDir, certFile, keyF
 	}, nil
 }
 
+type openvpnLogWriter struct {
+	tag     string
+	ring    *logRingBuffer
+	pending string
+	mu      sync.Mutex
+}
+
+func newOpenVPNLogWriter(tag string, ring *logRingBuffer) *openvpnLogWriter {
+	return &openvpnLogWriter{tag: tag, ring: ring}
+}
+
+func (w *openvpnLogWriter) Write(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.ring != nil {
+		_, _ = w.ring.Write(p)
+	}
+
+	data := w.pending + string(p)
+	w.pending = ""
+
+	for {
+		idx := strings.IndexByte(data, '\n')
+		if idx < 0 {
+			w.pending = data
+			break
+		}
+		line := strings.TrimRight(data[:idx], "\r")
+		data = data[idx+1:]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "warning") || strings.Contains(lower, "failed") {
+			log.WithField("tag", w.tag).Warn(line)
+		} else {
+			log.WithField("tag", w.tag).Debug(line)
+		}
+	}
+
+	return len(p), nil
+}
+
+func (w *openvpnLogWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if strings.TrimSpace(w.pending) != "" {
+		line := strings.TrimRight(w.pending, "\r\n")
+		w.pending = ""
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "warning") || strings.Contains(lower, "failed") {
+			log.WithField("tag", w.tag).Warn(line)
+		} else {
+			log.WithField("tag", w.tag).Debug(line)
+		}
+	}
+}
+
 func removeTunInterface(iface string) {
 	_ = execCommand(fmt.Sprintf("ip link set %s down", iface))
 	_ = execCommand(fmt.Sprintf("ip tuntap del mode tun dev %s", iface))
@@ -142,13 +203,8 @@ func removeTunInterface(iface string) {
 }
 
 func (o *OpenVPNCore) closePipes() {
-	if o.stdoutPipe != nil {
-		_ = o.stdoutPipe.Close()
-		o.stdoutPipe = nil
-	}
-	if o.stderrPipe != nil {
-		_ = o.stderrPipe.Close()
-		o.stderrPipe = nil
+	if o.logWriter != nil {
+		o.logWriter.Flush()
 	}
 }
 
@@ -183,12 +239,10 @@ func (o *OpenVPNCore) Start() error {
 
 	o.cmd = exec.Command("openvpn", "--config", confPath)
 	o.logRing = newLogRingBuffer(50)
-	stdoutWriter := log.StandardLogger().WriterLevel(log.DebugLevel)
-	stderrWriter := log.StandardLogger().WriterLevel(log.WarnLevel)
-	o.stdoutPipe = stdoutWriter
-	o.stderrPipe = stderrWriter
-	o.cmd.Stdout = io.MultiWriter(stdoutWriter, o.logRing)
-	o.cmd.Stderr = io.MultiWriter(stderrWriter, o.logRing)
+	writer := newOpenVPNLogWriter(o.Tag, o.logRing)
+	o.logWriter = writer
+	o.cmd.Stdout = writer
+	o.cmd.Stderr = writer
 
 	if err := o.cmd.Start(); err != nil {
 		o.closePipes()
@@ -220,17 +274,7 @@ func (o *OpenVPNCore) Start() error {
 		return fmt.Errorf("connect to management socket: %w", err)
 	}
 	o.mgmt.Store(mgmt)
-	if err := o.verifyDCOActive(); err != nil {
-		_ = mgmt.Close()
-		o.mgmt.Store(nil)
-		if o.cmd.Process != nil {
-			_ = o.cmd.Process.Kill()
-			_ = o.cmd.Wait()
-		}
-		o.closePipes()
-		o.teardownNAT()
-		return fmt.Errorf("OpenVPN DCO is required but not active: %w", err)
-	}
+	o.verifyDCOActive()
 
 	byteCountInterval := o.ByteCountInterval
 	if byteCountInterval <= 0 {
@@ -680,6 +724,10 @@ func (o *OpenVPNCore) writeServerConf(path, caFile, certFile, keyFile, taKeyPath
 		return fmt.Errorf("OpenVPN subnet %q is not IPv4", o.Subnet)
 	}
 	serverNetwork := poolIP.Mask(pool.Mask).String()
+	extraUDP := ""
+	if o.Proto == "udp" {
+		extraUDP = "explicit-exit-notify 1\n"
+	}
 	conf := fmt.Sprintf(`port %d
 proto %s
 dev %s
@@ -693,10 +741,9 @@ dh none
 tls-crypt %s
 
 # Client profiles include <cert>/<key> signed by CA (CN = user UUID).
-# verify-client-cert optional verifies client certs when presented,
-# setting common_name to the user's UUID.
-verify-client-cert optional
-username-as-common-name
+# auth-user-pass-optional allows clients with client certificates
+# (and no username/password) to pass through to management-client-auth.
+auth-user-pass-optional
 
 # Every device authenticates with the same UUID-as-username, so OpenVPN
 # would cap each user to one connection without this. CheckLimit remains
@@ -715,7 +762,7 @@ push "dhcp-option DNS 1.1.1.1"
 keepalive 10 60
 cipher AES-256-GCM
 auth SHA256
-
+%s
 user nobody
 group nogroup
 # Keep key material in memory across SIGUSR1/ping-restart soft restarts
@@ -723,25 +770,32 @@ group nogroup
 persist-key
 
 verb 3
-`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask)
+`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask, extraUDP)
 
 	return os.WriteFile(path, []byte(conf), 0600)
 }
 
-// verifyDCOActive checks the created tunnel's kernel link kind. OpenVPN may
-// silently fall back to a userspace TUN when DCO is unavailable, which is not
-// acceptable for production nodes configured to require DCO.
-func (o *OpenVPNCore) verifyDCOActive() error {
-	output, err := exec.Command("ip", "-d", "link", "show", "dev", o.InterfaceName).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("inspect tunnel interface %q: %w: %s", o.InterfaceName, err, strings.TrimSpace(string(output)))
+// verifyDCOActive inspects the created tunnel interface and logs whether DCO
+// acceleration is active or whether OpenVPN fell back to standard userspace tun.
+func (o *OpenVPNCore) verifyDCOActive() {
+	var linkInfo string
+	var dcoActive bool
+	for start := time.Now(); time.Since(start) < 2*time.Second; time.Sleep(100 * time.Millisecond) {
+		output, err := exec.Command("ip", "-d", "link", "show", "dev", o.InterfaceName).CombinedOutput()
+		if err == nil {
+			linkInfo = strings.TrimSpace(string(output))
+			dcoActive = isOpenVPNDCOInterfaceInfo(linkInfo)
+			break
+		}
 	}
-	info := string(output)
-	if isOpenVPNDCOInterfaceInfo(info) {
-		log.WithFields(log.Fields{"tag": o.Tag, "interface": o.InterfaceName, "link_info": strings.TrimSpace(info)}).Info("OpenVPN DCO active")
-		return nil
+
+	if dcoActive {
+		log.WithFields(log.Fields{"tag": o.Tag, "interface": o.InterfaceName, "link_info": linkInfo}).Info("OpenVPN DCO active")
+	} else if linkInfo != "" {
+		log.WithFields(log.Fields{"tag": o.Tag, "interface": o.InterfaceName, "link_info": linkInfo}).Warn("OpenVPN running in userspace TUN mode (DCO not active)")
+	} else {
+		log.WithFields(log.Fields{"tag": o.Tag, "interface": o.InterfaceName}).Warn("OpenVPN interface not yet detected via ip link")
 	}
-	return fmt.Errorf("interface %q is not an OpenVPN DCO link: %s", o.InterfaceName, strings.TrimSpace(info))
 }
 
 // iproute2 versions format link kinds differently. The legacy ovpn-dco
@@ -847,13 +901,22 @@ func (o *OpenVPNCore) setupNAT() error {
 		}
 	}
 
+	// Always add TCPMSS clamping rule for forwarded / outbound traffic to prevent MTU blackholing
+	if err := execCommand("iptables -w 5 -t mangle -C POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"); err != nil {
+		_ = execCommand("iptables -w 5 -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu")
+	}
+
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
+	// Insert at index 1 AFTER the ACCEPT rules so DROP has higher precedence over ACCEPT
 	if o.DropICMPUnreachable {
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		}
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		}
 	}
 
@@ -914,9 +977,9 @@ func (o *OpenVPNCore) setupNAT() error {
 		}
 
 		// Add INPUT rule for TProxy marked packets (required when default INPUT policy is DROP/UFW)
-		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, o.Subnet)
+		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, tproxySubnet)
 		if err := execCommand(inputCheck); err != nil {
-			inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, o.Subnet)
+			inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, tproxySubnet)
 			if err := execCommand(inputAdd); err != nil {
 				return fmt.Errorf("add OpenVPN TProxy INPUT rule: %w", err)
 			}
@@ -944,6 +1007,10 @@ func (o *OpenVPNCore) setupMasquerade(subnet, defaultIface string) error {
 
 func (o *OpenVPNCore) teardownNAT() {
 	subnet := o.Subnet
+	tproxySubnet := o.TProxySubnet
+	if tproxySubnet == "" {
+		tproxySubnet = subnet
+	}
 
 	defaultIface, err := getDefaultInterface()
 	if err != nil {
@@ -956,13 +1023,14 @@ func (o *OpenVPNCore) teardownNAT() {
 
 	if o.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 	}
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
 
 	if o.TProxyPort > 0 {
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, o.Subnet))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", o.InterfaceName, tproxySubnet))
 		chainName := fmt.Sprintf("XRAY_%s", o.InterfaceName)
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", o.InterfaceName, chainName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))

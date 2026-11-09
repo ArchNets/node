@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/archnets/node/api/panel"
-	certutil "github.com/archnets/node/common/cert"
 	"github.com/archnets/node/common/serverstatus"
 	"github.com/archnets/node/common/task"
 	vCore "github.com/archnets/node/core"
@@ -113,11 +112,13 @@ func (c *OpenVPNController) Start() error {
 
 	var certFile, keyFile string
 	if c.info.Protocol.CertMode != "" && c.info.Protocol.CertMode != "none" {
-		ctrl := &Controller{info: c.info, tag: c.tag}
-		if err := ctrl.requestCert(); err != nil {
+		var err error
+		certFile, keyFile, err = EnsureNodeCertificate(c.info, c.tag)
+		if err != nil {
 			return fmt.Errorf("cert setup failed: %w", err)
 		}
-		certFile, keyFile = certutil.GetCertPaths(c.info.Protocol.SNI, c.info.Type, c.info.Id)
+	} else {
+		return fmt.Errorf("openvpn requires CA certificate and key; cert_mode cannot be empty or 'none'")
 	}
 
 	proto := strings.ToLower(strings.TrimSpace(c.info.Protocol.OpenVPNProto))
