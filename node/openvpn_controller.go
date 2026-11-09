@@ -193,6 +193,11 @@ func (c *OpenVPNController) Start() error {
 
 		openvpnCore.LimiterTag = c.tag
 		openvpnCore.DropICMPUnreachable = c.info.Protocol.DropICMPUnreachable
+		openvpnCore.TunMTU = c.info.Protocol.OpenVPNTunMTU
+		openvpnCore.TCPMSS = c.info.Protocol.OpenVPNTCPMSS
+		openvpnCore.Sndbuf = c.info.Protocol.OpenVPNSndbuf
+		openvpnCore.Rcvbuf = c.info.Protocol.OpenVPNRcvbuf
+		openvpnCore.TxQueueLen = c.info.Protocol.OpenVPNTxQueueLen
 		byteCountInterval := c.info.PushInterval
 		if byteCountInterval < 30 {
 			byteCountInterval = 30

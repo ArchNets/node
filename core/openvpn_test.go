@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -588,5 +589,42 @@ func TestExtractOpenVPNClientIP(t *testing.T) {
 				t.Errorf("extractOpenVPNClientIP(%v) = %q, want %q", tt.env, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOpenVPNWriteServerConfDynamicPerformance(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "ovpn-conf-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	core, err := NewOpenVPNCore("test-dyn-conf", 6444, "udp", "10.11.0.0/16", tmpDir, "ca.crt", "server.crt", "key")
+	if err != nil {
+		t.Fatalf("NewOpenVPNCore failed: %v", err)
+	}
+	core.TunMTU = 1400
+	core.Sndbuf = 393216
+	core.Rcvbuf = 393216
+	core.TxQueueLen = 4000
+
+	confPath := filepath.Join(tmpDir, "server.conf")
+	if err := core.writeServerConf(confPath, "ca.crt", "server.crt", "server.key", "ta.key"); err != nil {
+		t.Fatalf("writeServerConf failed: %v", err)
+	}
+
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("failed to read generated conf: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "tun-mtu 1400") || !strings.Contains(content, "push \"tun-mtu 1400\"") {
+		t.Errorf("expected dynamic tun-mtu 1400, got:\n%s", content)
+	}
+	if !strings.Contains(content, "sndbuf 393216") || !strings.Contains(content, "push \"sndbuf 393216\"") {
+		t.Errorf("expected dynamic sndbuf 393216, got:\n%s", content)
+	}
+	if !strings.Contains(content, "txqueuelen 4000") {
+		t.Errorf("expected dynamic txqueuelen 4000, got:\n%s", content)
 	}
 }

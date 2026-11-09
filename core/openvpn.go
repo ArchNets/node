@@ -51,6 +51,11 @@ type OpenVPNCore struct {
 	TProxySubnet        string
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
+	TunMTU              int
+	TCPMSS              int
+	Sndbuf              int
+	Rcvbuf              int
+	TxQueueLen          int
 	ByteCountInterval   int
 	OnUnexpectedExit    func()
 
@@ -750,6 +755,16 @@ func (o *OpenVPNCore) writeServerConf(path, caFile, certFile, keyFile, taKeyPath
 	if o.Proto == "udp" {
 		extraUDP = "explicit-exit-notify 1\n"
 	}
+	tunMTU := o.TunMTU
+	if tunMTU <= 0 {
+		tunMTU = 1320
+	}
+	sndbuf := o.Sndbuf
+	rcvbuf := o.Rcvbuf
+	txQueueLen := o.TxQueueLen
+	if txQueueLen <= 0 {
+		txQueueLen = 1000
+	}
 	conf := fmt.Sprintf(`port %d
 proto %s
 dev %s
@@ -782,15 +797,15 @@ push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
 
 # Performance & Socket Buffer Autotuning
-# Set MTU to 1320 (matching WireGuard) to prevent UDP fragmentation over international paths
-tun-mtu 1320
-push "tun-mtu 1320"
-# Allow OS autotuning of TCP/UDP socket buffers to remove 64KB throughput bottleneck
-sndbuf 0
-rcvbuf 0
-push "sndbuf 0"
-push "rcvbuf 0"
-txqueuelen 1000
+# Set MTU to prevent UDP fragmentation over international paths
+tun-mtu %d
+push "tun-mtu %d"
+# Socket buffers: 0 enables OS autotuning to remove 64KB throughput bottleneck
+sndbuf %d
+rcvbuf %d
+push "sndbuf %d"
+push "rcvbuf %d"
+txqueuelen %d
 
 keepalive 10 60
 cipher AES-256-GCM
@@ -803,7 +818,7 @@ group nogroup
 persist-key
 
 verb 3
-`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask, extraUDP)
+`, o.Port, o.Proto, o.InterfaceName, caFile, certFile, keyFile, taKeyPath, o.socketPath, serverNetwork, mask, tunMTU, tunMTU, sndbuf, rcvbuf, sndbuf, rcvbuf, txQueueLen, extraUDP)
 
 	return os.WriteFile(path, []byte(conf), 0600)
 }
@@ -937,11 +952,15 @@ func (o *OpenVPNCore) setupNAT() error {
 	// Always add TCPMSS clamping rule for forwarded / outbound traffic to prevent MTU blackholing.
 	// In DCO mode (ovpn-dco), userspace mssfix is bypassed by the kernel data channel,
 	// so netfilter mangle rules for both directions on the OpenVPN interface are required.
-	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240", o.InterfaceName)); err != nil {
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240", o.InterfaceName))
+	tcpmss := o.TCPMSS
+	if tcpmss <= 0 {
+		tcpmss = 1240
 	}
-	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240", o.InterfaceName)); err != nil {
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240", o.InterfaceName))
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
 	}
 
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
@@ -1055,8 +1074,12 @@ func (o *OpenVPNCore) teardownNAT() {
 		defaultIface = "eth0"
 	}
 
-	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240", o.InterfaceName))
-	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240", o.InterfaceName))
+	tcpmss := o.TCPMSS
+	if tcpmss <= 0 {
+		tcpmss = 1240
+	}
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -j ACCEPT", o.InterfaceName))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", o.InterfaceName))

@@ -342,10 +342,15 @@ type Protocol struct {
 	DropICMPUnreachable bool   `json:"drop_icmp_unreachable"`
 
 	// OpenVPN-specific fields
-	OpenVPNSubnet   string `json:"openvpn_subnet"`
-	OpenVPNProto    string `json:"openvpn_proto"`     // Transport: "both", "udp", or "tcp" (default: both)
-	OpenVPNTCPPort  int    `json:"openvpn_tcp_port"`  // Secondary TCP port for dual mode (defaults to Port if 0)
-	OpenVPNTlsCrypt string `json:"openvpn_tls_crypt"` // tls-crypt static key content (from admin panel)
+	OpenVPNSubnet     string `json:"openvpn_subnet"`
+	OpenVPNProto      string `json:"openvpn_proto"`       // Transport: "both", "udp", or "tcp" (default: both)
+	OpenVPNTCPPort    int    `json:"openvpn_tcp_port"`    // Secondary TCP port for dual mode (defaults to Port if 0)
+	OpenVPNTlsCrypt   string `json:"openvpn_tls_crypt"`   // tls-crypt static key content (from admin panel)
+	OpenVPNTunMTU     int    `json:"openvpn_tun_mtu"`     // Tunnel MTU (default: 1320)
+	OpenVPNTCPMSS     int    `json:"openvpn_tcpmss"`      // TCP MSS clamp (default: 1240)
+	OpenVPNSndbuf     int    `json:"openvpn_sndbuf"`      // Socket send buffer in bytes (0 = OS autotune)
+	OpenVPNRcvbuf     int    `json:"openvpn_rcvbuf"`      // Socket receive buffer in bytes (0 = OS autotune)
+	OpenVPNTxQueueLen int    `json:"openvpn_txqueuelen"`  // TX queue length (default: 1000)
 }
 
 func GetServerConfig(c *ClientV2) (*ServerConfigResponse, error) {
