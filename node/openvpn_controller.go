@@ -433,18 +433,22 @@ func (c *OpenVPNController) userListMonitor() error {
 	}
 
 	deleted, added := diffUserList(c.userList, newUsers)
+	genDel, genAdd, limDel, limAdd := splitTunnelUserDiff(deleted, added)
 
-	if len(deleted) > 0 {
+	if len(genDel) > 0 {
 		for _, core := range c.openvpnCores {
-			core.DelUsers(deleted)
+			core.DelUsers(genDel)
 		}
-		c.limiter.UpdateUser(c.tag, nil, deleted)
+		c.limiter.UpdateUser(c.tag, nil, genDel)
 	}
-	if len(added) > 0 {
+	if len(genAdd) > 0 {
 		for _, core := range c.openvpnCores {
-			core.AddUsers(added)
+			core.AddUsers(genAdd)
 		}
-		c.limiter.UpdateUser(c.tag, added, nil)
+		c.limiter.UpdateUser(c.tag, genAdd, nil)
+	}
+	if len(limDel) > 0 || len(limAdd) > 0 {
+		c.limiter.UpdateUser(c.tag, limAdd, limDel)
 	}
 
 	c.userList = newUsers

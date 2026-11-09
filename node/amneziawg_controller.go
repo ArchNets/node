@@ -236,15 +236,20 @@ func (c *AmneziaWGController) userListMonitor() error {
 	}
 
 	deleted, added := diffUserList(c.userList, newUsers)
+	genDel, genAdd, limDel, limAdd := splitTunnelUserDiff(deleted, added)
 
-	if len(deleted) > 0 {
-		c.wgCore.DelUsers(deleted)
-		c.limiter.UpdateUser(c.tag, nil, deleted)
+	if len(genDel) > 0 {
+		c.wgCore.DelUsers(genDel)
+		c.limiter.UpdateUser(c.tag, nil, genDel)
 	}
 
-	if len(added) > 0 {
-		c.wgCore.AddUsers(added)
-		c.limiter.UpdateUser(c.tag, added, nil)
+	if len(genAdd) > 0 {
+		c.wgCore.AddUsers(genAdd)
+		c.limiter.UpdateUser(c.tag, genAdd, nil)
+	}
+
+	if len(limDel) > 0 || len(limAdd) > 0 {
+		c.limiter.UpdateUser(c.tag, limAdd, limDel)
 	}
 
 	c.userList = newUsers

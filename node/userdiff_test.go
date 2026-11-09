@@ -75,3 +75,31 @@ func TestDiffUserList(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitTunnelUserDiff(t *testing.T) {
+	oldUsers := []panel.UserInfo{
+		{Id: 1, Uuid: "u1", SpeedLimit: 0, DeviceLimit: 1, ServiceId: "key1"},
+		{Id: 2, Uuid: "u2", SpeedLimit: 0, DeviceLimit: 1, ServiceId: "key2"},
+		{Id: 3, Uuid: "u3", SpeedLimit: 0, DeviceLimit: 1, ServiceId: "key3"},
+	}
+	newUsers := []panel.UserInfo{
+		// u1: only DeviceLimit changed -> should NOT be in genDel/genAdd
+		{Id: 1, Uuid: "u1", SpeedLimit: 0, DeviceLimit: 3, ServiceId: "key1"},
+		// u2: ServiceId (key) changed -> MUST be in genDel and genAdd
+		{Id: 2, Uuid: "u2", SpeedLimit: 0, DeviceLimit: 1, ServiceId: "key2-new"},
+		// u3: removed -> MUST be in genDel
+		// u4: added -> MUST be in genAdd
+		{Id: 4, Uuid: "u4", SpeedLimit: 0, DeviceLimit: 1, ServiceId: "key4"},
+	}
+
+	deleted, added := diffUserList(oldUsers, newUsers)
+	genDel, genAdd, limDel, limAdd := splitTunnelUserDiff(deleted, added)
+
+	assert.Len(t, limDel, 1)
+	assert.Equal(t, "u1", limDel[0].Uuid)
+	assert.Len(t, limAdd, 1)
+	assert.Equal(t, 3, limAdd[0].DeviceLimit)
+
+	assert.Len(t, genDel, 2)
+	assert.Len(t, genAdd, 2)
+}

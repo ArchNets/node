@@ -956,6 +956,9 @@ func (o *OpenVPNCore) setupNAT() error {
 	if tcpmss <= 0 {
 		tcpmss = 1240
 	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I PREROUTING 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
+	}
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss)); err != nil {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
 	}
@@ -966,11 +969,19 @@ func (o *OpenVPNCore) setupNAT() error {
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
 	// Insert at index 1 AFTER the ACCEPT rules so DROP has higher precedence over ACCEPT
 	if o.DropICMPUnreachable {
+		// Allow Path MTU Discovery (ICMP fragmentation-needed) so MTU detection doesn't blackhole
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
+		}
+
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		}
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		}
 		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
 			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
@@ -1078,6 +1089,7 @@ func (o *OpenVPNCore) teardownNAT() {
 	if tcpmss <= 0 {
 		tcpmss = 1240
 	}
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", o.InterfaceName, tcpmss))
 
@@ -1086,6 +1098,8 @@ func (o *OpenVPNCore) teardownNAT() {
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -j ACCEPT", o.InterfaceName))
 
 	if o.DropICMPUnreachable {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))

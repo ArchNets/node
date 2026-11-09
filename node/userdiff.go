@@ -26,7 +26,37 @@ func userDiffKey(u panel.UserInfo) string {
 	return u.Uuid + "|" + strconv.Itoa(u.SpeedLimit) + "|" + strconv.Itoa(u.DeviceLimit) + "|" + u.ServiceId
 }
 
-// diffUserList compares two user lists and returns users to remove and to
+// userIdentityDiff splits deleted and added slices into:
+// - genuinelyDeleted: users removed or whose WireGuard/AmneziaWG ServiceId (public key) changed
+// - genuinelyAdded: new users or users whose ServiceId changed
+// - limitsOnlyChanged: users whose SpeedLimit or DeviceLimit changed, but whose identity and public key are identical
+func splitTunnelUserDiff(deleted, added []panel.UserInfo) (genuinelyDeleted, genuinelyAdded, limitsDeleted, limitsAdded []panel.UserInfo) {
+	delByUUID := make(map[string]panel.UserInfo, len(deleted))
+	for _, u := range deleted {
+		delByUUID[u.Uuid] = u
+	}
+
+	matchedUUID := make(map[string]bool)
+	for _, u := range added {
+		if oldU, exists := delByUUID[u.Uuid]; exists {
+			if oldU.Id == u.Id && oldU.ServiceId == u.ServiceId {
+				// Only SpeedLimit or DeviceLimit changed — do NOT touch the kernel WireGuard peer!
+				matchedUUID[u.Uuid] = true
+				limitsDeleted = append(limitsDeleted, oldU)
+				limitsAdded = append(limitsAdded, u)
+				continue
+			}
+		}
+		genuinelyAdded = append(genuinelyAdded, u)
+	}
+
+	for _, u := range deleted {
+		if !matchedUUID[u.Uuid] {
+			genuinelyDeleted = append(genuinelyDeleted, u)
+		}
+	}
+	return
+}
 // add. A user whose configuration changed appears in both lists (remove old,
 // add new). Shared by all protocol controllers; replaces the six former
 // copy-pasted compare*UserList implementations.
