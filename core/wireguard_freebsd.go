@@ -35,6 +35,7 @@ type WireGuardCore struct {
 	TProxySubnet        string
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
+	OnPeerActive        func()
 }
 
 // NewWireGuardCore creates a new WireGuard VPN server

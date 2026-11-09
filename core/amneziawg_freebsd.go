@@ -90,6 +90,7 @@ type AmneziaWGCore struct {
 	TProxySubnet        string
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
+	OnPeerActive        func()
 }
 
 // NewAmneziaWGCore creates a new AmneziaWG VPN server
