@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -126,10 +127,17 @@ func TestReverseRealityEndToEnd_TCP_UDP_And_Probe(t *testing.T) {
 		}
 	}()
 
-	originLn, err := net.Listen("tcp", "127.0.0.1:0")
+	rawOriginLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to start mock origin server: %v", err)
 	}
+	defer rawOriginLn.Close()
+
+	mockCert, err := transport.BuildRelayTLSConfig("mock.hospital.ir", "self", "", "")
+	if err != nil {
+		t.Fatalf("build mock cert: %v", err)
+	}
+	originLn := tls.NewListener(rawOriginLn, mockCert)
 	defer originLn.Close()
 	go func() {
 		for {
@@ -161,7 +169,7 @@ func TestReverseRealityEndToEnd_TCP_UDP_And_Probe(t *testing.T) {
 	entryUDPFwdPort := getFreeUDPPort(t)
 
 	telemetry.SetDynamicSNIOrigins([]telemetry.SNIPreset{
-		{SNI: "mock.hospital.ir", Label: "Mock Hospital", OriginIP: originLn.Addr().String(), Category: "hospital"},
+		{SNI: "mock.hospital.ir", Label: "Mock Hospital", OriginIP: rawOriginLn.Addr().String(), Category: "hospital"},
 	})
 
 	entryEngine := NewEngine(Config{
@@ -171,7 +179,7 @@ func TestReverseRealityEndToEnd_TCP_UDP_And_Probe(t *testing.T) {
 		CarrierPort:        carrierPort,
 		ListenIP:           "127.0.0.1",
 		SNI:                "mock.hospital.ir",
-		OriginIP:           originLn.Addr().String(),
+		OriginIP:           rawOriginLn.Addr().String(),
 		Password:           "test-hospital-secret",
 		UseHalfDuplex:      true,
 		UseFisher:          true,
@@ -231,17 +239,15 @@ func TestReverseRealityEndToEnd_TCP_UDP_And_Probe(t *testing.T) {
 		t.Fatalf("expected warm idle pool connections on entry, got %d", entryEngine.Stats.PoolIdleConnections.Load())
 	}
 
-	// Test DPI Active Probe Camouflage Splicing
-	probeConn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(carrierPort)), 2*time.Second)
+	// Test DPI Active Probe Camouflage Splicing (censor scanner sending HTTPS probe)
+	probeRaw, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(carrierPort)), 2*time.Second)
 	if err != nil {
 		t.Fatalf("failed to dial carrier port as probe: %v", err)
 	}
-	_, _ = probeConn.Write([]byte("GET / HTTP/1.1\r\nHost: mock.hospital.ir\r\nConnection: close\r\n\r\n"))
-	if tc, ok := probeConn.(*net.TCPConn); ok {
-		_ = tc.CloseWrite()
-	}
-	probeReply, _ := io.ReadAll(probeConn)
-	_ = probeConn.Close()
+	tlsProbe := tls.Client(probeRaw, &tls.Config{ServerName: "mock.hospital.ir", InsecureSkipVerify: true})
+	_, _ = tlsProbe.Write([]byte("GET / HTTP/1.1\r\nHost: mock.hospital.ir\r\nConnection: close\r\n\r\n"))
+	probeReply, _ := io.ReadAll(tlsProbe)
+	_ = tlsProbe.Close()
 	if !bytes.HasPrefix(probeReply, []byte("ORIGIN-CAMOUFLAGE:GET / HTTP/1.1")) {
 		t.Fatalf("expected DPI probe to be transparently spliced to origin, got: %q", string(probeReply))
 	}

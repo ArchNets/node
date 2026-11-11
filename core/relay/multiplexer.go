@@ -217,14 +217,13 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 		copy(captured[0:5], hdr[:])
 		copy(captured[5:], body[:nBody])
 
-		// Reality ClientHello inspection: body[0] == 0x01 (ClientHello), body[6:38] is ClientRandom token
+		// TLS ClientHello inspection: body[0] == 0x01 (ClientHello)
 		if body[0] == 0x01 && len(body) >= 38 {
-			token := body[6:38]
-			for _, target := range snapshot {
-				if target.Transport == "reverse-reality" || target.Transport == "" {
-					key, keyErr := transport.DeriveRealityKey(target.Password, target.SNI)
-					if keyErr == nil && transport.VerifyRealityToken(key, token, transport.RealityMagic) {
-						// Matched Reality tunnel by authentication secret!
+			// 1. SNI-based demuxing across shared carrier port (Destination-Proxy Reality, tls-reverse, wss-reverse)
+			sni := transport.ExtractSNIFromClientHello(body)
+			if sni != "" {
+				for _, target := range snapshot {
+					if strings.EqualFold(target.SNI, sni) {
 						_ = conn.SetDeadline(time.Time{})
 						pConn := transport.NewPrefixConn(conn, captured)
 						target.Handler(pConn)
@@ -233,11 +232,12 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 				}
 			}
 
-			// If not authenticated by Reality token, check for SNI match (tls-reverse / wss-reverse)
-			sni := transport.ExtractSNIFromClientHello(body)
-			if sni != "" {
-				for _, target := range snapshot {
-					if strings.EqualFold(target.SNI, sni) {
+			// 2. Token-based fallback demuxing for standalone Reality
+			token := body[6:38]
+			for _, target := range snapshot {
+				if target.Transport == "reverse-reality" || target.Transport == "" {
+					key, keyErr := transport.DeriveRealityKey(target.Password, target.SNI)
+					if keyErr == nil && transport.VerifyRealityToken(key, token, transport.RealityMagic) {
 						_ = conn.SetDeadline(time.Time{})
 						pConn := transport.NewPrefixConn(conn, captured)
 						target.Handler(pConn)

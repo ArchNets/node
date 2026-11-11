@@ -24,6 +24,23 @@ var (
 	dynamicPresets     []SNIPreset
 	resolvedDNSCache   = make(map[string]string)
 	resolvedDNSCacheMu sync.RWMutex
+
+	// StaticHospitalAndNationalOrigins provides hardcoded Iranian IPs to guarantee zero-latency
+	// origin proxying even if Iran VPS DNS resolvers time out or are poisoned.
+	StaticHospitalAndNationalOrigins = map[string]string{
+		"shariati.tums.ac.ir": "185.143.234.132",
+		"rhc.ac.ir":           "194.225.92.55",
+		"tums.ac.ir":          "185.143.233.132",
+		"farabi.tums.ac.ir":   "194.225.62.74",
+		"sina.tums.ac.ir":     "194.225.62.69",
+		"pasteur.ac.ir":       "194.225.106.107",
+		"sbmu.ac.ir":          "185.143.233.122",
+		"miladhospital.com":   "185.116.24.163",
+		"divar.ir":            "185.166.104.7",
+		"cafebazaar.ir":       "94.182.176.33",
+		"snapp.ir":            "185.166.104.93",
+		"telewebion.ir":       "185.165.205.132",
+	}
 )
 
 // SetDynamicSNIOrigins updates the in-memory SNI origin mapping pushed dynamically from the server.
@@ -81,6 +98,14 @@ func ResolveOriginIP(sni, configuredOriginIP string) (string, error) {
 		return ip, nil
 	}
 	resolvedDNSCacheMu.RUnlock()
+
+	// 4. Check static Iranian hospital and national origins table
+	if staticIP, ok := StaticHospitalAndNationalOrigins[cleanSNI]; ok && staticIP != "" {
+		resolvedDNSCacheMu.Lock()
+		resolvedDNSCache[cleanSNI] = staticIP
+		resolvedDNSCacheMu.Unlock()
+		return staticIP, nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

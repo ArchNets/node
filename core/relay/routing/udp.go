@@ -48,7 +48,7 @@ type UDPSession struct {
 	Stream     net.Conn
 	StreamTwin net.Conn
 	ClientAddr *net.UDPAddr
-	LastActive time.Time
+	lastActive atomic.Int64
 	WriteMu    sync.Mutex
 	gamingSeq  atomic.Uint32
 	rxDedup    udpSeqDeduplicator
@@ -142,7 +142,7 @@ func StartUDPListenerLoop(
 				now := time.Now()
 				sessionsMu.Lock()
 				for k, s := range sessions {
-					if now.Sub(s.LastActive) > UDPSessionIdleTime {
+					if now.Unix()-s.lastActive.Load() > int64(UDPSessionIdleTime/time.Second) {
 						_ = s.Stream.Close()
 						delete(sessions, k)
 					}
@@ -207,8 +207,8 @@ func StartUDPListenerLoop(
 				sess = &UDPSession{
 					Stream:     stream,
 					ClientAddr: &addrCopy,
-					LastActive: time.Now(),
 				}
+				sess.lastActive.Store(time.Now().Unix())
 
 				if gamingMode {
 					// Attempt to claim twin stream for multi-path anti-jitter replication
@@ -246,7 +246,7 @@ func StartUDPListenerLoop(
 						if _, err := io.ReadFull(st, frameBuf[:frameLen]); err != nil {
 							return
 						}
-						sess.LastActive = time.Now()
+						sess.lastActive.Store(time.Now().Unix())
 
 						payload := frameBuf[:frameLen]
 						if gamingMode && frameLen >= 4 {
@@ -301,7 +301,7 @@ func StartUDPListenerLoop(
 			}
 
 			sess.WriteMu.Lock()
-			sess.LastActive = time.Now()
+			sess.lastActive.Store(time.Now().Unix())
 			_ = sess.Stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			_, wErr := sess.Stream.Write(frame)
 			_ = sess.Stream.SetWriteDeadline(time.Time{})

@@ -1018,7 +1018,13 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		carrierConn = inspectedConn
 
 	default: // "reverse-reality"
-		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		originAddr := e.cfg.OriginIP
+		if originAddr == "" && e.cfg.SNI != "" {
+			if resolved, err := telemetry.ResolveOriginIP(e.cfg.SNI, ""); err == nil {
+				originAddr = resolved
+			}
+		}
+		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, originAddr, hasUserFwd)
 		if err != nil {
 			return
 		}
@@ -1031,13 +1037,9 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 			return
 
 		case transport.ActionDPIProbe:
-			originAddr := e.cfg.OriginIP
-			if originAddr == "" && e.cfg.SNI != "" {
-				if resolved, err := telemetry.ResolveOriginIP(e.cfg.SNI, ""); err == nil {
-					originAddr = resolved
-				}
+			if inspectedConn != nil {
+				go transport.SpliceToOrigin(inspectedConn, originAddr)
 			}
-			go transport.SpliceToOrigin(inspectedConn, originAddr)
 			return
 		}
 	}
