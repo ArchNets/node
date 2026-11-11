@@ -1018,8 +1018,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		carrierConn = inspectedConn
 
 	default: // "reverse-reality"
-		isAllowedPeer := e.isAllowedCarrierPeer(rawConn.RemoteAddr())
-		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd, isAllowedPeer)
+		action, inspectedConn, err := transport.InspectRealityTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
 		if err != nil {
 			return
 		}
@@ -1118,7 +1117,7 @@ func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 			return nil, fmt.Errorf("timeout waiting for reverse pool connection")
 		case item := <-e.idlePool:
 			e.Stats.PoolIdleConnections.Add(-1)
-			if time.Since(item.createdAt) > 3*time.Minute || !transport.IsStreamAlive(item.conn) {
+			if time.Since(item.createdAt) > 30*time.Minute || !transport.IsStreamAlive(item.conn) {
 				_ = item.conn.Close()
 				continue
 			}
@@ -1681,9 +1680,8 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 		}).Info("[Relay] Exit reverse carrier connected and warm connections ready in pool")
 	}
 
-	_ = stream.SetReadDeadline(time.Now().Add(60 * time.Second))
+	_ = stream.SetDeadline(time.Time{})
 	proto, targetPort, err := routing.ReadRoutingHeader(stream)
-	_ = stream.SetReadDeadline(time.Time{})
 
 	e.idleStreams.Delete(stream)
 	e.idleWaiters.Add(-1)
@@ -1717,6 +1715,9 @@ func (e *Engine) telemetryLoop() {
 	fiveSecTicker := time.NewTicker(5 * time.Second)
 	defer fiveSecTicker.Stop()
 
+	latencyTicker := time.NewTicker(30 * time.Second)
+	defer latencyTicker.Stop()
+
 	probeInterval := time.Duration(e.cfg.ProbeIntervalMin) * time.Minute
 	if probeInterval < time.Minute {
 		probeInterval = 30 * time.Minute
@@ -1730,6 +1731,7 @@ func (e *Engine) telemetryLoop() {
 			return
 		case <-fiveSecTicker.C:
 			e.Stats.UpdateRollingThroughput()
+		case <-latencyTicker.C:
 			if e.cfg.Role == "entry" && e.Stats.PoolIdleConnections.Load() > 0 {
 				_, _ = telemetry.MeasureLatency(e.ClaimReverseStream, e.Stats)
 			}

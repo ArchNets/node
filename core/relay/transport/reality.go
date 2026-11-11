@@ -19,8 +19,10 @@ import (
 
 const (
 	realityHKDFSalt       = "archnet-reverse-reality-v1"
-	realityMagic          = "ARRL"
-	realityAckMagic       = "AROK"
+	RealityMagic          = "ARRL"
+	realityMagic          = RealityMagic
+	RealityAckMagic       = "AROK"
+	realityAckMagic       = RealityAckMagic
 	realityClockSkew      = 10 * time.Minute
 	maxTLS13RecordPayload = 16384
 )
@@ -492,10 +494,10 @@ const (
 
 // InspectRealityTraffic inspects incoming TCP connections on the carrier port.
 // It supports single-port multiplexing:
-// 1. Authenticated & Peer-gated Kharej peers -> ActionReverseCarrier (enters reverse idle pool)
+// 1. Authenticated Reality peers (valid ChaCha20-Poly1305 token + fresh nonce) -> ActionReverseCarrier (enters reverse idle pool)
 // 2. Unauthenticated clients -> ActionUserClient (if user forwarder is enabled on this port)
-// 3. Camouflage SNI probes or unauthorized peers -> ActionDPIProbe (spliced to camouflage origin)
-func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder bool, isAllowedPeer bool) (InspectAction, net.Conn, error) {
+// 3. Camouflage SNI probes or scanners -> ActionDPIProbe (spliced to camouflage origin)
+func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder bool) (InspectAction, net.Conn, error) {
 	TuneTCPConn(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
@@ -531,10 +533,9 @@ func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder
 
 	// Check if genuine Reality ClientHello from authorized Kharej peer.
 	// We require:
-	// 1. isAllowedPeer: peer IP must be the expected Exit/Entry node (deflects arbitrary active scanners to origin)
-	// 2. Valid ChaCha20-Poly1305 authentication token in ClientRandom (body[6:38])
-	// 3. Single-use nonce freshness: prevents on-path MitM from capturing and replaying the ClientHello for A/B probing
-	if isAllowedPeer && body[0] == 0x01 && len(body) >= 38 {
+	// 1. Valid ChaCha20-Poly1305 authentication token in ClientRandom (body[6:38])
+	// 2. Single-use nonce freshness: prevents on-path MitM from capturing and replaying the ClientHello for A/B probing
+	if body[0] == 0x01 && len(body) >= 38 {
 		key, keyErr := DeriveRealityKey(password, sni)
 		if keyErr == nil && VerifyRealityToken(key, body[6:38], realityMagic) && CheckAndRecordRealityNonce(body[6:18]) {
 			ackToken, ackErr := GenerateRealityToken(key, realityAckMagic)

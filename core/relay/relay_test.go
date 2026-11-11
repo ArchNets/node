@@ -1400,6 +1400,184 @@ func TestLiveMultiKharejSharedPortEndToEnd(t *testing.T) {
 	t.Logf("✓ Tunnel 2 Verified: Client -> Iran:48090 -> SharedCarrier:%d -> Kharej B: %s", sharedPort, respB)
 }
 
+func TestLiveMultiKharejTier2DeepInspectionDemuxing(t *testing.T) {
+	sharedPort := getFreeTCPPort(t)
+	svcPortA := getFreeTCPPort(t)
+	svcPortB := getFreeTCPPort(t)
+	fwdPortA := getFreeTCPPort(t)
+	fwdPortB := getFreeTCPPort(t)
+
+	// 1. Mock Backend Service A (on Kharej A)
+	lnA, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortA))
+	if err != nil {
+		t.Fatalf("failed to listen on service A port: %v", err)
+	}
+	defer lnA.Close()
+	go func() {
+		for {
+			c, err := lnA.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("RESPONSE_FROM_KHAREJ_A:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// 2. Mock Backend Service B (on Kharej B)
+	lnB, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortB))
+	if err != nil {
+		t.Fatalf("failed to listen on service B port: %v", err)
+	}
+	defer lnB.Close()
+	go func() {
+		for {
+			c, err := lnB.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("RESPONSE_FROM_KHAREJ_B:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// 3. Start Tunnel 1 on Iran with unmatched ExitServerIP (forces Tier 2 inspection)
+	engIran1 := NewEngine(Config{
+		TunnelID:     611,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.1", // Unmatched IP to bypass Tier 1
+		Transport:    "reverse-reality",
+		SNI:          "shariati.tums.ac.ir",
+		Password:     "tier2-secret-kharej-a",
+		Forwarders: []routing.ForwarderRule{
+			{
+				Protocol:   "tcp",
+				ListenPort: fwdPortA,
+				TargetPort: svcPortA,
+			},
+		},
+	})
+	if err := engIran1.Start(); err != nil {
+		t.Fatalf("failed to start engIran1: %v", err)
+	}
+	defer engIran1.Close()
+
+	// 4. Start Tunnel 2 on Iran with unmatched ExitServerIP (forces Tier 2 inspection)
+	engIran2 := NewEngine(Config{
+		TunnelID:     612,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.2", // Unmatched IP to bypass Tier 1
+		Transport:    "reverse-reality",
+		SNI:          "rhc.ac.ir",
+		Password:     "tier2-secret-kharej-b",
+		Forwarders: []routing.ForwarderRule{
+			{
+				Protocol:   "tcp",
+				ListenPort: fwdPortB,
+				TargetPort: svcPortB,
+			},
+		},
+	})
+	if err := engIran2.Start(); err != nil {
+		t.Fatalf("failed to start engIran2 on shared carrier port %d: %v", sharedPort, err)
+	}
+	defer engIran2.Close()
+
+	// 5. Start Kharej A Exit Engine (dials 127.0.0.1:sharedPort without spoofing source IP)
+	engKharejA := NewEngine(Config{
+		TunnelID:      611,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		TargetIP:      "127.0.0.1",
+		Transport:     "reverse-reality",
+		SNI:           "shariati.tums.ac.ir",
+		Password:      "tier2-secret-kharej-a",
+	})
+	if err := engKharejA.Start(); err != nil {
+		t.Fatalf("failed to start engKharejA: %v", err)
+	}
+	defer engKharejA.Close()
+
+	// 6. Start Kharej B Exit Engine
+	engKharejB := NewEngine(Config{
+		TunnelID:      612,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		TargetIP:      "127.0.0.1",
+		Transport:     "reverse-reality",
+		SNI:           "rhc.ac.ir",
+		Password:      "tier2-secret-kharej-b",
+	})
+	if err := engKharejB.Start(); err != nil {
+		t.Fatalf("failed to start engKharejB: %v", err)
+	}
+	defer engKharejB.Close()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// 7. Verify Forwarder A -> Tunnel 1 via Tier 2 Demuxing
+	clientConnA, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPortA), 3*time.Second)
+	if err != nil {
+		t.Fatalf("client failed to connect to Forwarder A: %v", err)
+	}
+	defer clientConnA.Close()
+
+	if _, err := clientConnA.Write([]byte("HELLO_TIER2_A")); err != nil {
+		t.Fatalf("client write to Forwarder A failed: %v", err)
+	}
+	respBufA := make([]byte, 1024)
+	_ = clientConnA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	nA, err := clientConnA.Read(respBufA)
+	if err != nil {
+		t.Fatalf("client read from Forwarder A failed: %v", err)
+	}
+	respA := string(respBufA[:nA])
+	if !strings.Contains(respA, "RESPONSE_FROM_KHAREJ_A:HELLO_TIER2_A") {
+		t.Fatalf("unexpected response from Forwarder A: %q", respA)
+	}
+	t.Logf("✓ Tier 2 Demux Tunnel 1 Verified: %s", respA)
+
+	// 8. Verify Forwarder B -> Tunnel 2 via Tier 2 Demuxing
+	clientConnB, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPortB), 3*time.Second)
+	if err != nil {
+		t.Fatalf("client failed to connect to Forwarder B: %v", err)
+	}
+	defer clientConnB.Close()
+
+	if _, err := clientConnB.Write([]byte("HELLO_TIER2_B")); err != nil {
+		t.Fatalf("client write to Forwarder B failed: %v", err)
+	}
+	respBufB := make([]byte, 1024)
+	_ = clientConnB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	nB, err := clientConnB.Read(respBufB)
+	if err != nil {
+		t.Fatalf("client read from Forwarder B failed: %v", err)
+	}
+	respB := string(respBufB[:nB])
+	if !strings.Contains(respB, "RESPONSE_FROM_KHAREJ_B:HELLO_TIER2_B") {
+		t.Fatalf("unexpected response from Forwarder B: %q", respB)
+	}
+	t.Logf("✓ Tier 2 Demux Tunnel 2 Verified: %s", respB)
+}
+
 func TestRawCarriersAndL3TransportsEndToEnd(t *testing.T) {
 	transportsToTest := []string{"l3-bip", "l3-ipip", "l3-gre", "xdi", "pck", "spoof"}
 	for _, tr := range transportsToTest {

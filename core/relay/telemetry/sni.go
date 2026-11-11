@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,9 +19,11 @@ type SNIPreset struct {
 }
 
 var (
-	dynamicOriginsMu sync.RWMutex
-	dynamicOrigins   = make(map[string]string)
-	dynamicPresets   []SNIPreset
+	dynamicOriginsMu   sync.RWMutex
+	dynamicOrigins     = make(map[string]string)
+	dynamicPresets     []SNIPreset
+	resolvedDNSCache   = make(map[string]string)
+	resolvedDNSCacheMu sync.RWMutex
 )
 
 // SetDynamicSNIOrigins updates the in-memory SNI origin mapping pushed dynamically from the server.
@@ -37,6 +40,10 @@ func SetDynamicSNIOrigins(origins []SNIPreset) {
 			dynamicOrigins[clean] = cleanIP
 		}
 	}
+
+	resolvedDNSCacheMu.Lock()
+	resolvedDNSCache = make(map[string]string)
+	resolvedDNSCacheMu.Unlock()
 }
 
 // GetActiveSNIPresets returns the dynamically configured list of SNI origins.
@@ -67,11 +74,34 @@ func ResolveOriginIP(sni, configuredOriginIP string) (string, error) {
 	}
 	dynamicOriginsMu.RUnlock()
 
+	// 3. Check resolved DNS cache to ensure deterministic origin IP across config polls.
+	resolvedDNSCacheMu.RLock()
+	if ip, ok := resolvedDNSCache[cleanSNI]; ok && ip != "" {
+		resolvedDNSCacheMu.RUnlock()
+		return ip, nil
+	}
+	resolvedDNSCacheMu.RUnlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupHost(ctx, cleanSNI)
 	if err == nil && len(addrs) > 0 {
-		return addrs[0], nil
+		var v4Addrs []string
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+				v4Addrs = append(v4Addrs, a)
+			}
+		}
+		if len(v4Addrs) == 0 {
+			v4Addrs = addrs
+		}
+		sort.Strings(v4Addrs)
+		chosen := v4Addrs[0]
+
+		resolvedDNSCacheMu.Lock()
+		resolvedDNSCache[cleanSNI] = chosen
+		resolvedDNSCacheMu.Unlock()
+		return chosen, nil
 	}
 
 	return "", fmt.Errorf("could not resolve camouflage origin IP for SNI %q: %w", cleanSNI, err)

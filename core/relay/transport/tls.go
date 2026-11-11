@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math/big"
@@ -224,4 +225,62 @@ func AcceptTLSReverseCarrier(rawConn net.Conn, tlsCfg *tls.Config, sni, password
 
 	_ = tlsConn.SetDeadline(time.Time{})
 	return tlsConn, nil
+}
+
+// ExtractSNIFromClientHello extracts the server_name extension from a raw TLS ClientHello record body.
+func ExtractSNIFromClientHello(body []byte) string {
+	if len(body) < 42 || body[0] != 0x01 {
+		return ""
+	}
+	// Skip HandshakeType (1B) + HandshakeLength (3B) + LegacyVersion (2B) + Random (32B) = 38B
+	curr := 38
+	if curr >= len(body) {
+		return ""
+	}
+	// SessionID length
+	sidLen := int(body[curr])
+	curr += 1 + sidLen
+	if curr+2 > len(body) {
+		return ""
+	}
+	// CipherSuites length
+	csLen := int(binary.BigEndian.Uint16(body[curr : curr+2]))
+	curr += 2 + csLen
+	if curr+1 > len(body) {
+		return ""
+	}
+	// CompressionMethods length
+	cmLen := int(body[curr])
+	curr += 1 + cmLen
+	if curr+2 > len(body) {
+		return ""
+	}
+	// Extensions length
+	extsLen := int(binary.BigEndian.Uint16(body[curr : curr+2]))
+	curr += 2
+	end := curr + extsLen
+	if end > len(body) {
+		end = len(body)
+	}
+
+	for curr+4 <= end {
+		extType := binary.BigEndian.Uint16(body[curr : curr+2])
+		extLen := int(binary.BigEndian.Uint16(body[curr+2 : curr+4]))
+		curr += 4
+		if curr+extLen > end {
+			break
+		}
+		if extType == 0x0000 { // server_name
+			if extLen < 5 {
+				break
+			}
+			// list_len (2B) + type (1B) + name_len (2B)
+			nameLen := int(binary.BigEndian.Uint16(body[curr+3 : curr+5]))
+			if curr+5+nameLen <= end {
+				return strings.ToLower(string(body[curr+5 : curr+5+nameLen]))
+			}
+		}
+		curr += extLen
+	}
+	return ""
 }

@@ -384,3 +384,26 @@ func (s *StealthConn) CloseRead() error {
 	}
 	return nil
 }
+
+// VerifyStealthInitiator tests whether initial captured bytes match a valid Stealth initiator handshake for password.
+func VerifyStealthInitiator(password string, captured []byte) bool {
+	if len(captured) < 14 {
+		return false
+	}
+	psk, err := deriveStealthPSK(password)
+	if err != nil {
+		return false
+	}
+	maskC := binary.BigEndian.Uint16(captured[:2]) ^ binary.BigEndian.Uint16(psk[:2])
+	sealedLenC := int(binary.BigEndian.Uint16(captured[12:14]) ^ maskC)
+	if sealedLenC < 32+1+16 || sealedLenC > 512 || len(captured) < 14+sealedLenC {
+		return false
+	}
+	aead, err := chacha20poly1305.New(psk)
+	if err != nil {
+		return false
+	}
+	plainC, err := aead.Open(nil, captured[:12], captured[14:14+sealedLenC], []byte(stealthPrologue))
+	return err == nil && len(plainC) >= 33
+}
+

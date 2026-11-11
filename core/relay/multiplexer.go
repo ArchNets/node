@@ -223,8 +223,21 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 			for _, target := range snapshot {
 				if target.Transport == "reverse-reality" || target.Transport == "" {
 					key, keyErr := transport.DeriveRealityKey(target.Password, target.SNI)
-					if keyErr == nil && transport.VerifyRealityToken(key, token, "ARRT") {
+					if keyErr == nil && transport.VerifyRealityToken(key, token, transport.RealityMagic) {
 						// Matched Reality tunnel by authentication secret!
+						_ = conn.SetDeadline(time.Time{})
+						pConn := transport.NewPrefixConn(conn, captured)
+						target.Handler(pConn)
+						return
+					}
+				}
+			}
+
+			// If not authenticated by Reality token, check for SNI match (tls-reverse / wss-reverse)
+			sni := transport.ExtractSNIFromClientHello(body)
+			if sni != "" {
+				for _, target := range snapshot {
+					if strings.EqualFold(target.SNI, sni) {
 						_ = conn.SetDeadline(time.Time{})
 						pConn := transport.NewPrefixConn(conn, captured)
 						target.Handler(pConn)
@@ -234,15 +247,33 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 			}
 		}
 	} else {
-		// Not TLS (could be HTTP/WebSocket: "GET /...", "POST", Socks, etc.)
+		// Not TLS (could be Stealth NNpsk0, HTTP/WebSocket: "GET /...", "POST", Socks, etc.)
 		captured = make([]byte, nHdr)
 		copy(captured, hdr[:nHdr])
 
-		// Check for WebSocket Path match
 		peekBuf := make([]byte, 1024)
 		nPeek, _ := conn.Read(peekBuf)
+		var fullCaptured []byte
 		if nPeek > 0 {
-			fullCaptured := append(captured, peekBuf[:nPeek]...)
+			fullCaptured = append(captured, peekBuf[:nPeek]...)
+		} else {
+			fullCaptured = captured
+		}
+
+		// 1. Check for Stealth carrier match
+		for _, target := range snapshot {
+			if target.Transport == "stealth" {
+				if transport.VerifyStealthInitiator(target.Password, fullCaptured) {
+					_ = conn.SetDeadline(time.Time{})
+					pConn := transport.NewPrefixConn(conn, fullCaptured)
+					target.Handler(pConn)
+					return
+				}
+			}
+		}
+
+		// 2. Check for WebSocket Path match
+		if nPeek > 0 {
 			reqStr := string(fullCaptured)
 			for _, target := range snapshot {
 				if target.WSPath != "" && strings.Contains(reqStr, target.WSPath) {
@@ -252,8 +283,8 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 					return
 				}
 			}
-			captured = fullCaptured
 		}
+		captured = fullCaptured
 	}
 
 	_ = conn.SetDeadline(time.Time{})
