@@ -123,6 +123,16 @@ func (c *HalfDuplexConn) Close() error {
 	return err2
 }
 
+func (c *HalfDuplexConn) IsAlive() bool {
+	if c.readConn != nil && !IsStreamAlive(c.readConn) {
+		return false
+	}
+	if c.writeConn != nil && !IsStreamAlive(c.writeConn) {
+		return false
+	}
+	return true
+}
+
 func (c *HalfDuplexConn) LocalAddr() net.Addr {
 	if c.readConn != nil {
 		return c.readConn.LocalAddr()

@@ -535,13 +535,13 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			continue
 		}
 
-		waitTimeout := 5 * time.Second
+		waitTimeout := 14 * time.Second
 		if !exitCheckedIn {
 			waitTimeout = 35 * time.Second
 		} else {
 			spec := transport.GetTransportSpec(cand.Transport)
 			if spec.IsPacket || spec.IsQuic || spec.NeedsTLSServerCfg || spec.IsL3 {
-				waitTimeout = 7 * time.Second
+				waitTimeout = 16 * time.Second
 			}
 		}
 

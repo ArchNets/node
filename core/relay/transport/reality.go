@@ -474,7 +474,7 @@ func DialRealityCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, 
 				return nil, fmt.Errorf("invalid reality server ack token")
 			}
 			_ = conn.SetDeadline(time.Time{})
-			return conn, nil
+			return NewRealityRecordConn(conn), nil
 		}
 		_ = conn.Close()
 		return nil, fmt.Errorf("unexpected reality server record type: 0x%02x", recHdr[0])
@@ -551,7 +551,7 @@ func InspectRealityTraffic(conn net.Conn, sni, password string, hasUserForwarder
 				return ActionDPIProbe, nil, wErr
 			}
 			_ = conn.SetDeadline(time.Time{})
-			return ActionReverseCarrier, conn, nil
+			return ActionReverseCarrier, NewRealityRecordConn(conn), nil
 		}
 	}
 
