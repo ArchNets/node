@@ -328,9 +328,14 @@ func ComputeBenchmarkScore(uploadBps, downloadBps int64, latencyMs, packetLoss i
 
 func (c *TunnelController) isScanRunning(tunnelId int) bool {
 	activeScansMu.Lock()
-	defer activeScansMu.Unlock()
-	_, exists := activeScans[tunnelId]
-	return exists
+	_, entryRunning := activeScans[tunnelId]
+	activeScansMu.Unlock()
+
+	exitSandboxMu.Lock()
+	_, exitRunning := exitSandboxes[tunnelId]
+	exitSandboxMu.Unlock()
+
+	return entryRunning || exitRunning
 }
 
 func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {

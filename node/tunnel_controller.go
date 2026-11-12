@@ -271,7 +271,7 @@ func (c *TunnelController) configMonitor() error {
 			}
 		} else {
 			// No scan command -> ensure echo servers are stopped (for exit nodes)
-			if t.Role == "exit" {
+			if t.Role == "exit" && !c.isScanRunning(t.Id) {
 				c.stopEchoServers(t.Id)
 			}
 		}
