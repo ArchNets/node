@@ -122,14 +122,48 @@ func readRealityHandoffRecord(r io.Reader, key [32]byte, expectedMagic string) e
 	return fmt.Errorf("reality handoff ACK not received within record limit")
 }
 
+// DeriveRealitySessionID derives a 32-byte TLS SessionID auth token for ClientHello demuxing.
+func DeriveRealitySessionID(password, sni string) ([32]byte, error) {
+	var token [32]byte
+	if password == "" {
+		password = "archnet-default-secret"
+	}
+	salt := []byte("archnet-reality-session-id-v2")
+	cleanSNI := strings.ToLower(strings.TrimSpace(sni))
+	ikm := []byte(password + ":" + cleanSNI)
+	r := hkdf.New(sha256.New, ikm, salt, []byte("archnet-reality-session-demux"))
+	if _, err := io.ReadFull(r, token[:]); err != nil {
+		return token, err
+	}
+	return token, nil
+}
+
+// ExtractSessionIDFromClientHello extracts the session_id from a raw TLS ClientHello record body.
+func ExtractSessionIDFromClientHello(body []byte) []byte {
+	if len(body) < 39 || body[0] != 0x01 {
+		return nil
+	}
+	// HandshakeType (1B) + HandshakeLength (3B) + LegacyVersion (2B) + Random (32B) = 38B
+	sidLen := int(body[38])
+	if sidLen <= 0 || 39+sidLen > len(body) {
+		return nil
+	}
+	return body[39 : 39+sidLen]
+}
+
 func proxyOriginHandshakeFlight(originConn, clientConn net.Conn) (serverRandom [32]byte, err error) {
 	_ = originConn.SetDeadline(time.Now().Add(6 * time.Second))
 	_ = clientConn.SetDeadline(time.Now().Add(6 * time.Second))
 
 	foundRandom := false
+	sawEncrypted := false
 	for recordsRead := 0; recordsRead < 16; recordsRead++ {
 		var hdr [5]byte
 		if _, err := io.ReadFull(originConn, hdr[:]); err != nil {
+			if sawEncrypted {
+				// Server flight finished (short deadline hit after encrypted records)
+				break
+			}
 			return serverRandom, fmt.Errorf("read origin record header: %w", err)
 		}
 		recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
@@ -155,12 +189,15 @@ func proxyOriginHandshakeFlight(originConn, clientConn net.Conn) (serverRandom [
 			return serverRandom, fmt.Errorf("forward origin record body: %w", err)
 		}
 
-		// In TLS 1.3, once ServerHello is found and the encrypted handshake ApplicationData (0x17)
-		// record containing the server Finished message has been forwarded, the server flight is complete.
 		if foundRandom && hdr[0] == 0x17 {
-			break
+			sawEncrypted = true
+			// Check if more encrypted records are queued in the server flight
+			_ = originConn.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 		}
 	}
+
+	_ = originConn.SetDeadline(time.Time{})
+	_ = clientConn.SetDeadline(time.Time{})
 
 	if !foundRandom {
 		return serverRandom, fmt.Errorf("did not observe server random in origin flight")
@@ -552,6 +589,15 @@ func DialRealityCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, 
 		InsecureSkipVerify: true,
 	}, utls.HelloChrome_Auto)
 
+	// Embed SessionID authentication token for multi-tunnel same-SNI demuxing
+	if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
+		if sessionToken, sErr := DeriveRealitySessionID(password, sni); sErr == nil {
+			uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
+			copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
+			uConn.HandshakeState.Hello.Raw = nil
+		}
+	}
+
 	if err := uConn.Handshake(); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("reality utls handshake with %s: %w", sni, err)
@@ -570,18 +616,27 @@ func DialRealityCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, 
 		serverRandom = uConn.HandshakeState.ServerHello.Random
 	}
 
-	if len(clientRandom) >= 32 && len(serverRandom) >= 32 {
-		key, err := DeriveRealitySessionKey(password, clientRandom[:32], serverRandom[:32])
-		if err == nil {
-			_ = rawConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if sErr := sendRealityHandoffRecord(rawConn, key, realityHandoffReqMagic); sErr == nil {
-				_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				if rErr := readRealityHandoffRecord(rawConn, key, realityHandoffAckMagic); rErr == nil {
-					_ = rawConn.SetDeadline(time.Time{})
-					return NewRealityRecordConn(rawConn), nil
-				}
-			}
-		}
+	if len(clientRandom) < 32 || len(serverRandom) < 32 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("reality: incomplete TLS handshake randoms (%d, %d)", len(clientRandom), len(serverRandom))
+	}
+
+	key, err := DeriveRealitySessionKey(password, clientRandom[:32], serverRandom[:32])
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("reality: derive session key: %w", err)
+	}
+
+	_ = rawConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if sErr := sendRealityHandoffRecord(rawConn, key, realityHandoffReqMagic); sErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("reality: send handoff request: %w", sErr)
+	}
+
+	_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if rErr := readRealityHandoffRecord(rawConn, key, realityHandoffAckMagic); rErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("reality: read handoff ack: %w", rErr)
 	}
 
 	_ = rawConn.SetDeadline(time.Time{})
@@ -661,105 +716,66 @@ func InspectRealityTraffic(conn net.Conn, sni, password, originIP string, hasUse
 
 			// 1. Forward the ClientHello record to Origin
 			if _, wErr := originConn.Write(captured); wErr == nil {
-				// 2. Read the first record (ServerHello) to extract serverRandom
-				var shHdr [5]byte
-				if _, err := io.ReadFull(originConn, shHdr[:]); err == nil {
-					shRecLen := int(binary.BigEndian.Uint16(shHdr[3:5]))
-					if shRecLen > 0 && shRecLen <= 16384 {
-						shBody := make([]byte, shRecLen)
-						if _, err := io.ReadFull(originConn, shBody); err == nil {
-							var serverRandom [32]byte
-							foundRandom := false
-							if shHdr[0] == 0x16 && len(shBody) >= 38 && shBody[0] == 0x02 {
-								copy(serverRandom[:], shBody[6:38])
-								foundRandom = true
+				// 2. Stream Origin's server flight back to client synchronously, capturing serverRandom
+				serverRandom, pErr := proxyOriginHandshakeFlight(originConn, conn)
+				if pErr == nil {
+					// 3. The client completes its TLS 1.3 flight:
+					// 1. Client sends ChangeCipherSpec (0x14)
+					// 2. Client sends Client Finished (0x17, encrypted under TLS handshake secret)
+					// 3. Client sends HANDOFF_REQUEST (0x17, encrypted under RealitySessionKey)
+					sawFinished := false
+					var visitorRecords [][]byte
+					for clientRecords := 0; clientRecords < 4; clientRecords++ {
+						_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+						var nextHdr [5]byte
+						if _, nErr := io.ReadFull(conn, nextHdr[:]); nErr != nil {
+							break
+						}
+						nextLen := int(binary.BigEndian.Uint16(nextHdr[3:5]))
+						if nextLen <= 0 || nextLen > 16384 {
+							break
+						}
+						nextBody := make([]byte, nextLen)
+						if _, bErr := io.ReadFull(conn, nextBody); bErr != nil {
+							break
+						}
+
+						rec := append([]byte(nil), nextHdr[:]...)
+						rec = append(rec, nextBody...)
+
+						// If client ChangeCipherSpec (0x14), buffer it
+						if nextHdr[0] == 0x14 {
+							visitorRecords = append(visitorRecords, rec)
+							continue
+						}
+
+						// If ApplicationData (0x17), test if it's HANDOFF_REQUEST
+						if nextHdr[0] == 0x17 {
+							key, kErr := DeriveRealitySessionKey(password, clientRandom, serverRandom[:])
+							if kErr == nil && verifyRealityHandoffRecord(nextBody, key, realityHandoffReqMagic) {
+								// Match! Authenticated reverse carrier peer!
+								_ = originConn.Close()
+								_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+								_ = sendRealityHandoffRecord(conn, key, realityHandoffAckMagic)
+								_ = conn.SetDeadline(time.Time{})
+								return ActionReverseCarrier, NewRealityRecordConn(conn), nil
 							}
-
-							// Forward ServerHello to client
-							_, _ = conn.Write(shHdr[:])
-							_, _ = conn.Write(shBody)
-
-							if foundRandom {
-								// Stream remainder of server flight from origin to client
-								originDone := make(chan struct{})
-								go func() {
-									defer close(originDone)
-									buf := make([]byte, 4096)
-									for {
-										_ = originConn.SetReadDeadline(time.Now().Add(4 * time.Second))
-										n, err := originConn.Read(buf)
-										if n > 0 {
-											_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
-											if _, wErr := conn.Write(buf[:n]); wErr != nil {
-												return
-											}
-										}
-										if err != nil {
-											return
-										}
-									}
-								}()
-
-								// The client completes its TLS 1.3 flight:
-								// 1. Client sends ChangeCipherSpec (0x14)
-								// 2. Client sends Client Finished (0x17, encrypted under TLS handshake secret)
-								// 3. Client sends HANDOFF_REQUEST (0x17, encrypted under RealitySessionKey)
-								sawFinished := false
-								var visitorRecords [][]byte
-								for clientRecords := 0; clientRecords < 4; clientRecords++ {
-									_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-									var nextHdr [5]byte
-									if _, nErr := io.ReadFull(conn, nextHdr[:]); nErr != nil {
-										break
-									}
-									nextLen := int(binary.BigEndian.Uint16(nextHdr[3:5]))
-									if nextLen <= 0 || nextLen > 16384 {
-										break
-									}
-									nextBody := make([]byte, nextLen)
-									if _, bErr := io.ReadFull(conn, nextBody); bErr != nil {
-										break
-									}
-
-									rec := append([]byte(nil), nextHdr[:]...)
-									rec = append(rec, nextBody...)
-
-									// If client ChangeCipherSpec (0x14), buffer it
-									if nextHdr[0] == 0x14 {
-										visitorRecords = append(visitorRecords, rec)
-										continue
-									}
-
-									// If ApplicationData (0x17), test if it's HANDOFF_REQUEST
-									if nextHdr[0] == 0x17 {
-										key, kErr := DeriveRealitySessionKey(password, clientRandom, serverRandom[:])
-										if kErr == nil && verifyRealityHandoffRecord(nextBody, key, realityHandoffReqMagic) {
-											// Match! Authenticated reverse carrier peer!
-											_ = originConn.Close()
-											_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-											_ = sendRealityHandoffRecord(conn, key, realityHandoffAckMagic)
-											_ = conn.SetDeadline(time.Time{})
-											return ActionReverseCarrier, NewRealityRecordConn(conn), nil
-										}
-										visitorRecords = append(visitorRecords, rec)
-										if sawFinished {
-											// Already saw Client Finished, and this 0x17 record is NOT handoff request.
-											// Definite visitor payload (e.g. HTTP GET). Flush to origin immediately.
-											break
-										}
-										sawFinished = true
-									}
-								}
-
-								// Active censor / probe fallback: flush buffered visitor records to origin so censors receive genuine HTML
-								for _, rec := range visitorRecords {
-									_, _ = originConn.Write(rec)
-								}
-								go SpliceConns(conn, originConn)
-								return ActionDPIProbe, nil, nil
+							visitorRecords = append(visitorRecords, rec)
+							if sawFinished {
+								// Already saw Client Finished, and this 0x17 record is NOT handoff request.
+								// Definite visitor payload (e.g. HTTP GET). Flush to origin immediately.
+								break
 							}
+							sawFinished = true
 						}
 					}
+
+					// Active censor / probe fallback: flush buffered visitor records to origin so censors receive genuine HTML
+					for _, rec := range visitorRecords {
+						_, _ = originConn.Write(rec)
+					}
+					go SpliceConns(conn, originConn)
+					return ActionDPIProbe, nil, nil
 				}
 			}
 

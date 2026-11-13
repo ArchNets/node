@@ -1585,6 +1585,171 @@ func TestLiveMultiKharejTier2DeepInspectionDemuxing(t *testing.T) {
 	t.Logf("✓ Tier 2 Demux Tunnel 2 Verified: %s", respB)
 }
 
+func TestLiveMultiKharejSameSNISessionIDDemuxing(t *testing.T) {
+	sharedPort := getFreeTCPPort(t)
+	svcPortA := getFreeTCPPort(t)
+	svcPortB := getFreeTCPPort(t)
+	fwdPortA := getFreeTCPPort(t)
+	fwdPortB := getFreeTCPPort(t)
+
+	// Both tunnels share the exact same SNI!
+	commonSNI := "shariati.tums.ac.ir"
+
+	// Mock Service A
+	lnA, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortA))
+	if err != nil {
+		t.Fatalf("listen svc A: %v", err)
+	}
+	defer lnA.Close()
+	go func() {
+		for {
+			c, err := lnA.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("SAME_SNI_A:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// Mock Service B
+	lnB, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPortB))
+	if err != nil {
+		t.Fatalf("listen svc B: %v", err)
+	}
+	defer lnB.Close()
+	go func() {
+		for {
+			c, err := lnB.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("SAME_SNI_B:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// Tunnel 1 Entry: unmatched exit IP forces Tier 2 deep inspection
+	engIran1 := NewEngine(Config{
+		TunnelID:     701,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.1",
+		Transport:    "reverse-reality",
+		SNI:          commonSNI,
+		Password:     "same-sni-secret-a",
+		Forwarders: []routing.ForwarderRule{
+			{Protocol: "tcp", ListenPort: fwdPortA, TargetPort: svcPortA},
+		},
+	})
+	if err := engIran1.Start(); err != nil {
+		t.Fatalf("start engIran1: %v", err)
+	}
+	defer engIran1.Close()
+
+	// Tunnel 2 Entry: unmatched exit IP, identical SNI, different password
+	engIran2 := NewEngine(Config{
+		TunnelID:     702,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.2",
+		Transport:    "reverse-reality",
+		SNI:          commonSNI,
+		Password:     "same-sni-secret-b",
+		Forwarders: []routing.ForwarderRule{
+			{Protocol: "tcp", ListenPort: fwdPortB, TargetPort: svcPortB},
+		},
+	})
+	if err := engIran2.Start(); err != nil {
+		t.Fatalf("start engIran2: %v", err)
+	}
+	defer engIran2.Close()
+
+	// Kharej A Exit Engine
+	engKharejA := NewEngine(Config{
+		TunnelID:      701,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		TargetIP:      "127.0.0.1",
+		Transport:     "reverse-reality",
+		SNI:           commonSNI,
+		Password:      "same-sni-secret-a",
+	})
+	if err := engKharejA.Start(); err != nil {
+		t.Fatalf("start engKharejA: %v", err)
+	}
+	defer engKharejA.Close()
+
+	// Kharej B Exit Engine
+	engKharejB := NewEngine(Config{
+		TunnelID:      702,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		TargetIP:      "127.0.0.1",
+		Transport:     "reverse-reality",
+		SNI:           commonSNI,
+		Password:      "same-sni-secret-b",
+	})
+	if err := engKharejB.Start(); err != nil {
+		t.Fatalf("start engKharejB: %v", err)
+	}
+	defer engKharejB.Close()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify Forwarder A routes exclusively to Kharej A via SessionID demuxing
+	clientA, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPortA), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial fwd A: %v", err)
+	}
+	defer clientA.Close()
+	_, _ = clientA.Write([]byte("PING_A"))
+	bufA := make([]byte, 1024)
+	_ = clientA.SetReadDeadline(time.Now().Add(3 * time.Second))
+	nA, err := clientA.Read(bufA)
+	if err != nil {
+		t.Fatalf("read fwd A: %v", err)
+	}
+	if string(bufA[:nA]) != "SAME_SNI_A:PING_A" {
+		t.Fatalf("unexpected fwd A response: %q", string(bufA[:nA]))
+	}
+	t.Logf("✓ Tunnel A SessionID demux verified: %s", string(bufA[:nA]))
+
+	// Verify Forwarder B routes exclusively to Kharej B via SessionID demuxing
+	clientB, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPortB), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial fwd B: %v", err)
+	}
+	defer clientB.Close()
+	_, _ = clientB.Write([]byte("PING_B"))
+	bufB := make([]byte, 1024)
+	_ = clientB.SetReadDeadline(time.Now().Add(3 * time.Second))
+	nB, err := clientB.Read(bufB)
+	if err != nil {
+		t.Fatalf("read fwd B: %v", err)
+	}
+	if string(bufB[:nB]) != "SAME_SNI_B:PING_B" {
+		t.Fatalf("unexpected fwd B response: %q", string(bufB[:nB]))
+	}
+	t.Logf("✓ Tunnel B SessionID demux verified: %s", string(bufB[:nB]))
+}
+
 func TestLiveRealOriginReality(t *testing.T) {
 	carrierPort := getFreeTCPPort(t)
 

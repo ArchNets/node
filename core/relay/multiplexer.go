@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -219,7 +220,24 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 
 		// TLS ClientHello inspection: body[0] == 0x01 (ClientHello)
 		if body[0] == 0x01 && len(body) >= 38 {
-			// 1. SNI-based demuxing across shared carrier port (Destination-Proxy Reality, tls-reverse, wss-reverse)
+			// 1. SessionID-based demuxing for Reality targets (matching Xray-core Reality)
+			// Enables multiple Reality tunnels on the same port with identical SNI to demux accurately
+			sid := transport.ExtractSessionIDFromClientHello(body)
+			if len(sid) == 32 {
+				for _, target := range snapshot {
+					if target.Transport == "reverse-reality" || target.Transport == "" {
+						expectedToken, err := transport.DeriveRealitySessionID(target.Password, target.SNI)
+						if err == nil && bytes.Equal(sid, expectedToken[:]) {
+							_ = conn.SetDeadline(time.Time{})
+							pConn := transport.NewPrefixConn(conn, captured)
+							target.Handler(pConn)
+							return
+						}
+					}
+				}
+			}
+
+			// 2. SNI-based demuxing across shared carrier port (tls-reverse, wss-reverse, or distinct Reality SNIs)
 			sni := transport.ExtractSNIFromClientHello(body)
 			if sni != "" {
 				for _, target := range snapshot {
@@ -237,7 +255,7 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 				}
 			}
 
-			// 2. Token-based fallback demuxing for standalone Reality
+			// 3. Token-based fallback demuxing for standalone Reality
 			token := body[6:38]
 			for _, target := range snapshot {
 				if target.Transport == "reverse-reality" || target.Transport == "" {
