@@ -11,8 +11,22 @@ import (
 
 const (
 	tcpAuthMagic   = "ARTP"
+	TCPAuthMagic   = tcpAuthMagic
 	tcpAuthAckByte = 0xA5
+	TCPAuthAckByte = tcpAuthAckByte
 )
+
+// VerifyTCPInitiator checks whether initial bytes contain a valid 32-byte TCP carrier authentication token.
+func VerifyTCPInitiator(password string, captured []byte) bool {
+	if len(captured) < 32 {
+		return false
+	}
+	key, err := DeriveRealityKey(password, "archnet-tcp-pool")
+	if err != nil {
+		return false
+	}
+	return VerifyRealityToken(key, captured[:32], tcpAuthMagic)
+}
 
 // DialTCPCarrier dials a raw TCP carrier connection with 32-byte PoolNonce / HMAC token authentication.
 // Once authenticated, the raw *net.TCPConn is returned directly for Linux kernel splice(2) zero-copy.

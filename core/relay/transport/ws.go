@@ -21,7 +21,29 @@ const (
 	wsGUID      = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 
-// DialWSCarrier dials Entry over HTTP/1.1 WebSocket Upgrade (or HTTPS with Chrome uTLS when useTLS is true).
+// VerifyWSInitiator tests whether an incoming HTTP request contains a valid WebSocket authentication token.
+func VerifyWSInitiator(password string, reqStr string) bool {
+	var authHex string
+	for _, line := range strings.Split(reqStr, "\r\n") {
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "x-requested-with:") {
+			authHex = strings.TrimSpace(line[len("x-requested-with:"):])
+			break
+		}
+	}
+	if len(authHex) != 64 {
+		return false
+	}
+	tokenBytes, err := hex.DecodeString(authHex)
+	if err != nil || len(tokenBytes) != 32 {
+		return false
+	}
+	key, err := DeriveRealityKey(password, "archnet-ws-auth")
+	if err != nil {
+		return false
+	}
+	return VerifyRealityToken(key, tokenBytes, wsAuthMagic)
+}
 // Once the 101 Switching Protocols handshake succeeds, the raw stream is returned for zero-copy splicing.
 func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath string) (net.Conn, error) {
  if sni == "" {
@@ -60,6 +82,13 @@ func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath str
    InsecureSkipVerify: trustSelfSignedCert,
    NextProtos:         []string{"http/1.1"},
   }, utls.HelloChrome_Auto)
+  if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
+   if sessionToken, sErr := DeriveRealitySessionID(password, sni); sErr == nil {
+    uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
+    copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
+    uConn.HandshakeState.Hello.Raw = nil
+   }
+  }
   if err := uConn.Handshake(); err != nil {
    _ = rawConn.Close()
    return nil, fmt.Errorf("wss utls handshake: %w", err)

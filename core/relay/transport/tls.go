@@ -18,6 +18,7 @@ import (
 	"time"
 
 	certutil "github.com/archnets/node/common/cert"
+	utls "github.com/refraction-networking/utls"
 )
 
 // resolveFallbackCertPaths checks standard ArchNet (/etc/archnets/) and Let's Encrypt
@@ -160,13 +161,24 @@ func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Con
 	}
 	TuneTCPConn(rawConn)
 
-	tlsConn := tls.Client(rawConn, buildSelfSignedReverseClientTLSConfig(sni))
+	uConn := utls.UClient(rawConn, &utls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true,
+	}, utls.HelloChrome_Auto)
+	if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
+		if sessionToken, sErr := DeriveRealitySessionID(password, sni); sErr == nil {
+			uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
+			copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
+			uConn.HandshakeState.Hello.Raw = nil
+		}
+	}
 
-	_ = tlsConn.SetDeadline(time.Now().Add(6 * time.Second))
-	if err := tlsConn.Handshake(); err != nil {
+	_ = uConn.SetDeadline(time.Now().Add(6 * time.Second))
+	if err := uConn.Handshake(); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("tls-reverse handshake: %w", err)
 	}
+	tlsConn := uConn
 
 	if _, err := tlsConn.Write(token[:]); err != nil {
 		_ = tlsConn.Close()

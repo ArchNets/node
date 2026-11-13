@@ -2020,3 +2020,161 @@ func TestGamingModeTwinStreamUDPForwardingEndToEnd(t *testing.T) {
 	}
 	t.Logf("✓ Gaming Mode Twin-Stream UDP verified: 5/5 ticks delivered with 0 duplicates and single Exit source port (%s)", peerStr)
 }
+
+func TestLiveMultiKharejRawTCPAndTLSDemuxing(t *testing.T) {
+	sharedPort := getFreeTCPPort(t)
+	svcPort1 := getFreeTCPPort(t)
+	svcPort2 := getFreeTCPPort(t)
+	fwdPort1 := getFreeTCPPort(t)
+	fwdPort2 := getFreeTCPPort(t)
+
+	// Mock Backend Service 1
+	ln1, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPort1))
+	if err != nil {
+		t.Fatalf("listen svc 1: %v", err)
+	}
+	defer ln1.Close()
+	go func() {
+		for {
+			c, err := ln1.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("RAW_TCP_1:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// Mock Backend Service 2
+	ln2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPort2))
+	if err != nil {
+		t.Fatalf("listen svc 2: %v", err)
+	}
+	defer ln2.Close()
+	go func() {
+		for {
+			c, err := ln2.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("RAW_TCP_2:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// Tunnel 1 Entry: Raw TCP with unmatched exit IP (forces Tier 2)
+	engIran1 := NewEngine(Config{
+		TunnelID:     801,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.1",
+		Transport:    "tcp",
+		Password:     "secret-raw-tcp-1",
+		Forwarders: []routing.ForwarderRule{
+			{Protocol: "tcp", ListenPort: fwdPort1, TargetPort: svcPort1},
+		},
+	})
+	if err := engIran1.Start(); err != nil {
+		t.Fatalf("start engIran1: %v", err)
+	}
+	defer engIran1.Close()
+
+	// Tunnel 2 Entry: Raw TCP on SAME carrier port with different password
+	engIran2 := NewEngine(Config{
+		TunnelID:     802,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.2",
+		Transport:    "tcp",
+		Password:     "secret-raw-tcp-2",
+		Forwarders: []routing.ForwarderRule{
+			{Protocol: "tcp", ListenPort: fwdPort2, TargetPort: svcPort2},
+		},
+	})
+	if err := engIran2.Start(); err != nil {
+		t.Fatalf("start engIran2: %v", err)
+	}
+	defer engIran2.Close()
+
+	// Kharej 1 Exit Engine (dials 127.0.0.1:sharedPort with Password 1)
+	engKharej1 := NewEngine(Config{
+		TunnelID:      801,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		TargetIP:      "127.0.0.1",
+		Transport:     "tcp",
+		Password:      "secret-raw-tcp-1",
+	})
+	if err := engKharej1.Start(); err != nil {
+		t.Fatalf("start engKharej1: %v", err)
+	}
+	defer engKharej1.Close()
+
+	// Kharej 2 Exit Engine (dials 127.0.0.1:sharedPort with Password 2)
+	engKharej2 := NewEngine(Config{
+		TunnelID:      802,
+		Role:          "exit",
+		CarrierPort:   sharedPort,
+		EntryServerIP: "127.0.0.1",
+		TargetIP:      "127.0.0.1",
+		Transport:     "tcp",
+		Password:      "secret-raw-tcp-2",
+	})
+	if err := engKharej2.Start(); err != nil {
+		t.Fatalf("start engKharej2: %v", err)
+	}
+	defer engKharej2.Close()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify Forwarder 1 routes exclusively to Kharej 1
+	client1, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort1), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial fwd 1: %v", err)
+	}
+	defer client1.Close()
+	_, _ = client1.Write([]byte("PING_TCP_1"))
+	buf1 := make([]byte, 1024)
+	_ = client1.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n1, err := client1.Read(buf1)
+	if err != nil {
+		t.Fatalf("read fwd 1: %v", err)
+	}
+	if string(buf1[:n1]) != "RAW_TCP_1:PING_TCP_1" {
+		t.Fatalf("unexpected fwd 1 response: %q", string(buf1[:n1]))
+	}
+	t.Logf("✓ Raw TCP Tunnel 1 Tier 2 demux verified: %s", string(buf1[:n1]))
+
+	// Verify Forwarder 2 routes exclusively to Kharej 2
+	client2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort2), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial fwd 2: %v", err)
+	}
+	defer client2.Close()
+	_, _ = client2.Write([]byte("PING_TCP_2"))
+	buf2 := make([]byte, 1024)
+	_ = client2.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n2, err := client2.Read(buf2)
+	if err != nil {
+		t.Fatalf("read fwd 2: %v", err)
+	}
+	if string(buf2[:n2]) != "RAW_TCP_2:PING_TCP_2" {
+		t.Fatalf("unexpected fwd 2 response: %q", string(buf2[:n2]))
+	}
+	t.Logf("✓ Raw TCP Tunnel 2 Tier 2 demux verified: %s", string(buf2[:n2]))
+}

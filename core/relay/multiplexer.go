@@ -220,12 +220,17 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 
 		// TLS ClientHello inspection: body[0] == 0x01 (ClientHello)
 		if body[0] == 0x01 && len(body) >= 38 {
-			// 1. SessionID-based demuxing for Reality targets (matching Xray-core Reality)
-			// Enables multiple Reality tunnels on the same port with identical SNI to demux accurately
+			// 1. SessionID-based demuxing across shared carrier port (reverse-reality, tls-reverse, wss-reverse, wssmux)
+			// Enables multiple TLS-based tunnels on the same port with identical SNI to demux accurately
 			sid := transport.ExtractSessionIDFromClientHello(body)
 			if len(sid) == 32 {
 				for _, target := range snapshot {
-					if target.Transport == "reverse-reality" || target.Transport == "" {
+					isTLS := target.Transport == "reverse-reality" ||
+						target.Transport == "tls-reverse" ||
+						target.Transport == "wss-reverse" ||
+						target.Transport == "wssmux" ||
+						target.Transport == ""
+					if isTLS {
 						expectedToken, err := transport.DeriveRealitySessionID(target.Password, target.SNI)
 						if err == nil && bytes.Equal(sid, expectedToken[:]) {
 							_ = conn.SetDeadline(time.Time{})
@@ -295,15 +300,39 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 			}
 		}
 
-		// 2. Check for WebSocket Path match
+		// 2. Check for Raw TCP / TCPMux / L3-TCP carrier token match
+		if len(fullCaptured) >= 32 {
+			for _, target := range snapshot {
+				if target.Transport == "tcp" || target.Transport == "tcpmux" || target.Transport == "l3-tcp" {
+					if transport.VerifyTCPInitiator(target.Password, fullCaptured) {
+						_ = conn.SetDeadline(time.Time{})
+						pConn := transport.NewPrefixConn(conn, fullCaptured)
+						target.Handler(pConn)
+						return
+					}
+				}
+			}
+		}
+
+		// 3. Check for WebSocket Upgrade match (by token or path)
 		if nPeek > 0 {
 			reqStr := string(fullCaptured)
-			for _, target := range snapshot {
-				if target.WSPath != "" && strings.Contains(reqStr, target.WSPath) {
-					_ = conn.SetDeadline(time.Time{})
-					pConn := transport.NewPrefixConn(conn, fullCaptured)
-					target.Handler(pConn)
-					return
+			if strings.Contains(reqStr, "Upgrade: websocket") || strings.Contains(reqStr, "X-Requested-With:") {
+				for _, target := range snapshot {
+					if target.Transport == "ws-reverse" || target.Transport == "wsmux" {
+						if transport.VerifyWSInitiator(target.Password, reqStr) {
+							_ = conn.SetDeadline(time.Time{})
+							pConn := transport.NewPrefixConn(conn, fullCaptured)
+							target.Handler(pConn)
+							return
+						}
+						if target.WSPath != "" && strings.Contains(reqStr, target.WSPath) {
+							_ = conn.SetDeadline(time.Time{})
+							pConn := transport.NewPrefixConn(conn, fullCaptured)
+							target.Handler(pConn)
+							return
+						}
+					}
 				}
 			}
 		}
