@@ -420,7 +420,7 @@ func measurePingSeries(claimStreamFn func(timeout time.Duration) (net.Conn, erro
 	return int(avg), jitter, loss
 }
 
-// claimProbeStreams claims 1 primary stream (up to 4s) and up to n-1 extra warm streams (15ms each)
+// claimProbeStreams claims 1 primary stream (up to 4s) and up to n-1 extra warm streams (up to 200ms each)
 // for multi-stream bandwidth measurement matching WaterWall's SpeedTestClient.
 func claimProbeStreams(claimStreamFn func(timeout time.Duration) (net.Conn, error), maxStreams int) ([]net.Conn, error) {
 	first, err := claimStreamFn(4 * time.Second)
@@ -430,7 +430,7 @@ func claimProbeStreams(claimStreamFn func(timeout time.Duration) (net.Conn, erro
 	streams := make([]net.Conn, 0, maxStreams)
 	streams = append(streams, first)
 	for i := 1; i < maxStreams; i++ {
-		s, err := claimStreamFn(15 * time.Millisecond)
+		s, err := claimStreamFn(200 * time.Millisecond)
 		if err != nil || s == nil {
 			break
 		}

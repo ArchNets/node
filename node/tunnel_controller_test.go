@@ -65,6 +65,13 @@ func TestTunnelControllerApplyNativeRelayConfig(t *testing.T) {
 
 	_ = os.MkdirAll(filepath.Join(tmpDir, "log"), 0755)
 
+	freePortLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to get free port: %v", err)
+	}
+	testPort := freePortLn.Addr().(*net.TCPAddr).Port
+	_ = freePortLn.Close()
+
 	data := &panel.TunnelData{
 		Tunnels: []panel.TunnelInfo{
 			{
@@ -75,7 +82,7 @@ func TestTunnelControllerApplyNativeRelayConfig(t *testing.T) {
 				RemoteIP: "127.0.0.1",
 				RelayConfig: &panel.RelayTunnelConfig{
 					Transport:          "reverse-reality",
-					CarrierPort:        59443,
+					CarrierPort:        testPort,
 					SNI:                "shariati.tums.ac.ir",
 					Password:           "secret123",
 					UseHalfDuplex:      true,
@@ -173,7 +180,7 @@ func TestBenchmarkSequentialCandidates(t *testing.T) {
 	}
 
 	sandboxPort := 47000
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Start exit node sandbox coordinator in background

@@ -128,7 +128,7 @@ func (s *Stats) GetLastProbeResult() (uploadMbps, downloadMbps float64, status s
 
 var relayBufferPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 128*1024)
+		b := make([]byte, 256*1024)
 		return &b
 	},
 }

@@ -5,6 +5,7 @@ package transport
 import (
 	"net"
 	"os"
+	"os/exec"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -100,16 +101,30 @@ func ensureLinuxKernelTCPTuning() {
 			"/proc/sys/net/core/rmem_max":                  "134217728",
 			"/proc/sys/net/core/wmem_max":                  "134217728",
 			"/proc/sys/net/ipv4/tcp_rmem":                  "4096 87380 134217728",
-			"/proc/sys/net/ipv4/tcp_wmem":                  "4096 87380 134217728",
+			"/proc/sys/net/ipv4/tcp_wmem":                  "4096 65536 134217728",
 			"/proc/sys/net/core/netdev_max_backlog":         "250000",
 			"/proc/sys/net/core/somaxconn":                 "65535",
 			"/proc/sys/net/ipv4/tcp_no_metrics_save":        "1",
 			"/proc/sys/net/ipv4/tcp_slow_start_after_idle": "0",
 			"/proc/sys/net/ipv4/tcp_window_scaling":        "1",
 			"/proc/sys/net/ipv4/tcp_mtu_probing":           "1",
+			"/proc/sys/fs/pipe-max-size":                   "1048576",
 		}
 		for path, val := range sysctls {
 			_ = os.WriteFile(path, []byte(val+"\n"), 0644)
+		}
+		// Also execute sysctl -w for environments where /proc/sys is mounted or verified via sysctl
+		commands := []string{
+			"net.core.rmem_max=134217728",
+			"net.core.wmem_max=134217728",
+			"net.ipv4.tcp_rmem=4096 87380 134217728",
+			"net.ipv4.tcp_wmem=4096 65536 134217728",
+			"net.ipv4.tcp_window_scaling=1",
+			"net.ipv4.tcp_no_metrics_save=1",
+			"fs.pipe-max-size=1048576",
+		}
+		for _, arg := range commands {
+			_ = exec.Command("/sbin/sysctl", "-w", arg).Run()
 		}
 	})
 }
@@ -123,6 +138,13 @@ func setPlatformTCPTune(tc *net.TCPConn) {
 			_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
 			// Enable TCP_QUICKACK to accelerate slow-start window growth over high-RTT links
 			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
+			// Apply large socket buffer sizes to remove the 4MB BDP ceiling on high-RTT links
+			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, 32*1024*1024); err != nil {
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, 32*1024*1024)
+			}
+			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUFFORCE, 32*1024*1024); err != nil {
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, 32*1024*1024)
+			}
 			// Apply TCP_MAXSEG (MSS clamping = MTU - 40) when a custom sub-1500 MTU is configured
 			if mtu >= 576 && mtu < 1500 {
 				mss := mtu - 40

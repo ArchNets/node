@@ -690,14 +690,17 @@ func (c *TunnelController) evaluateCandidate(
 				return nil
 			default:
 			}
-			if sandboxEngine.Stats.PoolIdleConnections.Load() > 0 {
+			// Pre-warm target: wait until at least 4 parallel carrier streams are warm in the pool,
+			// or proceed if time is running low and at least 1 stream is available.
+			idleCount := sandboxEngine.Stats.PoolIdleConnections.Load()
+			if idleCount >= 4 || (idleCount > 0 && time.Until(waitDeadline) < 500*time.Millisecond) {
 				break
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
 
 		if sandboxEngine.Stats.PoolIdleConnections.Load() > 0 {
-			sample, _ = telemetry.RunBandwidthProbe(sandboxEngine.ClaimReverseStream, sandboxEngine.Stats, 1200*time.Millisecond)
+			sample, _ = telemetry.RunBandwidthProbe(sandboxEngine.ClaimReverseStream, sandboxEngine.Stats, 2500*time.Millisecond)
 		} else {
 			c.logger.WithFields(log.Fields{
 				"tunnel_id": t.Id,

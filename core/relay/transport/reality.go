@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -214,11 +215,15 @@ type RealityRecordConn struct {
 	net.Conn
 	readMu  sync.Mutex
 	writeMu sync.Mutex
+	reader  *bufio.Reader
 	rem     int
 }
 
 func NewRealityRecordConn(c net.Conn) *RealityRecordConn {
-	return &RealityRecordConn{Conn: c}
+	return &RealityRecordConn{
+		Conn:   c,
+		reader: bufio.NewReaderSize(c, 128*1024), // 128 KiB read buffer for bulk TLS record ingestion
+	}
 }
 
 func (c *RealityRecordConn) Underlying() net.Conn {
@@ -238,7 +243,7 @@ func (c *RealityRecordConn) Read(p []byte) (int, error) {
 
 	for c.rem == 0 {
 		var hdr [5]byte
-		if _, err := io.ReadFull(c.Conn, hdr[:]); err != nil {
+		if _, err := io.ReadFull(c.reader, hdr[:]); err != nil {
 			return 0, err
 		}
 		if hdr[0] != 0x17 && hdr[0] != 0x16 && hdr[0] != 0x14 {
@@ -255,8 +260,10 @@ func (c *RealityRecordConn) Read(p []byte) (int, error) {
 	if toRead > c.rem {
 		toRead = c.rem
 	}
-	n, err := c.Conn.Read(p[:toRead])
-	c.rem -= n
+	n, err := c.reader.Read(p[:toRead])
+	if n > 0 {
+		c.rem -= n
+	}
 	return n, err
 }
 
@@ -269,25 +276,54 @@ func (c *RealityRecordConn) Write(p []byte) (int, error) {
 
 	total := 0
 	for len(p) > 0 {
-		chunk := p
-		if len(chunk) > maxTLS13RecordPayload {
-			chunk = p[:maxTLS13RecordPayload]
+		// Batch up to 16 records (256 KiB) into a single writev syscall
+		const maxBatchRecords = 16
+		numChunks := (len(p) + maxTLS13RecordPayload - 1) / maxTLS13RecordPayload
+		if numChunks > maxBatchRecords {
+			numChunks = maxBatchRecords
 		}
-		var hdr [5]byte
-		hdr[0] = 0x17
-		hdr[1] = 0x03
-		hdr[2] = 0x03
-		binary.BigEndian.PutUint16(hdr[3:5], uint16(len(chunk)))
 
-		bufs := net.Buffers{hdr[:], chunk}
-		n, err := bufs.WriteTo(c.Conn)
-		if n > 5 {
-			written := int(n - 5)
-			if written > len(chunk) {
-				written = len(chunk)
+		var hdrs [maxBatchRecords][5]byte
+		var chunkLens [maxBatchRecords]int
+		bufs := make(net.Buffers, 0, numChunks*2)
+
+		rem := p
+		for i := 0; i < numChunks; i++ {
+			chunkLen := len(rem)
+			if chunkLen > maxTLS13RecordPayload {
+				chunkLen = maxTLS13RecordPayload
 			}
-			total += written
-			p = p[written:]
+			chunk := rem[:chunkLen]
+			rem = rem[chunkLen:]
+			chunkLens[i] = chunkLen
+
+			hdrs[i][0] = 0x17
+			hdrs[i][1] = 0x03
+			hdrs[i][2] = 0x03
+			binary.BigEndian.PutUint16(hdrs[i][3:5], uint16(chunkLen))
+
+			bufs = append(bufs, hdrs[i][:], chunk)
+		}
+
+		n, err := bufs.WriteTo(c.Conn)
+		if n > 0 {
+			// Compute payload bytes written (excluding 5-byte TLS record headers)
+			rawWritten := n
+			payloadWritten := 0
+			for i := 0; i < numChunks && rawWritten > 0; i++ {
+				totalChunk := int64(5 + chunkLens[i])
+				if rawWritten >= totalChunk {
+					payloadWritten += chunkLens[i]
+					rawWritten -= totalChunk
+				} else {
+					if rawWritten > 5 {
+						payloadWritten += int(rawWritten - 5)
+					}
+					break
+				}
+			}
+			total += payloadWritten
+			p = p[payloadWritten:]
 		}
 		if err != nil {
 			return total, err
