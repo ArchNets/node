@@ -1,14 +1,24 @@
 package node
 
 import (
+	"bufio"
+	"context"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/conf"
+	relay "github.com/archnets/node/core/relay"
 	"github.com/archnets/node/core/relay/telemetry"
+	"github.com/archnets/node/core/relay/transport"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -138,6 +148,149 @@ func TestComputeBenchmarkScore(t *testing.T) {
 	if score <= 0 {
 		t.Errorf("expected positive score, got %f", score)
 	}
+}
+
+func TestBenchmarkSequentialCandidates(t *testing.T) {
+	tc := &TunnelController{
+		tag:    "test-controller",
+		logger: log.NewEntry(log.New()),
+	}
+
+	tunInfo := panel.TunnelInfo{
+		Id:       123,
+		RemoteIP: "127.0.0.1",
+		RelayConfig: &panel.RelayTunnelConfig{
+			Password: "test-seq-password",
+			SNI:      "shariati.tums.ac.ir",
+		},
+	}
+
+	testCandidates := []BenchmarkCandidate{
+		{Index: 1, Transport: "stealth", MethodLabel: "Stealth", UseHalfDuplex: true, UseFisher: false},
+		{Index: 2, Transport: "tcpmux", MethodLabel: "TCPMux", UseHalfDuplex: false, UseFisher: false},
+		{Index: 3, Transport: "tcp", MethodLabel: "Raw TCP", UseHalfDuplex: true, UseFisher: false},
+		{Index: 4, Transport: "reverse-reality", MethodLabel: "Reality", SNI: "shariati.tums.ac.ir", OriginIP: "185.143.234.132", UseHalfDuplex: true, UseFisher: false},
+	}
+
+	sandboxPort := 47000
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Start exit node sandbox coordinator in background
+	var exitActiveEng *relay.Engine
+	var activeEngMu sync.Mutex
+	exitStopCh := make(chan struct{})
+	defer close(exitStopCh)
+
+	// Start entry coordinator listener on sandboxPort
+	coordAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(sandboxPort))
+	coordLn, err := transport.ListenTCP(ctx, coordAddr)
+	if err != nil {
+		t.Fatalf("failed to listen on coord port: %v", err)
+	}
+	defer coordLn.Close()
+
+	coordReadyCh := make(chan net.Conn, 1)
+	go func() {
+		raw, aErr := coordLn.Accept()
+		if aErr != nil {
+			return
+		}
+		action, inspected, iErr := transport.InspectTCPTraffic(raw, tunInfo.RelayConfig.Password, false)
+		if iErr == nil && action == transport.ActionReverseCarrier {
+			coordReadyCh <- inspected
+		} else {
+			_ = raw.Close()
+		}
+	}()
+
+	// Exit connects to entry coordinator
+	go func() {
+		rawDial := func() (net.Conn, error) {
+			return transport.DialTCPContext(ctx, coordAddr, 3*time.Second)
+		}
+		conn, dErr := transport.DialTCPCarrier(rawDial, tunInfo.RelayConfig.Password)
+		if dErr != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for {
+			line, rErr := reader.ReadString('\n')
+			if rErr != nil {
+				return
+			}
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "START ") {
+				candIdx, _ := strconv.Atoi(strings.TrimPrefix(line, "START "))
+				activeEngMu.Lock()
+				if exitActiveEng != nil {
+					_ = exitActiveEng.Close()
+					exitActiveEng = nil
+				}
+				for _, cand := range testCandidates {
+					if cand.Index == candIdx {
+						eng := relay.NewEngine(relay.Config{
+							TunnelID:           123000 + cand.Index,
+							Role:               "exit",
+							Transport:          cand.Transport,
+							CarrierPort:        sandboxPort + cand.Index,
+							ListenIP:           "127.0.0.1",
+							EntryServerIP:      "127.0.0.1",
+							TargetIP:           "127.0.0.1",
+							SNI:                cand.SNI,
+							Password:           tunInfo.RelayConfig.Password,
+							UseHalfDuplex:      cand.UseHalfDuplex,
+							UseFisher:          false,
+							MinHeldConnections: 2,
+						})
+						_ = eng.Start()
+						exitActiveEng = eng
+						break
+					}
+				}
+				activeEngMu.Unlock()
+				_, _ = fmt.Fprintf(conn, "READY %d\n", candIdx)
+			}
+		}
+	}()
+
+	var coordConn net.Conn
+	select {
+	case coordConn = <-coordReadyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("exit failed to connect to coordinator")
+	}
+	defer coordConn.Close()
+	coordReader := bufio.NewReader(coordConn)
+
+	requestExitCandidate := func(candIdx int) bool {
+		_ = coordConn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, wErr := fmt.Fprintf(coordConn, "START %d\n", candIdx); wErr != nil {
+			return false
+		}
+		line, rErr := coordReader.ReadString('\n')
+		_ = coordConn.SetDeadline(time.Time{})
+		return rErr == nil && strings.HasPrefix(strings.TrimSpace(line), fmt.Sprintf("READY %d", candIdx))
+	}
+
+	for _, cand := range testCandidates {
+		item := tc.evaluateCandidate(ctx, tunInfo, cand, sandboxPort, tunInfo.RelayConfig.Password, 5*time.Second, requestExitCandidate)
+		if item == nil || item.Status == "blocked" {
+			t.Fatalf("candidate %d (%s) failed: %+v", cand.Index, cand.MethodLabel, item)
+		}
+		t.Logf("✓ Candidate %d (%s) succeeded: Up=%.2f Mbps, Down=%.2f Mbps, RTT=%dms, Loss=%d%%",
+			cand.Index, cand.MethodLabel,
+			float64(item.UploadSpeed)*8/1000000,
+			float64(item.DownloadSpeed)*8/1000000,
+			item.LatencyMs, item.PacketLoss)
+	}
+
+	activeEngMu.Lock()
+	if exitActiveEng != nil {
+		_ = exitActiveEng.Close()
+	}
+	activeEngMu.Unlock()
 }
 
 func TestPingTarget(t *testing.T) {

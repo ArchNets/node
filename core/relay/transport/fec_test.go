@@ -79,6 +79,7 @@ func TestFECPacketConn_LossRecovery(t *testing.T) {
 		localAddr: rawB.localAddr,
 		peer:      rawA,
 		ch:        dropCh,
+		closed:    true, // prevent droppedPipe.Close() from closing dropCh while reading
 	}
 
 	fecA, err := NewFECPacketConn(rawA, 10, 3) // 10 data, 3 parity
@@ -177,6 +178,7 @@ func TestFECPacketConn_EncryptedHeaders(t *testing.T) {
 		localAddr: rawB.localAddr,
 		peer:      rawA,
 		ch:        dropCh,
+		closed:    true, // prevent droppedPipe.Close() from closing dropCh while reading
 	}
 
 	fecA, err := NewFECPacketConnWithSecret(rawA, 8, 4, "secret-tunnel-password")

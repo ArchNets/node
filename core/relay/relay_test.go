@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1584,6 +1585,70 @@ func TestLiveMultiKharejTier2DeepInspectionDemuxing(t *testing.T) {
 	t.Logf("✓ Tier 2 Demux Tunnel 2 Verified: %s", respB)
 }
 
+func TestLiveRealOriginReality(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+
+	entryEngine := NewEngine(Config{
+		TunnelID:           999,
+		Role:               "entry",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "shariati.tums.ac.ir",
+		OriginIP:           "185.143.234.132",
+		Password:           "test-real-shariati-secret",
+		UseHalfDuplex:      true,
+		UseFisher:          true,
+		FisherConnections:  3,
+		MinHeldConnections: 4,
+	})
+	if err := entryEngine.Start(); err != nil {
+		t.Fatalf("failed to start entry engine: %v", err)
+	}
+	defer entryEngine.Close()
+
+	exitEngine := NewEngine(Config{
+		TunnelID:           999,
+		Role:               "exit",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		SNI:                "shariati.tums.ac.ir",
+		Password:           "test-real-shariati-secret",
+		UseHalfDuplex:      true,
+		UseFisher:          true,
+		FisherConnections:  3,
+		MinHeldConnections: 4,
+	})
+	if err := exitEngine.Start(); err != nil {
+		t.Fatalf("failed to start exit engine: %v", err)
+	}
+	defer exitEngine.Close()
+
+	// Wait up to 5s for reverse carrier pool to become active
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entryEngine.Stats.PoolIdleConnections.Load() > 0 {
+			t.Logf("✓ Real Origin Reality succeeded! Warm idle connection established!")
+			// Now test sending and receiving data over the established reverse stream
+			s, err := entryEngine.ClaimReverseStream(3 * time.Second)
+			if err != nil {
+				t.Fatalf("claim reverse stream failed: %v", err)
+			}
+			defer s.Close()
+			_, wErr := s.Write([]byte("PING_FROM_ENTRY"))
+			if wErr != nil {
+				t.Fatalf("write to reverse stream failed: %v", wErr)
+			}
+			t.Logf("✓ Successfully claimed and wrote to reverse stream!")
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for reverse carrier pool: idle=%d", entryEngine.Stats.PoolIdleConnections.Load())
+}
+
 func TestRawCarriersAndL3TransportsEndToEnd(t *testing.T) {
 	transportsToTest := []string{"l3-bip", "l3-ipip", "l3-gre", "xdi", "pck", "spoof"}
 	for _, tr := range transportsToTest {
@@ -1680,8 +1745,11 @@ func TestGamingModeTwinStreamUDPForwardingEndToEnd(t *testing.T) {
 	}
 	defer gameServerConn.Close()
 
-	var serverRecvCount int
-	var lastPeerAddr string
+	var (
+		mu              sync.Mutex
+		serverRecvCount int
+		lastPeerAddr    string
+	)
 	go func() {
 		buf := make([]byte, 2048)
 		for {
@@ -1689,12 +1757,14 @@ func TestGamingModeTwinStreamUDPForwardingEndToEnd(t *testing.T) {
 			if rErr != nil {
 				return
 			}
+			mu.Lock()
 			serverRecvCount++
 			if lastPeerAddr == "" {
 				lastPeerAddr = rAddr.String()
 			} else if lastPeerAddr != rAddr.String() {
 				t.Errorf("expected single consistent UDP source port on Exit, got %s vs %s", rAddr.String(), lastPeerAddr)
 			}
+			mu.Unlock()
 			_, _ = gameServerConn.WriteToUDP([]byte("ACK:"+string(buf[:n])), rAddr)
 		}
 	}()
@@ -1776,8 +1846,12 @@ func TestGamingModeTwinStreamUDPForwardingEndToEnd(t *testing.T) {
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	if serverRecvCount != 5 {
-		t.Fatalf("expected game server to receive exactly 5 deduplicated packets, got %d", serverRecvCount)
+	mu.Lock()
+	count := serverRecvCount
+	peerStr := lastPeerAddr
+	mu.Unlock()
+	if count != 5 {
+		t.Fatalf("expected game server to receive exactly 5 deduplicated packets, got %d", count)
 	}
-	t.Logf("✓ Gaming Mode Twin-Stream UDP verified: 5/5 ticks delivered with 0 duplicates and single Exit source port (%s)", lastPeerAddr)
+	t.Logf("✓ Gaming Mode Twin-Stream UDP verified: 5/5 ticks delivered with 0 duplicates and single Exit source port (%s)", peerStr)
 }

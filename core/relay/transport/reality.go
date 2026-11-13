@@ -98,25 +98,28 @@ func verifyRealityHandoffRecord(body []byte, key [32]byte, expectedMagic string)
 }
 
 func readRealityHandoffRecord(r io.Reader, key [32]byte, expectedMagic string) error {
-	var hdr [5]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return err
+	for i := 0; i < 8; i++ {
+		var hdr [5]byte
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return err
+		}
+		if hdr[0] != 0x17 {
+			return fmt.Errorf("invalid reality handoff record type: 0x%02x", hdr[0])
+		}
+		recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
+		if recLen < 0 || recLen > 16384 {
+			return fmt.Errorf("invalid reality handoff record length: %d", recLen)
+		}
+		body := make([]byte, recLen)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return err
+		}
+		if verifyRealityHandoffRecord(body, key, expectedMagic) {
+			return nil
+		}
+		// Not the handoff ACK (e.g. NewSessionTicket from origin destination) - drain and continue
 	}
-	if hdr[0] != 0x17 {
-		return fmt.Errorf("invalid reality handoff record type: 0x%02x", hdr[0])
-	}
-	recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
-	if recLen < 12+len(expectedMagic)+chacha20poly1305.Overhead || recLen > 4096 {
-		return fmt.Errorf("invalid reality handoff record length: %d", recLen)
-	}
-	body := make([]byte, recLen)
-	if _, err := io.ReadFull(r, body); err != nil {
-		return err
-	}
-	if !verifyRealityHandoffRecord(body, key, expectedMagic) {
-		return fmt.Errorf("reality handoff auth failed")
-	}
-	return nil
+	return fmt.Errorf("reality handoff ACK not received within record limit")
 }
 
 func proxyOriginHandshakeFlight(originConn, clientConn net.Conn) (serverRandom [32]byte, err error) {
@@ -701,14 +704,16 @@ func InspectRealityTraffic(conn net.Conn, sni, password, originIP string, hasUse
 								// 1. Client sends ChangeCipherSpec (0x14)
 								// 2. Client sends Client Finished (0x17, encrypted under TLS handshake secret)
 								// 3. Client sends HANDOFF_REQUEST (0x17, encrypted under RealitySessionKey)
-								for clientRecords := 0; clientRecords < 5; clientRecords++ {
+								sawFinished := false
+								var visitorRecords [][]byte
+								for clientRecords := 0; clientRecords < 4; clientRecords++ {
 									_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 									var nextHdr [5]byte
 									if _, nErr := io.ReadFull(conn, nextHdr[:]); nErr != nil {
 										break
 									}
 									nextLen := int(binary.BigEndian.Uint16(nextHdr[3:5]))
-									if nextLen <= 0 || nextLen > 4096 {
+									if nextLen <= 0 || nextLen > 16384 {
 										break
 									}
 									nextBody := make([]byte, nextLen)
@@ -716,10 +721,12 @@ func InspectRealityTraffic(conn net.Conn, sni, password, originIP string, hasUse
 										break
 									}
 
-									// If client ChangeCipherSpec (0x14), forward to origin
+									rec := append([]byte(nil), nextHdr[:]...)
+									rec = append(rec, nextBody...)
+
+									// If client ChangeCipherSpec (0x14), buffer it
 									if nextHdr[0] == 0x14 {
-										_, _ = originConn.Write(nextHdr[:])
-										_, _ = originConn.Write(nextBody)
+										visitorRecords = append(visitorRecords, rec)
 										continue
 									}
 
@@ -734,13 +741,20 @@ func InspectRealityTraffic(conn net.Conn, sni, password, originIP string, hasUse
 											_ = conn.SetDeadline(time.Time{})
 											return ActionReverseCarrier, NewRealityRecordConn(conn), nil
 										}
-										// Not handoff (e.g. client Finished or visitor HTTP request): forward to origin
-										_, _ = originConn.Write(nextHdr[:])
-										_, _ = originConn.Write(nextBody)
+										visitorRecords = append(visitorRecords, rec)
+										if sawFinished {
+											// Already saw Client Finished, and this 0x17 record is NOT handoff request.
+											// Definite visitor payload (e.g. HTTP GET). Flush to origin immediately.
+											break
+										}
+										sawFinished = true
 									}
 								}
 
-								// Active censor / probe fallback: continue proxying to origin so censors receive genuine HTML
+								// Active censor / probe fallback: flush buffered visitor records to origin so censors receive genuine HTML
+								for _, rec := range visitorRecords {
+									_, _ = originConn.Write(rec)
+								}
 								go SpliceConns(conn, originConn)
 								return ActionDPIProbe, nil, nil
 							}

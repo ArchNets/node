@@ -37,7 +37,7 @@ var (
 		"sbmu.ac.ir":          "185.143.233.122",
 		"miladhospital.com":   "185.116.24.163",
 		"divar.ir":            "185.166.104.7",
-		"cafebazaar.ir":       "94.182.176.33",
+		"cafebazaar.ir":       "185.166.104.93",
 		"snapp.ir":            "185.166.104.93",
 		"telewebion.ir":       "185.165.205.132",
 	}

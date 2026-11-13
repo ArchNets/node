@@ -471,7 +471,7 @@ func (c *TunnelController) statusReport() error {
 		})
 	}
 
-	if len(statuses) > 0 {
+	if len(statuses) > 0 && c.apiClient != nil {
 		err := c.apiClient.ReportTunnelStatus(&panel.TunnelStatusRequest{
 			Tunnels: statuses,
 		})

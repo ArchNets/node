@@ -223,7 +223,12 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 			sni := transport.ExtractSNIFromClientHello(body)
 			if sni != "" {
 				for _, target := range snapshot {
-					if strings.EqualFold(target.SNI, sni) {
+					isTLS := target.Transport == "reverse-reality" ||
+						target.Transport == "tls-reverse" ||
+						target.Transport == "wss-reverse" ||
+						target.Transport == "wssmux" ||
+						target.Transport == ""
+					if isTLS && strings.EqualFold(target.SNI, sni) {
 						_ = conn.SetDeadline(time.Time{})
 						pConn := transport.NewPrefixConn(conn, captured)
 						target.Handler(pConn)
