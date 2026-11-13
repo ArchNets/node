@@ -241,7 +241,7 @@ func TestBenchmarkSequentialCandidates(t *testing.T) {
 							TunnelID:           123000 + cand.Index,
 							Role:               "exit",
 							Transport:          cand.Transport,
-							CarrierPort:        sandboxPort + cand.Index,
+							CarrierPort:        sandboxPort + 1,
 							ListenIP:           "127.0.0.1",
 							EntryServerIP:      "127.0.0.1",
 							TargetIP:           "127.0.0.1",
@@ -281,8 +281,9 @@ func TestBenchmarkSequentialCandidates(t *testing.T) {
 		return rErr == nil && strings.HasPrefix(strings.TrimSpace(line), fmt.Sprintf("READY %d", candIdx))
 	}
 
+	candPort := sandboxPort + 1
 	for _, cand := range testCandidates {
-		item := tc.evaluateCandidate(ctx, tunInfo, cand, sandboxPort, tunInfo.RelayConfig.Password, 5*time.Second, requestExitCandidate)
+		item := tc.evaluateCandidate(ctx, tunInfo, cand, candPort, tunInfo.RelayConfig.Password, 5*time.Second, requestExitCandidate)
 		if item == nil || item.Status == "blocked" {
 			t.Fatalf("candidate %d (%s) failed: %+v", cand.Index, cand.MethodLabel, item)
 		}

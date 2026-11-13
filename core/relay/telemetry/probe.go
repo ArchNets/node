@@ -457,6 +457,12 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 	start := time.Now()
 	deadline := start.Add(duration)
 
+	warmup := 600 * time.Millisecond
+	if duration <= 1000*time.Millisecond {
+		warmup = 0
+	}
+	warmupDeadline := start.Add(warmup)
+
 	for _, stream := range streams {
 		wg.Add(1)
 		go func(s net.Conn) {
@@ -472,7 +478,9 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 			for time.Now().Before(deadline) {
 				n, wErr := s.Write(probeHighEntropyChunk)
 				if n > 0 {
-					sent += int64(n)
+					if time.Now().After(warmupDeadline) {
+						sent += int64(n)
+					}
 				}
 				if wErr != nil {
 					break
@@ -483,7 +491,7 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 			var resp [8]byte
 			if _, err := io.ReadFull(s, resp[:]); err == nil {
 				srvBytes := int64(binary.BigEndian.Uint64(resp[:]))
-				if srvBytes > 0 {
+				if srvBytes > 0 && warmup == 0 {
 					sent = srvBytes
 				}
 			}
@@ -493,9 +501,13 @@ func measureUploadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, err
 	wg.Wait()
 
 	sentBytes := totalBytes.Load()
-	elapsed := time.Since(start).Seconds()
-	if elapsed <= 0 {
-		elapsed = duration.Seconds()
+	measureDur := duration - warmup
+	if measureDur <= 0 {
+		measureDur = duration
+	}
+	elapsed := time.Since(start.Add(warmup)).Seconds()
+	if elapsed <= 0.05 {
+		elapsed = measureDur.Seconds()
 	}
 	if stats != nil {
 		stats.AddUpload(sentBytes)
@@ -517,9 +529,15 @@ func measureDownloadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, e
 	cmdBytes := fmt.Appendf(nil, "DNLOAD:%d\n", durSec)
 
 	var totalBytes atomic.Int64
-	var firstByteOnce sync.Once
-	var measureStart time.Time
 	var wg sync.WaitGroup
+	start := time.Now()
+	streamDeadline := start.Add(duration)
+
+	warmup := 600 * time.Millisecond
+	if duration <= 1000*time.Millisecond {
+		warmup = 0
+	}
+	warmupDeadline := start.Add(warmup)
 
 	for _, stream := range streams {
 		wg.Add(1)
@@ -534,23 +552,12 @@ func measureDownloadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, e
 			}
 
 			buf := make([]byte, ProbeHighThroughputSz)
-			// Read first chunk to exclude command RTT from download throughput window
-			nFirst, rErr := s.Read(buf)
-			if nFirst > 0 {
-				firstByteOnce.Do(func() {
-					measureStart = time.Now()
-				})
-				totalBytes.Add(int64(nFirst))
-			}
-			if rErr != nil {
-				return
-			}
-
-			streamDeadline := time.Now().Add(duration)
 			for time.Now().Before(streamDeadline) {
 				n, err := s.Read(buf)
 				if n > 0 {
-					totalBytes.Add(int64(n))
+					if time.Now().After(warmupDeadline) {
+						totalBytes.Add(int64(n))
+					}
 				}
 				if err != nil {
 					break
@@ -561,13 +568,11 @@ func measureDownloadBurst(claimStreamFn func(timeout time.Duration) (net.Conn, e
 	wg.Wait()
 
 	receivedBytes := totalBytes.Load()
-	var elapsed float64
-	if !measureStart.IsZero() {
-		elapsed = time.Since(measureStart).Seconds()
+	measureDur := duration - warmup
+	if measureDur <= 0 {
+		measureDur = duration
 	}
-	if elapsed <= 0.05 {
-		elapsed = duration.Seconds()
-	}
+	elapsed := measureDur.Seconds()
 	if stats != nil {
 		stats.AddDownload(receivedBytes)
 	}

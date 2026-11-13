@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +25,25 @@ const (
 	SandboxCarrierPort = 58443
 	BenchmarkSlotDur   = 4 * time.Second
 )
+
+func acquireBenchmarkPortGuard(port int) {
+	if os.Geteuid() != 0 || port <= 0 || port > 65535 {
+		return
+	}
+	p := strconv.Itoa(port)
+	// -I INPUT 1 inserts at the top of the INPUT chain, accepting packets before UFW or local drop rules
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+}
+
+func releaseBenchmarkPortGuard(port int) {
+	if os.Geteuid() != 0 || port <= 0 || port > 65535 {
+		return
+	}
+	p := strconv.Itoa(port)
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+}
 
 var (
 	activeScansMu sync.Mutex
@@ -445,9 +466,15 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 	}
 
 	sandboxPort := SandboxCarrierPort
+	candPort := sandboxPort + 1
 	if cmd != nil && cmd.TcpTestPort > 1024 && cmd.TcpTestPort != 49999 {
-		sandboxPort = cmd.TcpTestPort
+		candPort = cmd.TcpTestPort
 	}
+
+	acquireBenchmarkPortGuard(sandboxPort)
+	defer releaseBenchmarkPortGuard(sandboxPort)
+	acquireBenchmarkPortGuard(candPort)
+	defer releaseBenchmarkPortGuard(candPort)
 
 	password := "archnet-default-secret"
 	if t.RelayConfig != nil && t.RelayConfig.Password != "" {
@@ -550,7 +577,7 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			}
 		}
 
-		item := c.evaluateCandidate(ctx, t, cand, sandboxPort, password, waitTimeout, requestExitCandidate)
+		item := c.evaluateCandidate(ctx, t, cand, candPort, password, waitTimeout, requestExitCandidate)
 		if item != nil {
 			exitCheckedIn = true
 			results = append(results, *item)
@@ -597,7 +624,7 @@ func (c *TunnelController) evaluateCandidate(
 	ctx context.Context,
 	t panel.TunnelInfo,
 	cand BenchmarkCandidate,
-	sandboxPort int,
+	candPort int,
 	password string,
 	waitTimeout time.Duration,
 	requestExitCandidate func(candIdx int) bool,
@@ -609,7 +636,7 @@ func (c *TunnelController) evaluateCandidate(
 		"transport": cand.Transport,
 		"direction": cand.Direction,
 		"sni":       cand.SNI,
-		"port":      sandboxPort + cand.Index,
+		"port":      candPort,
 	}).Info("[Benchmark] >>> Starting candidate benchmark")
 
 	spec := transport.GetTransportSpec(cand.Transport)
@@ -631,7 +658,6 @@ func (c *TunnelController) evaluateCandidate(
 		exitIP = t.RelayConfig.ExitOverrideIP
 	}
 
-	candPort := sandboxPort + cand.Index
 	certMode := ""
 	if spec.NeedsTLSServerCfg || spec.IsQuic {
 		certMode = "self"
@@ -856,9 +882,16 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 
 		candidates := BuildBenchmarkCandidates(cmd, t.RelayConfig)
 		sandboxPort := SandboxCarrierPort
+		candPort := sandboxPort + 1
 		if cmd.TcpTestPort > 1024 && cmd.TcpTestPort != 49999 {
-			sandboxPort = cmd.TcpTestPort
+			candPort = cmd.TcpTestPort
 		}
+
+		acquireBenchmarkPortGuard(sandboxPort)
+		defer releaseBenchmarkPortGuard(sandboxPort)
+		acquireBenchmarkPortGuard(candPort)
+		defer releaseBenchmarkPortGuard(candPort)
+
 		password := "archnet-default-secret"
 		direction := "reverse"
 		entryIP := t.RemoteIP
@@ -883,8 +916,6 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 			if candDirection == "" {
 				candDirection = direction
 			}
-			candPort := sandboxPort + cand.Index
-
 			exitCertMode := ""
 			spec := transport.GetTransportSpec(cand.Transport)
 			if spec.NeedsTLSServerCfg || spec.IsQuic {

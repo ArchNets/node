@@ -406,6 +406,14 @@ drained:
 		return true
 	})
 
+	e.idleStreams.Range(func(key, _ any) bool {
+		if c, ok := key.(net.Conn); ok {
+			_ = c.Close()
+		}
+		e.idleStreams.Delete(key)
+		return true
+	})
+
 	// Bounded wait: never block the process shutdown if an OS socket read hangs
 	waitCh := make(chan struct{})
 	go func() {
