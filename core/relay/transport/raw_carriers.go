@@ -146,7 +146,7 @@ type icmpPacketConn struct {
 	seq       atomic.Uint32
 	peerIDSeq atomic.Uint32 // high 16 bits: last peer ident, low 16 bits: last peer seq
 	closeOnce sync.Once
-	echoRule  []string
+	rules     [][]string
 }
 
 func (c *icmpPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
@@ -235,36 +235,56 @@ func (c *icmpPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 func (c *icmpPacketConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		if len(c.echoRule) > 0 {
-			sweepIptablesRule("filter", c.echoRule)
+		for _, r := range c.rules {
+			if len(r) > 0 {
+				sweepIptablesRule("filter", r)
+			}
 		}
 		err = c.PacketConn.Close()
 	})
 	return err
 }
 
-// installXDIEchoGuard installs an iptables rule to drop automatic kernel ICMP echo replies/requests,
-// preventing the host kernel from interfering with userspace ICMP Echo tunnels.
-func installXDIEchoGuard(ident uint16) []string {
+// installXDIEchoGuard installs an iptables rule to drop automatic kernel ICMP echo replies in OUTPUT,
+// preventing the host kernel from echoing back to the client and wasting uplink bandwidth.
+func installXDIEchoGuard(tag [4]byte) []string {
 	if _, err := exec.LookPath("iptables"); err != nil {
 		return nil
 	}
+	word := binary.BigEndian.Uint32(tag[:])
 	u32Rule := []string{
 		"OUTPUT", "-p", "icmp", "--icmp-type", "echo-reply",
-		"-m", "u32", "--u32", fmt.Sprintf("0>>22&0x3C@4>>16=%d", ident),
+		"-m", "u32", "--u32", fmt.Sprintf("0>>22&0x3C@8=0x%08x&&0>>22&0x3C@12>>24=0x%02x", word, xdiDirClientToServer),
+		"-m", "comment", "--comment", fmt.Sprintf("archnet-xdi-echo-%08x", word),
 		"-j", "DROP",
 	}
 	sweepIptablesRule("filter", u32Rule)
 	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, u32Rule...)...).Run() == nil {
 		return u32Rule
 	}
-	// Fallback when xt_u32 match module is unavailable: drop echo-request in INPUT so host kernel never auto-replies
-	inputRule := []string{
-		"INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "DROP",
+	return nil
+}
+
+// installXDIAcceptRule inserts an iptables ACCEPT rule at the top of INPUT so that local firewalls
+// (such as UFW with -P INPUT DROP on Kharej) allow this tunnel's specific ICMP echo packets through.
+func installXDIAcceptRule(tag [4]byte, isServer bool) []string {
+	if _, err := exec.LookPath("iptables"); err != nil {
+		return nil
 	}
-	sweepIptablesRule("filter", inputRule)
-	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, inputRule...)...).Run() == nil {
-		return inputRule
+	word := binary.BigEndian.Uint32(tag[:])
+	typ, dir, side := "echo-reply", xdiDirServerToClient, "client"
+	if isServer {
+		typ, dir, side = "echo-request", xdiDirClientToServer, "server"
+	}
+	rule := []string{
+		"INPUT", "-p", "icmp", "--icmp-type", typ,
+		"-m", "u32", "--u32", fmt.Sprintf("0>>22&0x3C@8=0x%08x&&0>>22&0x3C@12>>24=0x%02x", word, dir),
+		"-m", "comment", "--comment", fmt.Sprintf("archnet-xdi-in-%s-%08x", side, word),
+		"-j", "ACCEPT",
+	}
+	sweepIptablesRule("filter", rule)
+	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I", "1"}, rule[1:]...)...).Run() == nil {
+		return rule
 	}
 	return nil
 }
@@ -433,65 +453,19 @@ var (
 )
 
 func installRawProtoGuard(proto byte) {
-	if proto != 4 && proto != 47 && proto != 58 {
-		return
-	}
-	rawProtoGuardMu.Lock()
-	defer rawProtoGuardMu.Unlock()
-	if rawProtoGuardRefs[proto] > 0 {
-		rawProtoGuardRefs[proto]++
-		return
-	}
-	if _, err := exec.LookPath("iptables"); err != nil {
-		return
-	}
-	pStr := strconv.Itoa(int(proto))
-	rule := []string{"INPUT", "-p", pStr, "-j", "DROP"}
-	sweepIptablesRule("filter", rule)
-	if exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I"}, rule...)...).Run() == nil {
-		rawProtoGuardRefs[proto] = 1
-	}
+	// No-op: raw carriers receive traffic via AF_PACKET/SOCK_RAW without requiring iptables INPUT drops
 }
 
 func removeRawProtoGuard(proto byte) {
-	if proto != 4 && proto != 47 && proto != 58 {
-		return
-	}
-	rawProtoGuardMu.Lock()
-	defer rawProtoGuardMu.Unlock()
-	if rawProtoGuardRefs[proto] <= 0 {
-		return
-	}
-	rawProtoGuardRefs[proto]--
-	if rawProtoGuardRefs[proto] > 0 {
-		return
-	}
-	delete(rawProtoGuardRefs, proto)
-	pStr := strconv.Itoa(int(proto))
-	rule := []string{"INPUT", "-p", pStr, "-j", "DROP"}
-	sweepIptablesRule("filter", rule)
+	// No-op
 }
 
-// AcquireBenchmarkRawGuards pre-installs kernel INPUT drop guards for raw IP protocols (4, 47, 58)
-// at the start of a benchmark sweep so the Entry node's kernel never replies with ICMP Protocol
-// Unreachable while earlier TCP/TLS candidates are being evaluated.
+// AcquireBenchmarkRawGuards is retained for backward compatibility.
 func AcquireBenchmarkRawGuards() {
-	if os.Geteuid() != 0 {
-		return
-	}
-	installRawProtoGuard(4)
-	installRawProtoGuard(47)
-	installRawProtoGuard(58)
 }
 
-// ReleaseBenchmarkRawGuards releases the benchmark-wide raw protocol guards when the sweep finishes.
+// ReleaseBenchmarkRawGuards is retained for backward compatibility.
 func ReleaseBenchmarkRawGuards() {
-	if os.Geteuid() != 0 {
-		return
-	}
-	removeRawProtoGuard(4)
-	removeRawProtoGuard(47)
-	removeRawProtoGuard(58)
 }
 
 func installPCKPortGuard(port uint16) {
@@ -577,7 +551,7 @@ func ListenXDICarrier(addr, password string, port int, settings ...KCPSettings) 
     isServer:   true,
     ident:      ident,
     tag:        tag,
-    echoRule:   installXDIEchoGuard(ident),
+    rules:      [][]string{installXDIEchoGuard(tag), installXDIAcceptRule(tag, true)},
    }
    return newPacketCarrierListenerWithSettings(wrapped, password, s), nil, nil
   }
@@ -607,6 +581,7 @@ func DialXDICarrier(ctx context.Context, addr, password string, port int, settin
     isServer:   false,
     ident:      ident,
     tag:        tag,
+    rules:      [][]string{installXDIAcceptRule(tag, false)},
    }
    targetAddr := &net.UDPAddr{IP: net.ParseIP(host), Port: port}
    return dialPacketCarrierWithSettings(ctx, wrapped, targetAddr, password, s)
@@ -1345,16 +1320,18 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		if err != nil {
 			return nil, err
 		}
-		var echoRule []string
+		var rules [][]string
 		if isServer {
-			echoRule = installXDIEchoGuard(port16)
+			rules = [][]string{installXDIEchoGuard(tag), installXDIAcceptRule(tag, true)}
+		} else {
+			rules = [][]string{installXDIAcceptRule(tag, false)}
 		}
 		return &icmpPacketConn{
 			PacketConn: rawConn,
 			isServer:   isServer,
 			ident:      port16,
 			tag:        tag,
-			echoRule:   echoRule,
+			rules:      rules,
 		}, nil
 
 	case "pck", "l3-pck", "l3-sni":

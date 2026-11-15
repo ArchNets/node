@@ -30,6 +30,7 @@ var (
 	testDebug      bool
 	testProbe      bool
 	testDuration   int
+	testPeer2      string
 )
 
 var testTransportCmd = &cobra.Command{
@@ -62,6 +63,7 @@ func init() {
 	testTransportCmd.Flags().StringVar(&testTransport, "transport", "reverse-reality", "Transport: reverse-reality, stealth, tcp, tcpmux, ws-reverse, wsmux, wss-reverse, wssmux, quic-reverse, kcp, l3-tcp, etc.")
 	testTransportCmd.Flags().IntVar(&testPort, "port", 58444, "Carrier port to test on (default 58444)")
 	testTransportCmd.Flags().StringVar(&testPeer, "peer", "", "Peer IP (required on exit: public IP of Iran entry server)")
+	testTransportCmd.Flags().StringVar(&testPeer2, "peer2", "", "Second Kharej peer IP (for testing multi-Kharej port sharing on Entry)")
 	testTransportCmd.Flags().StringVar(&testPassword, "password", "archnet-standalone-secret", "Shared authentication secret")
 	testTransportCmd.Flags().StringVar(&testSNI, "sni", "", "Camouflage SNI domain (default: cafebazaar.ir for reality)")
 	testTransportCmd.Flags().StringVar(&testOrigin, "origin", "", "Resolved origin IP for reality camouflage")
@@ -118,10 +120,22 @@ func runTestTransport() {
 		p := strconv.Itoa(testPort)
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "58", "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "47", "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "4", "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", "ant+", "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", "ant+", "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", "ant+", "-j", "ACCEPT").Run()
 		log.Infof("[Firewall] Inserted top-level iptables ACCEPT rule for port %d", testPort)
 		defer func() {
 			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
 			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "58", "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "47", "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "4", "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", "ant+", "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-i", "ant+", "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-o", "ant+", "-j", "ACCEPT").Run()
 			log.Infof("[Firewall] Removed temporary iptables ACCEPT rule for port %d", testPort)
 		}()
 	}
@@ -176,6 +190,20 @@ func runTestTransport() {
 	}
 	defer eng.Close()
 
+	var eng2 *relay.Engine
+	if testRole == "entry" && testPeer2 != "" {
+		cfg2 := cfg
+		cfg2.TunnelID = 2
+		cfg2.ExitServerIP = testPeer2
+		cfg2.Logger = log.WithFields(log.Fields{"transport": testTransport, "peer": testPeer2})
+		eng2 = relay.NewEngine(cfg2)
+		if err := eng2.Start(); err != nil {
+			log.Fatalf("Failed to start second engine for peer2: %v", err)
+		}
+		defer eng2.Close()
+		log.Infof("[Multi-Kharej] Successfully registered second tunnel for peer %s on shared port %d", testPeer2, testPort)
+	}
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -204,18 +232,45 @@ func runTestTransport() {
 			downMbps := float64(eng.Stats.CurrentDownloadBps.Load()) * 8.0 / 1_000_000.0
 
 			if testRole == "entry" {
-				log.Infof("[Entry Status] Idle Streams in Pool: %d | Active: %d | Up: %.2f Mbps (%d B) | Down: %.2f Mbps (%d B)",
-					idle, active, upMbps, upBytes, downMbps, downBytes)
+				if eng2 != nil {
+					idle2 := eng2.Stats.PoolIdleConnections.Load()
+					active2 := eng2.Stats.ActiveConnections.Load()
+					upMbps2 := float64(eng2.Stats.CurrentUploadBps.Load()) * 8.0 / 1_000_000.0
+					downMbps2 := float64(eng2.Stats.CurrentDownloadBps.Load()) * 8.0 / 1_000_000.0
 
-				if idle > 0 && testProbe {
-					go func() {
-						rtt, err := telemetry.MeasureLatency(eng.ClaimReverseStream, eng.Stats)
-						if err == nil {
-							log.Infof("   ---> Carrier Latency: %d ms (RTT)", rtt)
-						} else {
-							log.Warnf("   ---> Carrier Ping failed: %v", err)
-						}
-					}()
+					log.Infof("[Multi-Kharej Entry Status] Peer 1 (%s): Pool=%d Active=%d Up=%.2fM Down=%.2fM | Peer 2 (%s): Pool=%d Active=%d Up=%.2fM Down=%.2fM",
+						testPeer, idle, active, upMbps, downMbps, testPeer2, idle2, active2, upMbps2, downMbps2)
+
+					if testProbe {
+						go func() {
+							if idle > 0 {
+								rtt1, err1 := telemetry.MeasureLatency(eng.ClaimReverseStream, eng.Stats)
+								if err1 == nil {
+									log.Infof("   ---> Peer 1 (%s) Latency: %d ms (RTT)", testPeer, rtt1)
+								}
+							}
+							if idle2 > 0 {
+								rtt2, err2 := telemetry.MeasureLatency(eng2.ClaimReverseStream, eng2.Stats)
+								if err2 == nil {
+									log.Infof("   ---> Peer 2 (%s) Latency: %d ms (RTT)", testPeer2, rtt2)
+								}
+							}
+						}()
+					}
+				} else {
+					log.Infof("[Entry Status] Idle Streams in Pool: %d | Active: %d | Up: %.2f Mbps (%d B) | Down: %.2f Mbps (%d B)",
+						idle, active, upMbps, upBytes, downMbps, downBytes)
+
+					if idle > 0 && testProbe {
+						go func() {
+							rtt, err := telemetry.MeasureLatency(eng.ClaimReverseStream, eng.Stats)
+							if err == nil {
+								log.Infof("   ---> Carrier Latency: %d ms (RTT)", rtt)
+							} else {
+								log.Warnf("   ---> Carrier Ping failed: %v", err)
+							}
+						}()
+					}
 				}
 			} else {
 				log.Infof("[Exit Status] Connecting/Holding Streams: Active: %d | Up: %.2f Mbps (%d B) | Down: %.2f Mbps (%d B)",

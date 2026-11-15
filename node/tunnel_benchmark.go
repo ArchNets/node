@@ -41,6 +41,13 @@ func acquireBenchmarkPortGuard(basePort int, customPort int) {
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
 	}
+	// Whitelist raw IP protocols (BIP 58, GRE 47, IPIP 4) and benchmark TUN interfaces (antbs*) so UFW never drops them
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "58", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "47", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "4", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", "ant+", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", "ant+", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", "ant+", "-j", "ACCEPT").Run()
 }
 
 func releaseBenchmarkPortGuard(basePort int, customPort int) {
@@ -57,6 +64,12 @@ func releaseBenchmarkPortGuard(basePort int, customPort int) {
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
 	}
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "58", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "47", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "4", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", "ant+", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-i", "ant+", "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-o", "ant+", "-j", "ACCEPT").Run()
 }
 
 var (

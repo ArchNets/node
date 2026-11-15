@@ -201,6 +201,13 @@ func (d *L3TUNDevice) configureKernelInterface() error {
 	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", d.name), []byte("2\n"), 0644)
 
+	// Ensure local firewalls (e.g. UFW on Kharej with -P INPUT DROP) accept traffic on this TUN interface
+	if os.Geteuid() == 0 {
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", d.name, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", d.name, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", d.name, "-j", "ACCEPT").Run()
+	}
+
 	// Benchmark sandboxes (antbs...) need instant zero-lag setup without hundreds of synchronous iptables calls
 	if strings.HasPrefix(d.name, "antbs") {
 		return nil
@@ -249,6 +256,11 @@ func (d *L3TUNDevice) Close() error {
 	d.closeOnce.Do(func() {
 		d.closed.Store(true)
 		d.removeMSSClamp()
+		if os.Geteuid() == 0 {
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", d.name, "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-i", d.name, "-j", "ACCEPT").Run()
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-o", d.name, "-j", "ACCEPT").Run()
+		}
 		_ = exec.Command("ip", "link", "set", "dev", d.name, "down").Run()
 		if d.file != nil {
 			err = d.file.Close()
