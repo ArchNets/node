@@ -335,7 +335,7 @@ func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP stri
 	addArgs := []string{
 		"link", "add", ifaceName, "type", "gre",
 		"local", localPublicIP, "remote", remotePublicIP,
-		"encap", "fou", "encap-sport", portStr, "encap-dport", portStr,
+		"encap", "fou", "encap-sport", "auto", "encap-dport", portStr,
 		"encap-csum", "ttl", "255",
 	}
 	if out, err := exec.Command("ip", addArgs...).CombinedOutput(); err != nil {
@@ -419,7 +419,7 @@ func OpenKernel6to4Link(tunnelID int, role, localPublicIP, remotePublicIP string
 		portStr := strconv.Itoa(port)
 		_ = exec.Command("ip", "fou", "del", "port", portStr).Run()
 		_ = exec.Command("ip", "fou", "add", "port", portStr, "ipproto", "41").Run()
-		fouArgs = []string{"encap", "fou", "encap-sport", portStr, "encap-dport", portStr, "encap-csum"}
+		fouArgs = []string{"encap", "fou", "encap-sport", "auto", "encap-dport", portStr, "encap-csum"}
 	}
 
 	sitArgs := append([]string{
