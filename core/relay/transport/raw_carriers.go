@@ -521,7 +521,11 @@ func DiscoverLocalIPv4For(dst net.IP) net.IP {
 }
 
 func discoverLocalIPv4For(dst net.IP) net.IP {
-	c, err := net.Dial("udp4", net.JoinHostPort(dst.String(), "80"))
+	dstStr := "8.8.8.8"
+	if dst != nil && !dst.IsUnspecified() {
+		dstStr = dst.String()
+	}
+	c, err := net.Dial("udp4", net.JoinHostPort(dstStr, "80"))
 	if err != nil {
 		return net.IPv4(127, 0, 0, 1)
 	}

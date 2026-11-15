@@ -30,3 +30,8 @@ func OpenL3TUNWithSubnet(tunnelID int, role, password string, mtu int, customIfa
 func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP string, port, mtu int, customIface, customLocalCIDR, customPeerIP string) (*L3TUNDevice, error) {
 	return nil, errL3NotSupported
 }
+
+// OpenKernel6to4Link creates and configures a Linux kernel 6to4/SIT link carrying ipip6 or ip6gre.
+func OpenKernel6to4Link(tunnelID int, role, localPublicIP, remotePublicIP string, port, mtu int, customIface, customLocalCIDR, customPeerIP string, useGRE bool) (*L3TUNDevice, error) {
+	return nil, errL3NotSupported
+}

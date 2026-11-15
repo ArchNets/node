@@ -210,7 +210,7 @@ func (e *Engine) Start() error {
 		}
 		var tunDev *transport.L3TUNDevice
 		var err error
-		if e.cfg.Transport == "l3-fou-gre" {
+		if e.cfg.Transport == "l3-fou-gre" || e.cfg.Transport == "l3-6to4" || e.cfg.Transport == "l3-6to4-gre" {
 			peerIPStr := e.cfg.ExitServerIP
 			if e.cfg.Role == "exit" {
 				peerIPStr = e.cfg.EntryServerIP
@@ -221,7 +221,12 @@ func (e *Engine) Start() error {
 					localIPStr = transport.DiscoverLocalIPv4For(parsedPeer).String()
 				}
 			}
-			tunDev, err = transport.OpenKernelFOUGRELink(e.cfg.TunnelID, e.cfg.Role, localIPStr, peerIPStr, e.cfg.CarrierPort, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP)
+			if e.cfg.Transport == "l3-fou-gre" {
+				tunDev, err = transport.OpenKernelFOUGRELink(e.cfg.TunnelID, e.cfg.Role, localIPStr, peerIPStr, e.cfg.CarrierPort, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP)
+			} else {
+				useGRE := e.cfg.Transport == "l3-6to4-gre"
+				tunDev, err = transport.OpenKernel6to4Link(e.cfg.TunnelID, e.cfg.Role, localIPStr, peerIPStr, e.cfg.CarrierPort, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP, useGRE)
+			}
 		} else {
 			tunDev, err = transport.OpenL3TUNWithSubnet(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP)
 		}
@@ -232,6 +237,10 @@ func (e *Engine) Start() error {
 			label := "Layer-3 TUN interface (GRE + ChaCha20-Poly1305)"
 			if e.cfg.Transport == "l3-fou-gre" {
 				label = fmt.Sprintf("Native Kernel FOU GRE Link (UDP port %d)", e.cfg.CarrierPort)
+			} else if e.cfg.Transport == "l3-6to4" {
+				label = "Native Kernel 6to4 SIT Link (IPIP6 over SIT)"
+			} else if e.cfg.Transport == "l3-6to4-gre" {
+				label = "Native Kernel 6to4-GRE SIT Link (IP6GRE over SIT)"
 			}
 			e.logger.WithFields(log.Fields{
 				"iface":   tunDev.Name(),
@@ -538,7 +547,7 @@ func (e *Engine) kcpSettings() transport.KCPSettings {
 }
 
 func (e *Engine) isL3DirectTUNMode() bool {
-	return e.l3TunDev != nil && ((e.isPacketTransport() && e.l3RawConn != nil) || e.cfg.Transport == "l3-fou-gre")
+	return e.l3TunDev != nil && ((e.isPacketTransport() && e.l3RawConn != nil) || e.cfg.Transport == "l3-fou-gre" || e.cfg.Transport == "l3-6to4" || e.cfg.Transport == "l3-6to4-gre")
 }
 
 func (e *Engine) startL3RawPump() error {

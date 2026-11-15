@@ -48,6 +48,7 @@ type L3TUNDevice struct {
 	txHook      atomic.Pointer[func([]byte) error]
 	isKernelGRE bool
 	fouPort     int
+	sitDev      string
 }
 
 // OpenL3TUN creates and configures a Linux Layer-3 TUN interface (/dev/net/tun).
@@ -261,6 +262,7 @@ func (d *L3TUNDevice) Close() error {
 		if os.Geteuid() == 0 {
 			if d.isKernelGRE && d.fouPort > 0 {
 				portStr := strconv.Itoa(d.fouPort)
+				_ = exec.Command("ip", "fou", "del", "port", portStr).Run()
 				_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", portStr, "-j", "ACCEPT").Run()
 			}
 			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", d.name, "-j", "ACCEPT").Run()
@@ -270,6 +272,18 @@ func (d *L3TUNDevice) Close() error {
 		_ = exec.Command("ip", "link", "set", "dev", d.name, "down").Run()
 		if d.file != nil {
 			err = d.file.Close()
+		}
+		if d.sitDev != "" {
+			if os.Geteuid() == 0 {
+				_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", d.sitDev, "-j", "ACCEPT").Run()
+				_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", d.name, "-j", "ACCEPT").Run()
+				_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-i", d.name, "-j", "ACCEPT").Run()
+				_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-o", d.name, "-j", "ACCEPT").Run()
+				_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", d.sitDev, "-j", "ACCEPT").Run()
+				_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-i", d.sitDev, "-j", "ACCEPT").Run()
+				_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-o", d.sitDev, "-j", "ACCEPT").Run()
+			}
+			_ = exec.Command("ip", "link", "delete", d.sitDev).Run()
 		}
 		// Explicitly delete the interface so its subnet is fully released before
 		// the next sandbox engine tries to assign the same /30 block.
@@ -294,6 +308,7 @@ func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP stri
 	portStr := strconv.Itoa(port)
 
 	// Register FOU receive port in kernel if not already present
+	_ = exec.Command("ip", "fou", "del", "port", portStr).Run()
 	_ = exec.Command("ip", "fou", "add", "port", portStr, "ipproto", "47").Run()
 
 	if mtu <= 0 || mtu > 1450 {
@@ -336,6 +351,9 @@ func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP stri
 		_ = exec.Command("ip", "link", "del", ifaceName).Run()
 		return nil, err
 	}
+	_ = exec.Command("ip", "route", "replace", peerIP, "dev", ifaceName).Run()
+	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
+	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", ifaceName), []byte("2\n"), 0644)
 
 	// Ensure local firewalls allow FOU UDP port and traffic on the interface
 	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", portStr, "-j", "ACCEPT").Run()
@@ -345,6 +363,128 @@ func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP stri
 
 	dev := &L3TUNDevice{
 		name:        ifaceName,
+		localIP:     localCIDR,
+		peerIP:      peerIP,
+		mtu:         mtu,
+		mss:         mss,
+		isKernelGRE: true,
+		fouPort:     port,
+	}
+	dev.applyMSSClamp()
+	return dev, nil
+}
+
+// OpenKernel6to4Link creates and configures a Linux kernel 6to4/SIT link carrying ipip6 or ip6gre.
+// SIT operates over IPv4 Protocol 41 (or UDP FOU port when port > 0) and establishes an IPv6 underlay
+// across which ipip6 or ip6gre passes with kernel zero-copy performance.
+func OpenKernel6to4Link(tunnelID int, role, localPublicIP, remotePublicIP string, port, mtu int, customIface, customLocalCIDR, customPeerIP string, useGRE bool) (*L3TUNDevice, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("l3-6to4: creating SIT link requires root or CAP_NET_ADMIN")
+	}
+	_ = exec.Command("modprobe", "sit").Run()
+	if useGRE {
+		_ = exec.Command("modprobe", "ip6_gre").Run()
+	} else {
+		_ = exec.Command("modprobe", "ip6_tunnel").Run()
+	}
+
+	if mtu <= 0 || mtu > 1440 {
+		mtu = 1400
+	}
+	mss := mtu - 40
+
+	ifaceName, localCIDR, peerIP := DeriveL3Subnet(tunnelID, role)
+	if customIface != "" {
+		ifaceName = customIface
+		if len(ifaceName) >= unix.IFNAMSIZ {
+			ifaceName = ifaceName[:unix.IFNAMSIZ-1]
+		}
+	}
+	if customLocalCIDR != "" && customPeerIP != "" {
+		localCIDR = customLocalCIDR
+		peerIP = customPeerIP
+	}
+
+	sitDev := ifaceName + "-6"
+	if len(sitDev) >= unix.IFNAMSIZ {
+		sitDev = ifaceName[:unix.IFNAMSIZ-3] + "-6"
+	}
+
+	_ = exec.Command("ip", "link", "del", ifaceName).Run()
+	_ = exec.Command("ip", "link", "del", sitDev).Run()
+
+	var fouArgs []string
+	if port > 0 {
+		_ = exec.Command("modprobe", "fou").Run()
+		portStr := strconv.Itoa(port)
+		_ = exec.Command("ip", "fou", "del", "port", portStr).Run()
+		_ = exec.Command("ip", "fou", "add", "port", portStr, "ipproto", "41").Run()
+		fouArgs = []string{"encap", "fou", "encap-sport", portStr, "encap-dport", portStr, "encap-csum"}
+	}
+
+	sitArgs := append([]string{
+		"link", "add", "name", sitDev, "type", "sit",
+		"local", localPublicIP, "remote", remotePublicIP,
+		"ttl", "255",
+	}, fouArgs...)
+	if out, err := exec.Command("ip", sitArgs...).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ip sit: %s (%w)", string(out), err)
+	}
+	_ = exec.Command("ip", "link", "set", sitDev, "mtu", "1480", "up").Run()
+	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1\n"), 0644)
+	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", sitDev), []byte("0\n"), 0644)
+
+	carrierLocal6 := fmt.Sprintf("fd77:%x::1", (tunnelID%250)+1)
+	carrierRemote6 := fmt.Sprintf("fd77:%x::2", (tunnelID%250)+1)
+	if role == "exit" {
+		carrierLocal6, carrierRemote6 = carrierRemote6, carrierLocal6
+	}
+	_ = exec.Command("ip", "-6", "addr", "add", carrierLocal6+"/64", "dev", sitDev).Run()
+	_ = exec.Command("ip", "-6", "route", "replace", carrierRemote6, "dev", sitDev).Run()
+
+	if useGRE {
+		greArgs := []string{"link", "add", "name", ifaceName, "type", "ip6gre", "local", carrierLocal6, "remote", carrierRemote6}
+		if out, err := exec.Command("ip", greArgs...).CombinedOutput(); err != nil {
+			_ = exec.Command("ip", "link", "del", sitDev).Run()
+			return nil, fmt.Errorf("ip ip6gre: %s (%w)", string(out), err)
+		}
+	} else {
+		ipipArgs := []string{"-6", "tunnel", "add", ifaceName, "mode", "ipip6", "local", carrierLocal6, "remote", carrierRemote6, "dev", sitDev, "encaplimit", "none"}
+		if out, err := exec.Command("ip", ipipArgs...).CombinedOutput(); err != nil {
+			_ = exec.Command("ip", "link", "del", sitDev).Run()
+			return nil, fmt.Errorf("ip ipip6: %s (%w)", string(out), err)
+		}
+	}
+
+	_ = exec.Command("ip", "addr", "add", localCIDR, "dev", ifaceName).Run()
+	_ = exec.Command("ip", "link", "set", "dev", ifaceName, "mtu", "1360", "up").Run()
+	_ = exec.Command("ip", "route", "replace", peerIP, "dev", ifaceName).Run()
+	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
+	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", ifaceName), []byte("2\n"), 0644)
+	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", sitDev), []byte("2\n"), 0644)
+
+	if port > 0 {
+		portStr := strconv.Itoa(port)
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", portStr, "-j", "ACCEPT").Run()
+	} else {
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "41", "-j", "ACCEPT").Run()
+	}
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", sitDev, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", sitDev, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", sitDev, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", ifaceName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", ifaceName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", ifaceName, "-j", "ACCEPT").Run()
+	if os.Geteuid() == 0 {
+		_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", sitDev, "-j", "ACCEPT").Run()
+		_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", ifaceName, "-j", "ACCEPT").Run()
+		_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", ifaceName, "-j", "ACCEPT").Run()
+		_ = exec.Command("ip6tables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", ifaceName, "-j", "ACCEPT").Run()
+	}
+
+	dev := &L3TUNDevice{
+		name:        ifaceName,
+		sitDev:      sitDev,
 		localIP:     localCIDR,
 		peerIP:      peerIP,
 		mtu:         mtu,
