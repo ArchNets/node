@@ -265,6 +265,15 @@ func (m *HalfDuplexMatcher) AcceptHalf(conn net.Conn) (*HalfDuplexConn, error) {
 		downloadConn = conn
 	}
 
+	// Send Pair-Matched ACK (0xAC) downstream to Exit over uploadConn
+	_ = uploadConn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	if _, err := uploadConn.Write([]byte{0xAC}); err != nil {
+		_ = uploadConn.Close()
+		_ = downloadConn.Close()
+		return nil, fmt.Errorf("send halfduplex match ack: %w", err)
+	}
+	_ = uploadConn.SetWriteDeadline(time.Time{})
+
 	return NewHalfDuplexConn(downloadConn, uploadConn), nil
 }
 
@@ -298,16 +307,11 @@ func DialHalfDuplexPair(dialFn CarrierDialer) (*HalfDuplexConn, error) {
 			upCh <- dialRes{err: err}
 			return
 		}
-		var framed [5 + HalfDuplexIntroSize]byte
-		framed[0] = 0x17
-		framed[1] = 0x03
-		framed[2] = 0x03
-		framed[3] = 0x00
-		framed[4] = HalfDuplexIntroSize
-		framed[5] = HalfDuplexRoleUpload
-		copy(framed[6:22], pairID[:])
+		var intro [HalfDuplexIntroSize]byte
+		intro[0] = HalfDuplexRoleUpload
+		copy(intro[1:17], pairID[:])
 		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if _, err := c.Write(framed[:]); err != nil {
+		if _, err := c.Write(intro[:]); err != nil {
 			_ = c.Close()
 			upCh <- dialRes{err: err}
 			return
@@ -322,16 +326,11 @@ func DialHalfDuplexPair(dialFn CarrierDialer) (*HalfDuplexConn, error) {
 			downCh <- dialRes{err: err}
 			return
 		}
-		var framed [5 + HalfDuplexIntroSize]byte
-		framed[0] = 0x17
-		framed[1] = 0x03
-		framed[2] = 0x03
-		framed[3] = 0x00
-		framed[4] = HalfDuplexIntroSize
-		framed[5] = HalfDuplexRoleDownload
-		copy(framed[6:22], pairID[:])
+		var intro [HalfDuplexIntroSize]byte
+		intro[0] = HalfDuplexRoleDownload
+		copy(intro[1:17], pairID[:])
 		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if _, err := c.Write(framed[:]); err != nil {
+		if _, err := c.Write(intro[:]); err != nil {
 			_ = c.Close()
 			downCh <- dialRes{err: err}
 			return
@@ -355,6 +354,19 @@ func DialHalfDuplexPair(dialFn CarrierDialer) (*HalfDuplexConn, error) {
 		}
 		return nil, downRes.err
 	}
+
+	// Wait for Pair-Matched ACK (0xAC) from Entry over upRes.conn
+	_ = upRes.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var ack [1]byte
+	if _, err := io.ReadFull(upRes.conn, ack[:]); err != nil || ack[0] != 0xAC {
+		_ = upRes.conn.Close()
+		_ = downRes.conn.Close()
+		if err == nil {
+			err = fmt.Errorf("invalid halfduplex match ack: 0x%02x", ack[0])
+		}
+		return nil, fmt.Errorf("halfduplex pair handshake: %w", err)
+	}
+	_ = upRes.conn.SetReadDeadline(time.Time{})
 
 	return NewHalfDuplexConn(upRes.conn, downRes.conn), nil
 }

@@ -886,21 +886,22 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 	}()
 
 	var writeMu sync.Mutex
+	frameBuf := make([]byte, 65538)
 	tunDev.SetSender(func(wire []byte) error {
 		if len(wire) > 65535 {
 			return errors.New("l3-stream: packet exceeds max frame size")
 		}
-		frame := make([]byte, 2+len(wire))
-		binary.BigEndian.PutUint16(frame[:2], uint16(len(wire)))
-		copy(frame[2:], wire)
-		e.Stats.AddUpload(int64(len(wire)))
 		writeMu.Lock()
-		_, err := conn.Write(frame)
-		writeMu.Unlock()
+		defer writeMu.Unlock()
+		binary.BigEndian.PutUint16(frameBuf[:2], uint16(len(wire)))
+		copy(frameBuf[2:], wire)
+		e.Stats.AddUpload(int64(len(wire)))
+		_, err := conn.Write(frameBuf[:2+len(wire)])
 		return err
 	})
 
 	var lenBuf [2]byte
+	wireBuf := make([]byte, 65536)
 	for {
 		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 			return
@@ -909,12 +910,11 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 		if pktLen <= 0 || pktLen > 65535 {
 			return
 		}
-		wire := make([]byte, pktLen)
-		if _, err := io.ReadFull(conn, wire); err != nil {
+		if _, err := io.ReadFull(conn, wireBuf[:pktLen]); err != nil {
 			return
 		}
 		e.Stats.AddDownload(int64(pktLen))
-		_ = tunDev.InjectWirePacket(wire)
+		_ = tunDev.InjectWirePacket(wireBuf[:pktLen])
 	}
 }
 

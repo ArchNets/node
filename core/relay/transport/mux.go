@@ -106,8 +106,8 @@ type MuxSession struct {
 func DefaultSmuxConfig() *smux.Config {
 	cfg := smux.DefaultConfig()
 	cfg.Version = 2 // Sliding window per-stream flow control
-	cfg.KeepAliveInterval = 10 * time.Second
-	cfg.KeepAliveTimeout = 30 * time.Second
+	cfg.KeepAliveInterval = 5 * time.Second
+	cfg.KeepAliveTimeout = 12 * time.Second
 	cfg.MaxFrameSize = 32768
 	cfg.MaxReceiveBuffer = 4 * 1024 * 1024
 	cfg.MaxStreamBuffer = 2 * 1024 * 1024
@@ -189,6 +189,9 @@ func (m *MuxStreamConn) IsAlive() bool {
 		return false
 	}
 	if m.sess != nil && m.sess.IsClosed() {
+		return false
+	}
+	if m.raw != nil && !IsStreamAlive(m.raw) {
 		return false
 	}
 	select {

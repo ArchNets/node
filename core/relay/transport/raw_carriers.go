@@ -189,8 +189,17 @@ func (c *icmpPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
+var rawPacketBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 65535)
+		return &b
+	},
+}
+
 func (c *icmpPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, 65535)
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
 	expectedType := icmpEchoReply
 	expectedDir := xdiDirServerToClient
 	if c.isServer {
@@ -353,7 +362,9 @@ func (c *pckPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 func (c *pckPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, 65535)
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
 	expectedDir := byte(0x02)
 	if c.isServer {
 		expectedDir = byte(0x01)
@@ -717,7 +728,9 @@ func (c *rawProtoPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 func (c *rawProtoPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, 65535)
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
 	expectedDir := byte(0x02)
 	if c.isServer {
 		expectedDir = byte(0x01)
@@ -907,7 +920,9 @@ func (c *greProtoPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 func (c *greProtoPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, 65535)
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
 	expectedDir := byte(0x02)
 	if c.isServer {
 		expectedDir = byte(0x01)
@@ -1073,7 +1088,9 @@ func (c *spoofPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 func (c *spoofPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, 65535)
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
 	expectedDir := byte(0x02)
 	if c.isServer {
 		expectedDir = byte(0x01)
@@ -1255,7 +1272,9 @@ func (c *rawUDPPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 func (c *rawUDPPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, 65535)
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
 	expectedDir := byte(0x02)
 	if c.isServer {
 		expectedDir = byte(0x01)

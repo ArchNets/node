@@ -87,6 +87,9 @@ func ResolveOriginIP(sni, configuredOriginIP string) (string, error) {
 	dynamicOriginsMu.RLock()
 	if ip, ok := dynamicOrigins[cleanSNI]; ok && ip != "" {
 		dynamicOriginsMu.RUnlock()
+		if cleanSNI == "cafebazaar.ir" && ip == "94.182.176.33" {
+			return StaticHospitalAndNationalOrigins["cafebazaar.ir"], nil
+		}
 		return ip, nil
 	}
 	dynamicOriginsMu.RUnlock()

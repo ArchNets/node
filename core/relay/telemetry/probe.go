@@ -113,19 +113,34 @@ func HandleExitProbeStream(stream net.Conn, stats *Stats) {
 		if durSec > 15 {
 			durSec = 15
 		}
-		_ = stream.SetReadDeadline(time.Now().Add(time.Duration(durSec+4) * time.Second))
+		uploadDeadline := time.Now().Add(time.Duration(durSec)*time.Second + 500*time.Millisecond)
+		_ = stream.SetReadDeadline(time.Now().Add(time.Duration(durSec+3) * time.Second))
 		buf := make([]byte, ProbeHighThroughputSz)
 		var totalReceived uint64
+		var tail [32]byte
+		var tailLen int
 		for {
 			n, err := stream.Read(buf)
 			if n > 0 {
-				if idx := indexUploadDone(buf[:n]); idx >= 0 {
-					totalReceived += uint64(idx)
+				totalReceived += uint64(n)
+				// Check for done marker across TCP read chunk boundary: tail + buf[:n]
+				combined := make([]byte, tailLen+n)
+				copy(combined, tail[:tailLen])
+				copy(combined[tailLen:], buf[:n])
+				if idx := indexUploadDone(combined); idx >= 0 {
+					totalReceived -= uint64(len(combined) - idx)
 					break
 				}
-				totalReceived += uint64(n)
+				// Keep at most last 32 bytes in tail for next boundary check
+				if len(combined) >= 32 {
+					copy(tail[:], combined[len(combined)-32:])
+					tailLen = 32
+				} else {
+					copy(tail[:], combined)
+					tailLen = len(combined)
+				}
 			}
-			if err != nil {
+			if err != nil || time.Now().After(uploadDeadline) {
 				break
 			}
 		}
@@ -286,89 +301,39 @@ func RunBandwidthProbe(claimStreamFn func(timeout time.Duration) (net.Conn, erro
 }
 
 // DiscoverOptimalPathMTU finds the highest unfragmented Path MTU (with IP_PMTUDISC_DO DF=1)
-// between the Entry and Exit servers using kernel TCP_INFO inspection and binary search over stream 0xFF.
+// between the Entry and Exit servers using kernel TCP_INFO inspection in 0ms, falling back to 1400.
 func DiscoverOptimalPathMTU(claimStreamFn func(timeout time.Duration) (net.Conn, error)) int {
-	ceiling := 1500
-	floor := 1280
+	stream, err := claimStreamFn(2 * time.Second)
+	if err != nil {
+		return 1400
+	}
+	defer stream.Close()
 
-	probeSize := func(testMTU int) (bool, int) {
-		stream, err := claimStreamFn(2 * time.Second)
-		if err != nil {
-			return false, 0
-		}
-		defer stream.Close()
-
-		kernelPMTU, _ := transport.InspectKernelPMTU(stream)
-		transport.ConfigureDontFragmentProbe(stream, testMTU)
-
-		_ = stream.SetDeadline(time.Now().Add(1800 * time.Millisecond))
-		if err := protocol.WriteRoutingHeader(stream, protocol.RouteProtoProbe, 0); err != nil {
-			return false, kernelPMTU
-		}
-		cmd := fmt.Appendf(nil, "MTUPRB:%d\n", testMTU)
-		if _, err := stream.Write(cmd); err != nil {
-			return false, kernelPMTU
-		}
-		payloadLen := testMTU - 40
-		if _, err := stream.Write(probeHighEntropyChunk[:payloadLen]); err != nil {
-			return false, kernelPMTU
-		}
-		reply := make([]byte, payloadLen+8)
-		if _, err := io.ReadFull(stream, reply); err != nil {
-			return false, kernelPMTU
-		}
-		if string(reply[payloadLen:]) != "MTUOK000" {
-			return false, kernelPMTU
-		}
-		postPMTU, _ := transport.InspectKernelPMTU(stream)
-		if postPMTU >= 576 && postPMTU < testMTU {
-			return false, postPMTU
-		}
-		return true, postPMTU
+	// 1. Zero-cost Linux kernel TCP_INFO / IP_MTU socket inspection (0ms)
+	kernelPMTU, _ := transport.InspectKernelPMTU(stream)
+	if kernelPMTU >= 576 && kernelPMTU <= 1500 {
+		return kernelPMTU
 	}
 
-	// 1. Try ceiling (1500) first — on a clean path this succeeds in 1 round-trip
-	ok, kPMTU := probeSize(ceiling)
-	if kPMTU >= 576 && kPMTU < ceiling {
-		ceiling = kPMTU
+	// 2. Fast single-step check for 1500 ceiling
+	transport.ConfigureDontFragmentProbe(stream, 1500)
+	_ = stream.SetDeadline(time.Now().Add(600 * time.Millisecond))
+	if err := protocol.WriteRoutingHeader(stream, protocol.RouteProtoProbe, 0); err != nil {
+		return 1400
 	}
-	if ok && ceiling == 1500 {
+	if _, err := stream.Write([]byte("MTUPRB:1500\n")); err != nil {
+		return 1400
+	}
+	payloadLen := 1500 - 40
+	if _, err := stream.Write(probeHighEntropyChunk[:payloadLen]); err != nil {
+		return 1400
+	}
+	reply := make([]byte, payloadLen+8)
+	if _, err := io.ReadFull(stream, reply); err == nil && string(reply[payloadLen:]) == "MTUOK000" {
 		return 1500
 	}
 
-	// 2. If kernel PMTU already narrowed the ceiling, verify that exact size
-	if ceiling < 1500 && ceiling >= floor {
-		if okK, _ := probeSize(ceiling); okK {
-			return ceiling
-		}
-	}
-
-	// 3. Binary search between floor (1280) and ceiling-8 in 8-byte steps
-	best := 1400
-	if okFloor, _ := probeSize(floor); okFloor {
-		best = floor
-	} else {
-		return 1400
-	}
-
-	lo, hi := floor+8, ceiling-8
-	for lo <= hi {
-		mid := ((lo + hi) / 2) &^ 7 // align to 8-byte boundary
-		if mid < lo {
-			mid = lo
-		}
-		okMid, discovered := probeSize(mid)
-		if discovered >= 576 && discovered < hi {
-			hi = discovered
-		}
-		if okMid {
-			best = mid
-			lo = mid + 8
-		} else {
-			hi = mid - 8
-		}
-	}
-	return best
+	return 1400
 }
 
 func measurePingSeries(claimStreamFn func(timeout time.Duration) (net.Conn, error), count int) (avgRttMs, jitterMs, lossPct int) {

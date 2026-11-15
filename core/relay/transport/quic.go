@@ -77,6 +77,9 @@ func DefaultQuicConfig() *quic.Config {
 
 // ListenQuicCarrier starts a QUIC listener on the given UDP address using TLS 1.3 (ALPN "h3").
 func ListenQuicCarrier(addr, sni, certMode, certFile, keyFile string) (*quic.Listener, *net.UDPConn, error) {
+	if sni == "" || sni == "localhost" {
+		sni = "shariati.tums.ac.ir"
+	}
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, nil, err
@@ -105,8 +108,8 @@ func ListenQuicCarrier(addr, sni, certMode, certFile, keyFile string) (*quic.Lis
 
 // buildSelfSignedQuicClientTLSConfig builds client TLS config allowing self-signed reverse carrier certs.
 func buildSelfSignedQuicClientTLSConfig(sni string) *tls.Config {
-	if sni == "" {
-		sni = "localhost"
+	if sni == "" || sni == "localhost" {
+		sni = "shariati.tums.ac.ir"
 	}
 	trustSelfSignedCert := true
 	return &tls.Config{

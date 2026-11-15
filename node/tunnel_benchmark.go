@@ -26,23 +26,37 @@ const (
 	BenchmarkSlotDur   = 4 * time.Second
 )
 
-func acquireBenchmarkPortGuard(port int) {
-	if os.Geteuid() != 0 || port <= 0 || port > 65535 {
+func acquireBenchmarkPortGuard(basePort int, customPort int) {
+	if os.Geteuid() != 0 {
 		return
 	}
-	p := strconv.Itoa(port)
-	// -I INPUT 1 inserts at the top of the INPUT chain, accepting packets before UFW or local drop rules
-	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
-	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+	// Whitelist the benchmark coordinator (basePort) and all candidate sandbox ports (basePort..basePort+35)
+	if basePort > 0 && basePort <= 65500 {
+		pRange := fmt.Sprintf("%d:%d", basePort, basePort+35)
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", pRange, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", pRange, "-j", "ACCEPT").Run()
+	}
+	if customPort > 0 && customPort <= 65535 && (customPort < basePort || customPort > basePort+35) {
+		p := strconv.Itoa(customPort)
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+	}
 }
 
-func releaseBenchmarkPortGuard(port int) {
-	if os.Geteuid() != 0 || port <= 0 || port > 65535 {
+func releaseBenchmarkPortGuard(basePort int, customPort int) {
+	if os.Geteuid() != 0 {
 		return
 	}
-	p := strconv.Itoa(port)
-	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
-	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+	if basePort > 0 && basePort <= 65500 {
+		pRange := fmt.Sprintf("%d:%d", basePort, basePort+35)
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", pRange, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", pRange, "-j", "ACCEPT").Run()
+	}
+	if customPort > 0 && customPort <= 65535 && (customPort < basePort || customPort > basePort+35) {
+		p := strconv.Itoa(customPort)
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
+		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
+	}
 }
 
 var (
@@ -466,15 +480,13 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 	}
 
 	sandboxPort := SandboxCarrierPort
-	candPort := sandboxPort + 1
+	customTestPort := 0
 	if cmd != nil && cmd.TcpTestPort > 1024 && cmd.TcpTestPort != 49999 {
-		candPort = cmd.TcpTestPort
+		customTestPort = cmd.TcpTestPort
 	}
 
-	acquireBenchmarkPortGuard(sandboxPort)
-	defer releaseBenchmarkPortGuard(sandboxPort)
-	acquireBenchmarkPortGuard(candPort)
-	defer releaseBenchmarkPortGuard(candPort)
+	acquireBenchmarkPortGuard(sandboxPort, customTestPort)
+	defer releaseBenchmarkPortGuard(sandboxPort, customTestPort)
 
 	password := "archnet-default-secret"
 	if t.RelayConfig != nil && t.RelayConfig.Password != "" {
@@ -577,6 +589,10 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			}
 		}
 
+		candPort := sandboxPort + cand.Index
+		if customTestPort > 0 {
+			candPort = customTestPort
+		}
 		item := c.evaluateCandidate(ctx, t, cand, candPort, password, waitTimeout, requestExitCandidate)
 		if item != nil {
 			exitCheckedIn = true
@@ -882,15 +898,13 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 
 		candidates := BuildBenchmarkCandidates(cmd, t.RelayConfig)
 		sandboxPort := SandboxCarrierPort
-		candPort := sandboxPort + 1
+		customTestPort := 0
 		if cmd.TcpTestPort > 1024 && cmd.TcpTestPort != 49999 {
-			candPort = cmd.TcpTestPort
+			customTestPort = cmd.TcpTestPort
 		}
 
-		acquireBenchmarkPortGuard(sandboxPort)
-		defer releaseBenchmarkPortGuard(sandboxPort)
-		acquireBenchmarkPortGuard(candPort)
-		defer releaseBenchmarkPortGuard(candPort)
+		acquireBenchmarkPortGuard(sandboxPort, customTestPort)
+		defer releaseBenchmarkPortGuard(sandboxPort, customTestPort)
 
 		password := "archnet-default-secret"
 		direction := "reverse"
@@ -936,6 +950,11 @@ func (c *TunnelController) handleExitScanCommand(t panel.TunnelInfo) {
 					spoofSrcIP = "82.115.26.174"
 					spoofPeerSrcIP = "185.143.234.201"
 				}
+			}
+
+			candPort := sandboxPort + cand.Index
+			if customTestPort > 0 {
+				candPort = customTestPort
 			}
 
 			eng := relay.NewEngine(relay.Config{

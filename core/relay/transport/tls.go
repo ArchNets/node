@@ -90,8 +90,8 @@ func BuildRelayTLSConfig(sni, certMode, certFile, keyFile string) (*tls.Config, 
 
 // GenerateSelfSignedTLSConfig generates an in-memory ECDSA P-256 TLS certificate for the given SNI.
 func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
-	if sni == "" {
-		sni = "archnet.local"
+	if sni == "" || sni == "localhost" || sni == "archnet.local" {
+		sni = "shariati.tums.ac.ir"
 	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -146,6 +146,9 @@ func buildSelfSignedReverseClientTLSConfig(sni string) *tls.Config {
 
 // DialTLSReverseCarrier connects to EntryServerIP:CarrierPort over TLS 1.3 and authenticates with Password.
 func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, error) {
+	if sni == "" || sni == "localhost" || sni == "archnet.local" {
+		sni = "shariati.tums.ac.ir"
+	}
 	key, err := DeriveRealityKey(password, "archnet-tls-auth")
 	if err != nil {
 		return nil, err

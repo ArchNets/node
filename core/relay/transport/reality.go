@@ -193,7 +193,12 @@ func proxyOriginHandshakeFlight(originConn, clientConn net.Conn) (serverRandom [
 		if foundRandom && hdr[0] == 0x17 {
 			sawEncrypted = true
 			// Check if more encrypted records are queued in the server flight
-			_ = originConn.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
+			_ = originConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		}
+		// TLS 1.2: ServerHelloDone (0x16 Handshake, type 0x0e)
+		if foundRandom && hdr[0] == 0x16 && len(body) >= 4 && body[0] == 0x0e {
+			sawEncrypted = true
+			_ = originConn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 		}
 	}
 
@@ -746,6 +751,19 @@ func InspectRealityTraffic(conn net.Conn, sni, password, originIP string, hasUse
 		}
 
 		originConn, dErr := net.DialTimeout("tcp", targetAddr, 3*time.Second)
+		if dErr != nil && clientSNI != "" {
+			// Fallback 1: try resolving by standard DNS if initial targetAddr failed
+			if addrs, lErr := net.LookupHost(clientSNI); lErr == nil && len(addrs) > 0 {
+				fallbackAddr := net.JoinHostPort(addrs[0], "443")
+				if fallbackAddr != targetAddr {
+					originConn, dErr = net.DialTimeout("tcp", fallbackAddr, 3*time.Second)
+				}
+			}
+		}
+		if dErr != nil {
+			// Fallback 2: guaranteed live Iranian hospital origin (Shariati Hospital)
+			originConn, dErr = net.DialTimeout("tcp", "185.143.234.132:443", 3*time.Second)
+		}
 		if dErr == nil {
 			TuneTCPConn(originConn)
 			_ = originConn.SetDeadline(time.Now().Add(6 * time.Second))
