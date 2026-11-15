@@ -29,6 +29,7 @@ var (
 	testDirection  string
 	testDebug      bool
 	testProbe      bool
+	testDuration   int
 )
 
 var testTransportCmd = &cobra.Command{
@@ -69,6 +70,7 @@ func init() {
 	testTransportCmd.Flags().StringVar(&testDirection, "direction", "reverse", "Direction: reverse (exit dials entry) or direct (entry dials exit)")
 	testTransportCmd.Flags().BoolVar(&testDebug, "debug", true, "Enable verbose debug logs")
 	testTransportCmd.Flags().BoolVar(&testProbe, "probe", true, "Run continuous speed probes once connected (entry role)")
+	testTransportCmd.Flags().IntVar(&testDuration, "duration", 0, "Automatically stop and exit after N seconds (0 = run until Ctrl+C)")
 
 	command.AddCommand(testTransportCmd)
 }
@@ -136,7 +138,7 @@ func runTestTransport() {
 	}
 
 	cfg := relay.Config{
-		TunnelID:           88888,
+		TunnelID:           1, // Use 1 so logDialFailure prints all dial errors
 		Role:               testRole,
 		Direction:          testDirection,
 		Transport:          testTransport,
@@ -177,6 +179,11 @@ func runTestTransport() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	var timeoutChan <-chan time.Time
+	if testDuration > 0 {
+		timeoutChan = time.After(time.Duration(testDuration) * time.Second)
+	}
+
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
@@ -184,6 +191,9 @@ func runTestTransport() {
 		select {
 		case sig := <-sigChan:
 			log.Infof("Received signal %v, terminating test cleanly...", sig)
+			return
+		case <-timeoutChan:
+			log.Infof("Test duration of %ds reached, terminating test cleanly...", testDuration)
 			return
 		case <-ticker.C:
 			idle := eng.Stats.PoolIdleConnections.Load()

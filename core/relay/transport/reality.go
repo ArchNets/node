@@ -26,7 +26,7 @@ const (
 	realityAckMagic        = RealityAckMagic
 	realityHandoffReqMagic = "REALITY_HANDOFF_REQ_V2"
 	realityHandoffAckMagic = "REALITY_HANDOFF_ACK_V2"
-	realityClockSkew       = 10 * time.Minute
+	realityClockSkew       = 24 * time.Hour
 	maxTLS13RecordPayload  = 16384
 )
 
