@@ -430,7 +430,12 @@ func OpenKernel6to4Link(tunnelID int, role, localPublicIP, remotePublicIP string
 	if out, err := exec.Command("ip", sitArgs...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("ip sit: %s (%w)", string(out), err)
 	}
-	_ = exec.Command("ip", "link", "set", sitDev, "mtu", "1480", "up").Run()
+	sitMTU := mtu + 44
+	if sitMTU > 1472 {
+		sitMTU = 1472
+	}
+	_ = exec.Command("ip", "link", "set", sitDev, "mtu", strconv.Itoa(sitMTU), "up").Run()
+	_ = exec.Command("tc", "qdisc", "replace", "dev", sitDev, "root", "fq_codel", "limit", "1024", "noecn").Run()
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1\n"), 0644)
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", sitDev), []byte("0\n"), 0644)
 
@@ -457,7 +462,8 @@ func OpenKernel6to4Link(tunnelID int, role, localPublicIP, remotePublicIP string
 	}
 
 	_ = exec.Command("ip", "addr", "add", localCIDR, "dev", ifaceName).Run()
-	_ = exec.Command("ip", "link", "set", "dev", ifaceName, "mtu", "1360", "up").Run()
+	_ = exec.Command("ip", "link", "set", "dev", ifaceName, "mtu", strconv.Itoa(mtu), "up").Run()
+	_ = exec.Command("tc", "qdisc", "replace", "dev", ifaceName, "root", "fq_codel", "limit", "1024", "noecn").Run()
 	_ = exec.Command("ip", "route", "replace", peerIP, "dev", ifaceName).Run()
 	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", ifaceName), []byte("2\n"), 0644)
