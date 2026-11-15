@@ -45,6 +45,11 @@ var transportCatalog = []TransportSpec{
 	{ID: "l3-dtls", Label: "L3 TUN • DTLS 1.3 Camouflage", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-quic-v1", Label: "L3 TUN • QUIC v1 Short Header", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-rudp-fec", Label: "L3 TUN • RUDP 2+1 XOR FEC", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-dnscrypt", Label: "L3 TUN • DNSCrypt Response", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-wg-stealth", Label: "L3 TUN • WG Stealth Header", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-ntp", Label: "L3 TUN • NTPv4 Server Lookalike", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-openvpn-dco", Label: "L3 TUN • OpenVPN DCO Lookalike", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-srtp", Label: "L3 TUN • SRTP Media Stream", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-tcp", Label: "L3 TUN • Reliable TCP Stream", IsL3: true, DefaultHalfDuplex: true},
 	{ID: "spoof", Label: "IP Spoofing Carrier", IsPacket: true, IsMux: true, IsL3: true},
 }

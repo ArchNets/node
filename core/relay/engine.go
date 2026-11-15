@@ -756,6 +756,8 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 			uLn, uConn, err = transport.ListenQUICv1Carrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "l3-rudp-fec":
 			uLn, uConn, err = transport.ListenRUDPFECCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
+		case "l3-dnscrypt", "l3-wg-stealth", "l3-ntp", "l3-openvpn-dco", "l3-srtp":
+			uLn, uConn, err = transport.ListenUDPCarrierWithSettings(carrierAddr, e.cfg.Password, kcpCfg)
 		case "spoof":
 			spoofOpts := transport.SpoofOptions{
 				SrcIP:       e.cfg.SpoofSrcIP,
@@ -1610,6 +1612,8 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 			return transport.DialQUICv1Carrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "l3-rudp-fec":
 			return transport.DialRUDPFECCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
+		case "l3-dnscrypt", "l3-wg-stealth", "l3-ntp", "l3-openvpn-dco", "l3-srtp":
+			return transport.DialUDPCarrierWithSettings(e.ctx, addr, e.cfg.Password, kcpCfg)
 		case "spoof":
 			spoofOpts := transport.SpoofOptions{
 				SrcIP:       e.cfg.SpoofSrcIP,

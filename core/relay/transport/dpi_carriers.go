@@ -362,3 +362,311 @@ func recoverXOR(availableData []byte, isData0 bool, parity []byte) ([]byte, erro
 	}
 	return recovered, nil
 }
+
+// SRTP Direct (RFC 3550 / 3711 Video Media Stream Lookalike)
+// [1B V=2,PT=96][1B 0x60][2B seq][4B timestamp][4B SSRC] = 12 bytes
+const srtpHeaderLen = 12
+
+type srtpPacketConn struct {
+	net.PacketConn
+	ssrc     uint32
+	isServer bool
+	seq      atomic.Uint32
+	ts       atomic.Uint32
+}
+
+func NewSRTPPacketConn(pc net.PacketConn, password string, isServer bool) net.PacketConn {
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("archnet-srtp-ssrc"))
+	sum := mac.Sum(nil)
+	ssrc := binary.BigEndian.Uint32(sum[:4])
+
+	c := &srtpPacketConn{
+		PacketConn: pc,
+		ssrc:       ssrc,
+		isServer:   isServer,
+	}
+	c.ts.Store(binary.BigEndian.Uint32(sum[4:8]))
+	return c
+}
+
+func (c *srtpPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	s := c.seq.Add(1)
+	frame := make([]byte, srtpHeaderLen+len(p))
+	frame[0], frame[1] = 0x80, 0x60 // V=2, PayloadType=96 (dynamic video)
+	binary.BigEndian.PutUint16(frame[2:4], uint16(s))
+	binary.BigEndian.PutUint32(frame[4:8], c.ts.Add(3000))
+	binary.BigEndian.PutUint32(frame[8:12], c.ssrc)
+	copy(frame[srtpHeaderLen:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, addr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *srtpPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
+
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < srtpHeaderLen {
+			continue
+		}
+		if (buf[0]&0xc0) != 0x80 || binary.BigEndian.Uint32(buf[8:12]) != c.ssrc {
+			continue
+		}
+		copied := copy(p, buf[srtpHeaderLen:n])
+		return copied, addr, nil
+	}
+}
+
+// WireGuard Stealth Obfuscated Header
+// [4B Obfuscated Magic ^ Mask][4B Sequence Number] = 8 bytes
+const wgStealthHeaderLen = 8
+
+type wgStealthPacketConn struct {
+	net.PacketConn
+	magic    [4]byte
+	isServer bool
+	seq      atomic.Uint32
+}
+
+func NewWGStealthPacketConn(pc net.PacketConn, password string, isServer bool) net.PacketConn {
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("archnet-wg-stealth-magic"))
+	sum := mac.Sum(nil)
+	var magic [4]byte
+	copy(magic[:], sum[:4])
+
+	return &wgStealthPacketConn{
+		PacketConn: pc,
+		magic:      magic,
+		isServer:   isServer,
+	}
+}
+
+func (c *wgStealthPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	s := c.seq.Add(1)
+	frame := make([]byte, wgStealthHeaderLen+len(p))
+	mask := byte(s)
+	frame[0] = c.magic[0] ^ mask
+	frame[1] = c.magic[1] ^ mask
+	frame[2] = c.magic[2] ^ mask
+	frame[3] = c.magic[3]
+	binary.BigEndian.PutUint32(frame[4:8], s)
+	copy(frame[wgStealthHeaderLen:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, addr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *wgStealthPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
+
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < wgStealthHeaderLen {
+			continue
+		}
+		mask := buf[7]
+		if buf[0] != (c.magic[0]^mask) || buf[1] != (c.magic[1]^mask) || buf[2] != (c.magic[2]^mask) || buf[3] != c.magic[3] {
+			continue
+		}
+		copied := copy(p, buf[wgStealthHeaderLen:n])
+		return copied, addr, nil
+	}
+}
+
+// DNSCrypt UDP Response Lookalike
+// [2B TransactionID][2B 0x8180 (Response+RecursionAvailable)][2B Questions=1][2B Answers=1][4B Magic] = 12 bytes
+const dnsCryptHeaderLen = 12
+
+type dnsCryptPacketConn struct {
+	net.PacketConn
+	magic    [4]byte
+	isServer bool
+	seq      atomic.Uint32
+}
+
+func NewDNSCryptPacketConn(pc net.PacketConn, password string, isServer bool) net.PacketConn {
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("archnet-dnscrypt-magic"))
+	sum := mac.Sum(nil)
+	var magic [4]byte
+	copy(magic[:], sum[:4])
+
+	return &dnsCryptPacketConn{
+		PacketConn: pc,
+		magic:      magic,
+		isServer:   isServer,
+	}
+}
+
+func (c *dnsCryptPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	s := c.seq.Add(1)
+	frame := make([]byte, dnsCryptHeaderLen+len(p))
+	binary.BigEndian.PutUint16(frame[0:2], uint16(s))
+	binary.BigEndian.PutUint16(frame[2:4], 0x8180) // Standard query response, No error
+	binary.BigEndian.PutUint16(frame[4:6], 1)      // Questions
+	binary.BigEndian.PutUint16(frame[6:8], 1)      // Answer RRs
+	copy(frame[8:12], c.magic[:])
+	copy(frame[dnsCryptHeaderLen:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, addr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *dnsCryptPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
+
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < dnsCryptHeaderLen {
+			continue
+		}
+		if binary.BigEndian.Uint16(buf[2:4]) != 0x8180 || !hmac.Equal(buf[8:12], c.magic[:]) {
+			continue
+		}
+		copied := copy(p, buf[dnsCryptHeaderLen:n])
+		return copied, addr, nil
+	}
+}
+
+// NTPv4 Direct Server Packet Lookalike (RFC 5905)
+// [1B LI/VN/Mode 0x24][1B Stratum 0x02][1B Poll 0x06][1B Precision 0xec][4B Magic] = 8 bytes
+const ntpHeaderLen = 8
+
+type ntpPacketConn struct {
+	net.PacketConn
+	magic    [4]byte
+	isServer bool
+	seq      atomic.Uint32
+}
+
+func NewNTPPacketConn(pc net.PacketConn, password string, isServer bool) net.PacketConn {
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("archnet-ntp-magic"))
+	sum := mac.Sum(nil)
+	var magic [4]byte
+	copy(magic[:], sum[:4])
+
+	return &ntpPacketConn{
+		PacketConn: pc,
+		magic:      magic,
+		isServer:   isServer,
+	}
+}
+
+func (c *ntpPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	frame := make([]byte, ntpHeaderLen+len(p))
+	frame[0], frame[1], frame[2], frame[3] = 0x24, 0x02, 0x06, 0xec // LI=0, VN=4, Mode=4 (Server), Stratum=2 secondary
+	copy(frame[4:8], c.magic[:])
+	copy(frame[ntpHeaderLen:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, addr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *ntpPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
+
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < ntpHeaderLen {
+			continue
+		}
+		if buf[0] != 0x24 || !hmac.Equal(buf[4:8], c.magic[:]) {
+			continue
+		}
+		copied := copy(p, buf[ntpHeaderLen:n])
+		return copied, addr, nil
+	}
+}
+
+// OpenVPN DCO (P_DATA_V2) Lookalike Header
+// [1B opcode=0x48][3B magic][4B seq] = 8 bytes
+const openvpnDCOHeaderLen = 8
+
+type openvpnDCOPacketConn struct {
+	net.PacketConn
+	magic    [3]byte
+	isServer bool
+	seq      atomic.Uint32
+}
+
+func NewOpenVPNDCOPacketConn(pc net.PacketConn, password string, isServer bool) net.PacketConn {
+	mac := hmac.New(sha256.New, []byte(password))
+	mac.Write([]byte("archnet-openvpn-dco-magic"))
+	sum := mac.Sum(nil)
+	var magic [3]byte
+	copy(magic[:], sum[:3])
+
+	return &openvpnDCOPacketConn{
+		PacketConn: pc,
+		magic:      magic,
+		isServer:   isServer,
+	}
+}
+
+func (c *openvpnDCOPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	s := c.seq.Add(1)
+	frame := make([]byte, openvpnDCOHeaderLen+len(p))
+	frame[0] = 0x48 // P_DATA_V2 opcode
+	copy(frame[1:4], c.magic[:])
+	binary.BigEndian.PutUint32(frame[4:8], s)
+	copy(frame[openvpnDCOHeaderLen:], p)
+
+	if _, err := c.PacketConn.WriteTo(frame, addr); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *openvpnDCOPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	bufPtr := rawPacketBufPool.Get().(*[]byte)
+	defer rawPacketBufPool.Put(bufPtr)
+	buf := *bufPtr
+
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(buf)
+		if err != nil {
+			return 0, nil, err
+		}
+		if n < openvpnDCOHeaderLen {
+			continue
+		}
+		if buf[0] != 0x48 || !hmac.Equal(buf[1:4], c.magic[:]) {
+			continue
+		}
+		copied := copy(p, buf[openvpnDCOHeaderLen:n])
+		return copied, addr, nil
+	}
+}
+

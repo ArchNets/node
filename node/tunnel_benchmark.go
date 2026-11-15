@@ -122,12 +122,12 @@ var (
 		"wss-reverse", "wssmux", "quic-reverse", "kcp",
 		"pck", "xdi", "tls-reverse", "reverse-reality",
 		"l3-tcp", "l3-udp", "l3-quic", "l3-pck", "l3-xdi",
-		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "l3-dtls", "l3-quic-v1", "l3-rudp-fec", "spoof",
+		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "l3-dtls", "l3-quic-v1", "l3-rudp-fec", "l3-dnscrypt", "l3-wg-stealth", "l3-ntp", "l3-openvpn-dco", "l3-srtp", "spoof",
 	}
 	directBenchmarkTransports = []string{
 		"stealth", "tcpmux", "wssmux", "quic-reverse", "kcp",
 		"l3-tcp", "l3-udp", "l3-quic", "l3-pck", "l3-xdi",
-		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "l3-dtls", "l3-quic-v1", "l3-rudp-fec", "spoof",
+		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "l3-dtls", "l3-quic-v1", "l3-rudp-fec", "l3-dnscrypt", "l3-wg-stealth", "l3-ntp", "l3-openvpn-dco", "l3-srtp", "spoof",
 	}
 	allRouteBenchmarkTransports = []struct {
 		direction string
@@ -159,6 +159,11 @@ var (
 		{"reverse", "l3-dtls"},
 		{"reverse", "l3-quic-v1"},
 		{"reverse", "l3-rudp-fec"},
+		{"reverse", "l3-dnscrypt"},
+		{"reverse", "l3-wg-stealth"},
+		{"reverse", "l3-ntp"},
+		{"reverse", "l3-openvpn-dco"},
+		{"reverse", "l3-srtp"},
 		{"reverse", "spoof"},
 		// Direct overlay transports (Iran Dials Kharej)
 		{"direct", "stealth"},
@@ -168,6 +173,11 @@ var (
 		{"direct", "l3-dtls"},
 		{"direct", "l3-quic-v1"},
 		{"direct", "l3-rudp-fec"},
+		{"direct", "l3-dnscrypt"},
+		{"direct", "l3-wg-stealth"},
+		{"direct", "l3-ntp"},
+		{"direct", "l3-openvpn-dco"},
+		{"direct", "l3-srtp"},
 	}
 )
 

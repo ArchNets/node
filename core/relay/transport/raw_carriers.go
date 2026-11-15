@@ -1367,6 +1367,41 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		}
 		return NewRUDPXORPacketConn(base, isServer), nil
 
+	case "l3-dnscrypt":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewDNSCryptPacketConn(base, password, isServer), nil
+
+	case "l3-wg-stealth":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewWGStealthPacketConn(base, password, isServer), nil
+
+	case "l3-ntp":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewNTPPacketConn(base, password, isServer), nil
+
+	case "l3-openvpn-dco":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewOpenVPNDCOPacketConn(base, password, isServer), nil
+
+	case "l3-srtp":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewSRTPPacketConn(base, password, isServer), nil
+
 	case "l3-udp":
 		tag := deriveScopedTag(password, 17, port)
 		if rawConn, rErr := openBestRawConn(17, "ip4:17", bindHost, "", port16); rErr == nil {
