@@ -122,12 +122,12 @@ var (
 		"wss-reverse", "wssmux", "quic-reverse", "kcp",
 		"pck", "xdi", "tls-reverse", "reverse-reality",
 		"l3-tcp", "l3-udp", "l3-quic", "l3-pck", "l3-xdi",
-		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "spoof",
+		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "l3-dtls", "l3-quic-v1", "l3-rudp-fec", "spoof",
 	}
 	directBenchmarkTransports = []string{
 		"stealth", "tcpmux", "wssmux", "quic-reverse", "kcp",
 		"l3-tcp", "l3-udp", "l3-quic", "l3-pck", "l3-xdi",
-		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "spoof",
+		"l3-bip", "l3-ipip", "l3-gre", "l3-fou-gre", "l3-dtls", "l3-quic-v1", "l3-rudp-fec", "spoof",
 	}
 	allRouteBenchmarkTransports = []struct {
 		direction string
@@ -156,12 +156,18 @@ var (
 		{"reverse", "l3-ipip"},
 		{"reverse", "l3-gre"},
 		{"reverse", "l3-fou-gre"},
+		{"reverse", "l3-dtls"},
+		{"reverse", "l3-quic-v1"},
+		{"reverse", "l3-rudp-fec"},
 		{"reverse", "spoof"},
 		// Direct overlay transports (Iran Dials Kharej)
 		{"direct", "stealth"},
 		{"direct", "kcp"},
 		{"direct", "l3-tcp"},
 		{"direct", "l3-fou-gre"},
+		{"direct", "l3-dtls"},
+		{"direct", "l3-quic-v1"},
+		{"direct", "l3-rudp-fec"},
 	}
 )
 

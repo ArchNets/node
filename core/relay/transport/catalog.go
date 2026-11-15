@@ -42,6 +42,9 @@ var transportCatalog = []TransportSpec{
 	{ID: "l3-ipip", Label: "L3 TUN • IPIP (Protocol 4 Raw)", IsPacket: true, IsMux: true, IsL3: true, NoCarrierPort: true},
 	{ID: "l3-gre", Label: "L3 TUN • GRE (Protocol 47 Raw)", IsPacket: true, IsMux: true, IsL3: true, NoCarrierPort: true},
 	{ID: "l3-fou-gre", Label: "L3 TUN • FOU GRE (Kernel UDP)", IsL3: true, DefaultHalfDuplex: false},
+	{ID: "l3-dtls", Label: "L3 TUN • DTLS 1.3 Camouflage", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-quic-v1", Label: "L3 TUN • QUIC v1 Short Header", IsPacket: true, IsMux: true, IsL3: true},
+	{ID: "l3-rudp-fec", Label: "L3 TUN • RUDP 2+1 XOR FEC", IsPacket: true, IsMux: true, IsL3: true},
 	{ID: "l3-tcp", Label: "L3 TUN • Reliable TCP Stream", IsL3: true, DefaultHalfDuplex: true},
 	{ID: "spoof", Label: "IP Spoofing Carrier", IsPacket: true, IsMux: true, IsL3: true},
 }

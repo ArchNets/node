@@ -750,6 +750,12 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 			uLn, uConn, err = transport.ListenIPIPCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-gre":
 			uLn, uConn, err = transport.ListenGRECarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort)
+		case "l3-dtls":
+			uLn, uConn, err = transport.ListenDTLSCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
+		case "l3-quic-v1":
+			uLn, uConn, err = transport.ListenQUICv1Carrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
+		case "l3-rudp-fec":
+			uLn, uConn, err = transport.ListenRUDPFECCarrier(carrierAddr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "spoof":
 			spoofOpts := transport.SpoofOptions{
 				SrcIP:       e.cfg.SpoofSrcIP,
@@ -1598,6 +1604,12 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 			return transport.DialIPIPCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
 		case "l3-gre":
 			return transport.DialGRECarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort)
+		case "l3-dtls":
+			return transport.DialDTLSCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
+		case "l3-quic-v1":
+			return transport.DialQUICv1Carrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
+		case "l3-rudp-fec":
+			return transport.DialRUDPFECCarrier(e.ctx, addr, e.cfg.Password, e.cfg.CarrierPort, kcpCfg)
 		case "spoof":
 			spoofOpts := transport.SpoofOptions{
 				SrcIP:       e.cfg.SpoofSrcIP,

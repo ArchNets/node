@@ -1346,6 +1346,27 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		}
 		return newPCKPacketConn(rawConn, isServer, port16, port16, tag), nil
 
+	case "l3-dtls":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewDTLS13PacketConn(base, isServer), nil
+
+	case "l3-quic-v1":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewQUICv1PacketConn(base, password, isServer), nil
+
+	case "l3-rudp-fec":
+		base, err := openBaseUDPPacketConn(bindHost, port, isServer)
+		if err != nil {
+			return nil, err
+		}
+		return NewRUDPXORPacketConn(base, isServer), nil
+
 	case "l3-udp":
 		tag := deriveScopedTag(password, 17, port)
 		if rawConn, rErr := openBestRawConn(17, "ip4:17", bindHost, "", port16); rErr == nil {
@@ -1401,6 +1422,149 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
 		return uConn, nil
 	}
+}
+
+func openBaseUDPPacketConn(bindHost string, port int, isServer bool) (net.PacketConn, error) {
+	listenPort := port
+	if !isServer {
+		listenPort = 0
+	}
+	uAddr := &net.UDPAddr{IP: net.ParseIP(bindHost), Port: listenPort}
+	uConn, err := net.ListenUDP("udp", uAddr)
+	if err != nil {
+		if !isServer {
+			uAddr = &net.UDPAddr{IP: net.ParseIP(bindHost), Port: 0}
+			uConn, err = net.ListenUDP("udp", uAddr)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	return uConn, nil
+}
+
+// ListenDTLSCarrier starts a DTLS 1.3-framed UDP packet carrier listener.
+func ListenDTLSCarrier(addr, password string, port int, settings ...KCPSettings) (*UDPCarrierListener, *net.UDPConn, error) {
+	s := DefaultKCPSettings(true)
+	if len(settings) > 0 {
+		s = settings[0]
+	}
+	uAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	uConn, err := net.ListenUDP("udp4", uAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	wrapped := NewDTLS13PacketConn(uConn, true)
+	return newPacketCarrierListenerWithSettings(wrapped, password, s), uConn, nil
+}
+
+// DialDTLSCarrier dials a DTLS 1.3-framed UDP packet carrier session.
+func DialDTLSCarrier(ctx context.Context, addr, password string, port int, settings ...KCPSettings) (net.Conn, error) {
+	s := DefaultKCPSettings(true)
+	if len(settings) > 0 {
+		s = settings[0]
+	}
+	rAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, err
+	}
+	uConn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return nil, err
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	wrapped := NewDTLS13PacketConn(uConn, false)
+	return dialPacketCarrierWithSettings(ctx, wrapped, rAddr, password, s)
+}
+
+// ListenQUICv1Carrier starts a QUIC v1 short-header framed UDP packet carrier listener.
+func ListenQUICv1Carrier(addr, password string, port int, settings ...KCPSettings) (*UDPCarrierListener, *net.UDPConn, error) {
+	s := DefaultKCPSettings(true)
+	if len(settings) > 0 {
+		s = settings[0]
+	}
+	uAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	uConn, err := net.ListenUDP("udp4", uAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	wrapped := NewQUICv1PacketConn(uConn, password, true)
+	return newPacketCarrierListenerWithSettings(wrapped, password, s), uConn, nil
+}
+
+// DialQUICv1Carrier dials a QUIC v1 short-header framed UDP packet carrier session.
+func DialQUICv1Carrier(ctx context.Context, addr, password string, port int, settings ...KCPSettings) (net.Conn, error) {
+	s := DefaultKCPSettings(true)
+	if len(settings) > 0 {
+		s = settings[0]
+	}
+	rAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, err
+	}
+	uConn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return nil, err
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	wrapped := NewQUICv1PacketConn(uConn, password, false)
+	return dialPacketCarrierWithSettings(ctx, wrapped, rAddr, password, s)
+}
+
+// ListenRUDPFECCarrier starts an RUDP 2+1 XOR FEC framed UDP packet carrier listener.
+func ListenRUDPFECCarrier(addr, password string, port int, settings ...KCPSettings) (*UDPCarrierListener, *net.UDPConn, error) {
+	s := DefaultKCPSettings(false)
+	if len(settings) > 0 {
+		s = settings[0]
+	}
+	uAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	uConn, err := net.ListenUDP("udp4", uAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	wrapped := NewRUDPXORPacketConn(uConn, true)
+	return newPacketCarrierListenerWithSettings(wrapped, password, s), uConn, nil
+}
+
+// DialRUDPFECCarrier dials an RUDP 2+1 XOR FEC framed UDP packet carrier session.
+func DialRUDPFECCarrier(ctx context.Context, addr, password string, port int, settings ...KCPSettings) (net.Conn, error) {
+	s := DefaultKCPSettings(false)
+	if len(settings) > 0 {
+		s = settings[0]
+	}
+	rAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, err
+	}
+	uConn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return nil, err
+	}
+	_ = uConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
+	wrapped := NewRUDPXORPacketConn(uConn, false)
+	return dialPacketCarrierWithSettings(ctx, wrapped, rAddr, password, s)
 }
 
 // CheckRPFilterStatus checks /proc/sys/net/ipv4/conf/all/rp_filter on Linux (matching BackPack's ctStrictRPFilter).
