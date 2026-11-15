@@ -196,7 +196,7 @@ func (e *Engine) Start() error {
 		}
 		dataShards := e.cfg.KCPDataShards
 		parityShards := e.cfg.KCPParityShards
-		if dataShards <= 0 && parityShards <= 0 {
+		if dataShards <= 0 && parityShards <= 0 && e.cfg.Transport != "l3-rudp-fec" {
 			for _, f := range e.cfg.Forwarders {
 				if f.GamingMode {
 					dataShards = 10
@@ -576,7 +576,7 @@ func (e *Engine) startL3RawPump() error {
 
 	dataShards := e.cfg.KCPDataShards
 	parityShards := e.cfg.KCPParityShards
-	if dataShards <= 0 && parityShards <= 0 {
+	if dataShards <= 0 && parityShards <= 0 && e.cfg.Transport != "l3-rudp-fec" {
 		for _, f := range e.cfg.Forwarders {
 			if f.GamingMode {
 				dataShards = 10
