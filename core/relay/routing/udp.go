@@ -184,6 +184,7 @@ func StartUDPListenerLoop(
 					}).Warn("[Relay] Client UDP packet dropped: reverse pool is empty (waiting for Exit server to connect)")
 					continue
 				}
+				transport.TuneTCPConn(stream)
 				_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
 				proto := RouteProtoUDP
 				if gamingMode {
@@ -213,6 +214,7 @@ func StartUDPListenerLoop(
 				if gamingMode {
 					// Attempt to claim twin stream for multi-path anti-jitter replication
 					if twin, tErr := claimStreamFn(150 * time.Millisecond); tErr == nil && twin != nil {
+						transport.TuneTCPConn(twin)
 						_ = twin.SetWriteDeadline(time.Now().Add(2 * time.Second))
 						if err := WriteRoutingHeader(twin, RouteProtoUDPGaming, uint16(targetPort)); err == nil {
 							if _, kErr := twin.Write(sessKey[:]); kErr == nil {
@@ -302,12 +304,16 @@ func StartUDPListenerLoop(
 
 			sess.WriteMu.Lock()
 			sess.lastActive.Store(time.Now().Unix())
-			_ = sess.Stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			writeTimeout := 1 * time.Second
+			if gamingMode {
+				writeTimeout = 150 * time.Millisecond
+			}
+			_ = sess.Stream.SetWriteDeadline(time.Now().Add(writeTimeout))
 			_, wErr := sess.Stream.Write(frame)
 			_ = sess.Stream.SetWriteDeadline(time.Time{})
 
 			if sess.StreamTwin != nil {
-				_ = sess.StreamTwin.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_ = sess.StreamTwin.SetWriteDeadline(time.Now().Add(writeTimeout))
 				_, _ = sess.StreamTwin.Write(frame)
 				_ = sess.StreamTwin.SetWriteDeadline(time.Time{})
 			}
@@ -343,6 +349,7 @@ var exitGamingSessMap sync.Map // [8]byte -> *exitGamingSession
 func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats) {
 	defer stream.Close()
 
+	transport.TuneTCPConn(stream)
 	var sessKey [8]byte
 	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.ReadFull(stream, sessKey[:]); err != nil {
@@ -415,12 +422,15 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 
 					gs.mu.Lock()
 					activeCount := len(gs.streams)
-					for _, st := range gs.streams {
-						_ = st.SetWriteDeadline(time.Now().Add(2 * time.Second))
+					streamList := make([]net.Conn, activeCount)
+					copy(streamList, gs.streams)
+					gs.mu.Unlock()
+
+					for _, st := range streamList {
+						_ = st.SetWriteDeadline(time.Now().Add(150 * time.Millisecond))
 						_, _ = st.Write(frame)
 						_ = st.SetWriteDeadline(time.Time{})
 					}
-					gs.mu.Unlock()
 					putUDPFrameBuffer(frame)
 
 					if activeCount == 0 {
