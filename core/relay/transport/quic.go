@@ -134,7 +134,17 @@ func DialQuicSession(ctx context.Context, addr, sni string) (*quic.Conn, error) 
 	tlsCfg := buildSelfSignedQuicClientTLSConfig(sni)
 	dialCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	return quic.Dial(dialCtx, udpConn, udpAddr, tlsCfg, DefaultQuicConfig())
+	qConn, err := quic.Dial(dialCtx, udpConn, udpAddr, tlsCfg, DefaultQuicConfig())
+	if err != nil {
+		_ = udpConn.Close()
+		return nil, err
+	}
+	// quic-go never closes a caller-supplied UDP socket; release it when the session ends
+	go func() {
+		<-qConn.Context().Done()
+		_ = udpConn.Close()
+	}()
+	return qConn, nil
 }
 
 // OpenQuicCarrierStream opens a new stream on an active *quic.Conn and authenticates it with the tunnel password.

@@ -78,6 +78,9 @@ func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath str
 	if err != nil {
 		return nil, err
 	}
+	if hostHeader == "localhost" && rawConn.RemoteAddr() != nil {
+		hostHeader = rawConn.RemoteAddr().String()
+	}
 	TuneTCPConn(rawConn)
 	_ = rawConn.SetDeadline(time.Now().Add(6 * time.Second))
 
