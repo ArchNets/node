@@ -968,21 +968,46 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 
 	switch e.cfg.Transport {
 	case "tls-reverse":
-		tlsConn, err := transport.AcceptTLSReverseCarrier(rawConn, e.tlsServerCfg, e.cfg.SNI, e.cfg.Password)
-		if err != nil {
+		action, inspectedConn, err := transport.InspectTLSReverseTraffic(rawConn, e.tlsServerCfg, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		if err != nil || action != transport.ActionReverseCarrier {
+			if action == transport.ActionUserClient && inspectedConn != nil {
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			}
 			return
 		}
-		carrierConn = tlsConn
+		carrierConn = inspectedConn
 
 	case "wss-reverse", "wssmux":
 		if e.tlsServerCfg == nil {
 			_ = rawConn.Close()
 			return
 		}
-		tlsConn := tls.Server(rawConn, e.tlsServerCfg)
+		var hdr [5]byte
+		_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		nHdr, err := io.ReadFull(rawConn, hdr[:])
+		if err != nil {
+			if hasUserFwd && nHdr > 0 {
+				_ = rawConn.SetReadDeadline(time.Time{})
+				go routing.HandleEntryTCPClient(transport.NewPrefixConn(rawConn, hdr[:nHdr]), uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			} else {
+				_ = rawConn.Close()
+			}
+			return
+		}
+		if hdr[0] != 0x16 {
+			if hasUserFwd {
+				_ = rawConn.SetReadDeadline(time.Time{})
+				go routing.HandleEntryTCPClient(transport.NewPrefixConn(rawConn, hdr[:nHdr]), uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			} else {
+				_ = rawConn.Close()
+			}
+			return
+		}
+		prefixed := transport.NewPrefixConn(rawConn, hdr[:nHdr])
+		tlsConn := tls.Server(prefixed, e.tlsServerCfg)
 		_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 		if err := tlsConn.Handshake(); err != nil {
-			_ = tlsConn.Close()
+			_ = rawConn.Close()
 			return
 		}
 		_ = tlsConn.SetDeadline(time.Time{})

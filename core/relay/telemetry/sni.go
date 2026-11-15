@@ -41,7 +41,31 @@ var (
 		"snapp.ir":            "185.166.104.93",
 		"telewebion.ir":       "185.165.205.132",
 	}
+
+	DefaultNeutralTLSSNI = "cdn.cloudflare-ech.com"
 )
+
+// IsNationalRealitySNI reports whether the SNI is an Iranian hospital or national camouflage domain,
+// which is designed for Reverse Reality destination-proxying, NOT for self-signed TLS/WSS termination.
+func IsNationalRealitySNI(sni string) bool {
+	clean := strings.ToLower(strings.TrimSpace(sni))
+	if clean == "" {
+		return false
+	}
+	if _, ok := StaticHospitalAndNationalOrigins[clean]; ok {
+		return true
+	}
+	return strings.HasSuffix(clean, ".ir")
+}
+
+// DefaultTLSSNI returns sni if it is a valid custom non-national domain, or falls back to DefaultNeutralTLSSNI.
+func DefaultTLSSNI(sni string) string {
+	clean := strings.ToLower(strings.TrimSpace(sni))
+	if clean == "" || clean == "localhost" || clean == "archnet.local" || IsNationalRealitySNI(clean) {
+		return DefaultNeutralTLSSNI
+	}
+	return clean
+}
 
 // SetDynamicSNIOrigins updates the in-memory SNI origin mapping pushed dynamically from the server.
 // No domains or IPs are hardcoded; all configuration is driven dynamically by the server/database.

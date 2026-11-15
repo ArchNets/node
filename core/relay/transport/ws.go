@@ -46,8 +46,10 @@ func VerifyWSInitiator(password string, reqStr string) bool {
 }
 // Once the 101 Switching Protocols handshake succeeds, the raw stream is returned for zero-copy splicing.
 func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath string) (net.Conn, error) {
-	if sni == "" || sni == "localhost" {
-		sni = "shariati.tums.ac.ir"
+	if useTLS {
+		sni = DefaultTLSSNI(sni)
+	} else if sni == "" || sni == "localhost" {
+		sni = "localhost"
 	}
  path := strings.TrimSpace(wsPath)
  if path == "" || !strings.HasPrefix(path, "/") {

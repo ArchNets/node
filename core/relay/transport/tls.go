@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -20,6 +21,28 @@ import (
 	certutil "github.com/archnets/node/common/cert"
 	utls "github.com/refraction-networking/utls"
 )
+
+const DefaultNeutralTLSSNI = "cdn.cloudflare-ech.com"
+
+func isNationalOrIrSNI(sni string) bool {
+	clean := strings.ToLower(strings.TrimSpace(sni))
+	if clean == "" {
+		return false
+	}
+	if strings.HasSuffix(clean, ".ir") || strings.Contains(clean, ".tums.ac.ir") || strings.Contains(clean, "miladhospital") {
+		return true
+	}
+	return false
+}
+
+// DefaultTLSSNI returns sni if it is a valid custom non-national domain, or falls back to DefaultNeutralTLSSNI.
+func DefaultTLSSNI(sni string) string {
+	clean := strings.ToLower(strings.TrimSpace(sni))
+	if clean == "" || clean == "localhost" || clean == "archnet.local" || isNationalOrIrSNI(clean) {
+		return DefaultNeutralTLSSNI
+	}
+	return clean
+}
 
 // resolveFallbackCertPaths checks standard ArchNet (/etc/archnets/) and Let's Encrypt
 // (/etc/letsencrypt/live/<sni>/) directories if certFile/keyFile were not explicitly set.
@@ -71,8 +94,11 @@ func BuildRelayTLSConfig(sni, certMode, certFile, keyFile string) (*tls.Config, 
 				return nil, fmt.Errorf("parse inline tls certificate/key PEM: %w", err)
 			}
 			return &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				MinVersion:   tls.VersionTLS13,
+				Certificates:           []tls.Certificate{cert},
+				MinVersion:             tls.VersionTLS12,
+				MaxVersion:             tls.VersionTLS13,
+				NextProtos:             []string{"http/1.1"},
+				SessionTicketsDisabled: false,
 			}, nil
 		}
 		cert, err := tls.LoadX509KeyPair(cf, kf)
@@ -80,8 +106,11 @@ func BuildRelayTLSConfig(sni, certMode, certFile, keyFile string) (*tls.Config, 
 			return nil, fmt.Errorf("load tls certificate/key files (%s, %s): %w", cf, kf, err)
 		}
 		return &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
+			Certificates:           []tls.Certificate{cert},
+			MinVersion:             tls.VersionTLS12,
+			MaxVersion:             tls.VersionTLS13,
+			NextProtos:             []string{"http/1.1"},
+			SessionTicketsDisabled: false,
 		}, nil
 	}
 
@@ -90,9 +119,7 @@ func BuildRelayTLSConfig(sni, certMode, certFile, keyFile string) (*tls.Config, 
 
 // GenerateSelfSignedTLSConfig generates an in-memory ECDSA P-256 TLS certificate for the given SNI.
 func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
-	if sni == "" || sni == "localhost" || sni == "archnet.local" {
-		sni = "shariati.tums.ac.ir"
-	}
+	cleanSNI := DefaultTLSSNI(sni)
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -107,15 +134,15 @@ func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
 	tmpl := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName:   sni,
-			Organization: []string{sni},
+			CommonName:   cleanSNI,
+			Organization: []string{cleanSNI},
 		},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{sni},
+		DNSNames:              []string{cleanSNI},
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
@@ -129,26 +156,30 @@ func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
 	}
 
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
+		Certificates:           []tls.Certificate{cert},
+		MinVersion:             tls.VersionTLS12,
+		MaxVersion:             tls.VersionTLS13,
+		NextProtos:             []string{"http/1.1"},
+		SessionTicketsDisabled: false,
 	}, nil
 }
 
 // buildSelfSignedReverseClientTLSConfig constructs client TLS config for self-signed carrier connections.
 func buildSelfSignedReverseClientTLSConfig(sni string) *tls.Config {
+	cleanSNI := DefaultTLSSNI(sni)
 	trustSelfSignedCert := true
 	return &tls.Config{
-		ServerName:         sni,
+		ServerName:         cleanSNI,
 		InsecureSkipVerify: trustSelfSignedCert,
-		MinVersion:         tls.VersionTLS13,
+		MinVersion:         tls.VersionTLS12,
+		MaxVersion:         tls.VersionTLS13,
+		NextProtos:         []string{"http/1.1"},
 	}
 }
 
 // DialTLSReverseCarrier connects to EntryServerIP:CarrierPort over TLS 1.3 and authenticates with Password.
 func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, error) {
-	if sni == "" || sni == "localhost" || sni == "archnet.local" {
-		sni = "shariati.tums.ac.ir"
-	}
+	cleanSNI := DefaultTLSSNI(sni)
 	key, err := DeriveRealityKey(password, "archnet-tls-auth")
 	if err != nil {
 		return nil, err
@@ -165,11 +196,12 @@ func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Con
 	TuneTCPConn(rawConn)
 
 	uConn := utls.UClient(rawConn, &utls.Config{
-		ServerName:         sni,
+		ServerName:         cleanSNI,
 		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
 	}, utls.HelloChrome_Auto)
 	if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
-		if sessionToken, sErr := DeriveRealitySessionID(password, sni); sErr == nil {
+		if sessionToken, sErr := DeriveRealitySessionID(password, cleanSNI); sErr == nil {
 			uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
 			copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
 			uConn.HandshakeState.Hello.Raw = nil
@@ -202,44 +234,84 @@ func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Con
 	return tlsConn, nil
 }
 
-// AcceptTLSReverseCarrier upgrades an accepted TCP connection to TLS 1.3 and verifies the peer token.
-func AcceptTLSReverseCarrier(rawConn net.Conn, tlsCfg *tls.Config, sni, password string) (net.Conn, error) {
+// InspectTLSReverseTraffic inspects an incoming TCP connection on Entry for TLS 1.2/1.3 reverse carrier.
+// - If the first bytes are not TLS (e.g. user client on shared port), it preserves them in PrefixConn for user forwarding.
+// - If TLS, it completes the TLS server handshake.
+// - If authenticated with the 32-byte reality token, it returns ActionReverseCarrier with the upgraded TLS connection.
+// - If an unauthenticated TLS probe / scanner (e.g. GET / HTTP/1.1 over TLS), it serves a realistic Nginx decoy page over TLS.
+func InspectTLSReverseTraffic(rawConn net.Conn, tlsCfg *tls.Config, sni, password string, hasUserForwarder bool) (InspectAction, net.Conn, error) {
 	TuneTCPConn(rawConn)
-	tlsConn := tls.Server(rawConn, tlsCfg)
+	_ = rawConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	var hdr [5]byte
+	nHdr, err := io.ReadFull(rawConn, hdr[:])
+	if err != nil {
+		if hasUserForwarder && nHdr > 0 {
+			_ = rawConn.SetReadDeadline(time.Time{})
+			return ActionUserClient, NewPrefixConn(rawConn, hdr[:nHdr]), nil
+		}
+		_ = rawConn.Close()
+		return ActionDPIProbe, nil, err
+	}
+
+	recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
+	// If not a TLS handshake record (0x16), it's user client traffic (HTTP, Socks, Shadowsocks, etc.)
+	if hdr[0] != 0x16 || recLen < 42 || recLen > 16384 {
+		if hasUserForwarder {
+			_ = rawConn.SetReadDeadline(time.Time{})
+			return ActionUserClient, NewPrefixConn(rawConn, hdr[:nHdr]), nil
+		}
+		_ = rawConn.Close()
+		return ActionDPIProbe, nil, errors.New("non-tls traffic on tls-reverse listener")
+	}
+
+	prefixed := NewPrefixConn(rawConn, hdr[:nHdr])
+	tlsConn := tls.Server(prefixed, tlsCfg)
 	_ = tlsConn.SetDeadline(time.Now().Add(6 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {
 		_ = rawConn.Close()
-		return nil, err
+		return ActionDPIProbe, nil, err
 	}
 
 	key, err := DeriveRealityKey(password, "archnet-tls-auth")
 	if err != nil {
 		_ = tlsConn.Close()
-		return nil, err
+		return ActionDPIProbe, nil, err
 	}
 
 	var token [32]byte
-	if _, err := io.ReadFull(tlsConn, token[:]); err != nil {
-		_ = tlsConn.Close()
-		return nil, err
-	}
-	if !VerifyRealityToken(key, token[:], realityMagic) {
-		_ = tlsConn.Close()
-		return nil, fmt.Errorf("unauthorized tls-reverse peer")
+	nTok, err := io.ReadFull(tlsConn, token[:])
+	if err != nil || !VerifyRealityToken(key, token[:], realityMagic) {
+		// Unauthenticated TLS probe / scanner: serve realistic Nginx decoy page over TLS
+		captured := token[:nTok]
+		go ServeDecoyHTTP(tlsConn, string(captured), password)
+		return ActionDPIProbe, nil, nil
 	}
 
 	ack, err := GenerateRealityToken(key, realityAckMagic)
 	if err != nil {
 		_ = tlsConn.Close()
-		return nil, err
+		return ActionDPIProbe, nil, err
 	}
 	if _, err := tlsConn.Write(ack[:]); err != nil {
 		_ = tlsConn.Close()
-		return nil, err
+		return ActionDPIProbe, nil, err
 	}
 
 	_ = tlsConn.SetDeadline(time.Time{})
-	return tlsConn, nil
+	return ActionReverseCarrier, tlsConn, nil
+}
+
+// AcceptTLSReverseCarrier upgrades an accepted TCP connection to TLS 1.3 and verifies the peer token.
+func AcceptTLSReverseCarrier(rawConn net.Conn, tlsCfg *tls.Config, sni, password string) (net.Conn, error) {
+	action, conn, err := InspectTLSReverseTraffic(rawConn, tlsCfg, sni, password, false)
+	if err != nil {
+		return nil, err
+	}
+	if action != ActionReverseCarrier {
+		return nil, fmt.Errorf("tls-reverse inspection did not produce reverse carrier: action=%d", action)
+	}
+	return conn, nil
 }
 
 // ExtractSNIFromClientHello extracts the server_name extension from a raw TLS ClientHello record body.

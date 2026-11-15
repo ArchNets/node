@@ -2178,3 +2178,120 @@ func TestLiveMultiKharejRawTCPAndTLSDemuxing(t *testing.T) {
 	}
 	t.Logf("✓ Raw TCP Tunnel 2 Tier 2 demux verified: %s", string(buf2[:n2]))
 }
+
+func TestTLSReverseCarrierEndToEnd(t *testing.T) {
+	sharedPort := getFreeTCPPort(t)
+	svcPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+
+	// Mock Backend Service
+	svcLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", svcPort))
+	if err != nil {
+		t.Fatalf("listen svc: %v", err)
+	}
+	defer svcLn.Close()
+	go func() {
+		for {
+			c, err := svcLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 1024)
+				n, _ := conn.Read(buf)
+				if n > 0 {
+					_, _ = conn.Write([]byte("ECHO_SVC:" + string(buf[:n])))
+				}
+			}(c)
+		}
+	}()
+
+	// Entry Engine
+	engEntry := NewEngine(Config{
+		TunnelID:      901,
+		Role:          "entry",
+		CarrierPort:   sharedPort,
+		ListenIP:      "127.0.0.1",
+		Transport:     "tls-reverse",
+		SNI:           "cdn.cloudflare-ech.com",
+		Password:      "test-tls-reverse-secret",
+		UseHalfDuplex: false,
+		Forwarders: []routing.ForwarderRule{
+			{Protocol: "tcp", ListenPort: fwdPort, TargetPort: svcPort},
+		},
+	})
+	if err := engEntry.Start(); err != nil {
+		t.Fatalf("start engEntry: %v", err)
+	}
+	defer engEntry.Close()
+
+	// Exit Engine
+	engExit := NewEngine(Config{
+		TunnelID:           901,
+		Role:               "exit",
+		CarrierPort:        sharedPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		Transport:          "tls-reverse",
+		SNI:                "cdn.cloudflare-ech.com",
+		Password:           "test-tls-reverse-secret",
+		UseHalfDuplex:      false,
+		MinHeldConnections: 4,
+	})
+	if err := engExit.Start(); err != nil {
+		t.Fatalf("start engExit: %v", err)
+	}
+	defer engExit.Close()
+
+	// Wait for reverse pool to warm up
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if engEntry.Stats.PoolIdleConnections.Load() > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if engEntry.Stats.PoolIdleConnections.Load() == 0 {
+		t.Fatalf("timed out waiting for warm reverse connection in tls-reverse pool")
+	}
+
+	// 1. Verify User Traffic forwarder end-to-end
+	client, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial fwd: %v", err)
+	}
+	defer client.Close()
+	_, _ = client.Write([]byte("HELLO_TLS_REVERSE"))
+	buf := make([]byte, 1024)
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("read from client: %v", err)
+	}
+	if string(buf[:n]) != "ECHO_SVC:HELLO_TLS_REVERSE" {
+		t.Fatalf("unexpected client response: %q", string(buf[:n]))
+	}
+	t.Logf("✓ TLS Reverse Forwarder Verified: %s", string(buf[:n]))
+
+	// 2. Verify Active TLS Probe receives genuine Nginx decoy response
+	tlsProbe, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", sharedPort), &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("tls probe dial: %v", err)
+	}
+	defer tlsProbe.Close()
+	_, _ = tlsProbe.Write([]byte("GET / HTTP/1.1\r\nHost: cdn.cloudflare-ech.com\r\n\r\n"))
+	decoyBuf := make([]byte, 1024)
+	_ = tlsProbe.SetReadDeadline(time.Now().Add(3 * time.Second))
+	dn, dErr := tlsProbe.Read(decoyBuf)
+	if dErr != nil {
+		t.Fatalf("read decoy: %v", dErr)
+	}
+	decoyResp := string(decoyBuf[:dn])
+	if !strings.Contains(decoyResp, "HTTP/1.1 200 OK") || !strings.Contains(decoyResp, "Server: nginx") {
+		t.Fatalf("expected nginx decoy response, got: %q", decoyResp)
+	}
+	t.Logf("✓ Active TLS Probe Decoy Verified: %s", strings.Split(decoyResp, "\r\n")[0])
+}
