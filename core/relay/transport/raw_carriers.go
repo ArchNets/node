@@ -516,6 +516,10 @@ func sweepIptablesRule(table string, body []string) {
 	}
 }
 
+func DiscoverLocalIPv4For(dst net.IP) net.IP {
+	return discoverLocalIPv4For(dst)
+}
+
 func discoverLocalIPv4For(dst net.IP) net.IP {
 	c, err := net.Dial("udp4", net.JoinHostPort(dst.String(), "80"))
 	if err != nil {

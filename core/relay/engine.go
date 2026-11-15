@@ -208,15 +208,36 @@ func (e *Engine) Start() error {
 		if dataShards > 0 && parityShards > 0 && mtu > 1312 {
 			mtu -= transport.FECOverhead
 		}
-		if tunDev, err := transport.OpenL3TUNWithSubnet(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP); err == nil {
+		var tunDev *transport.L3TUNDevice
+		var err error
+		if e.cfg.Transport == "l3-fou-gre" {
+			peerIPStr := e.cfg.ExitServerIP
+			if e.cfg.Role == "exit" {
+				peerIPStr = e.cfg.EntryServerIP
+			}
+			localIPStr := e.cfg.ListenIP
+			if localIPStr == "" || localIPStr == "0.0.0.0" {
+				if parsedPeer := net.ParseIP(peerIPStr); parsedPeer != nil {
+					localIPStr = transport.DiscoverLocalIPv4For(parsedPeer).String()
+				}
+			}
+			tunDev, err = transport.OpenKernelFOUGRELink(e.cfg.TunnelID, e.cfg.Role, localIPStr, peerIPStr, e.cfg.CarrierPort, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP)
+		} else {
+			tunDev, err = transport.OpenL3TUNWithSubnet(e.cfg.TunnelID, e.cfg.Role, e.cfg.Password, mtu, e.cfg.L3Iface, e.cfg.L3LocalIP, e.cfg.L3PeerIP)
+		}
+		if err == nil && tunDev != nil {
 			e.mu.Lock()
 			e.l3TunDev = tunDev
 			e.mu.Unlock()
+			label := "Layer-3 TUN interface (GRE + ChaCha20-Poly1305)"
+			if e.cfg.Transport == "l3-fou-gre" {
+				label = fmt.Sprintf("Native Kernel FOU GRE Link (UDP port %d)", e.cfg.CarrierPort)
+			}
 			e.logger.WithFields(log.Fields{
 				"iface":   tunDev.Name(),
 				"localIP": tunDev.LocalIP(),
 				"peerIP":  tunDev.PeerIP(),
-			}).Info("[Relay] Layer-3 TUN interface (GRE + ChaCha20-Poly1305) brought up")
+			}).Infof("[Relay] %s brought up", label)
 			if e.isPacketTransport() {
 				if pErr := e.startL3RawPump(); pErr != nil {
 					e.logger.WithField("err", pErr).Warn("[Relay] Failed to open L3 raw packet pump")
@@ -517,7 +538,7 @@ func (e *Engine) kcpSettings() transport.KCPSettings {
 }
 
 func (e *Engine) isL3DirectTUNMode() bool {
-	return e.l3TunDev != nil && e.isPacketTransport() && e.l3RawConn != nil
+	return e.l3TunDev != nil && ((e.isPacketTransport() && e.l3RawConn != nil) || e.cfg.Transport == "l3-fou-gre")
 }
 
 func (e *Engine) startL3RawPump() error {

@@ -46,6 +46,8 @@ type L3TUNDevice struct {
 	closed      atomic.Bool
 	closeOnce   sync.Once
 	txHook      atomic.Pointer[func([]byte) error]
+	isKernelGRE bool
+	fouPort     int
 }
 
 // OpenL3TUN creates and configures a Linux Layer-3 TUN interface (/dev/net/tun).
@@ -257,6 +259,10 @@ func (d *L3TUNDevice) Close() error {
 		d.closed.Store(true)
 		d.removeMSSClamp()
 		if os.Geteuid() == 0 {
+			if d.isKernelGRE && d.fouPort > 0 {
+				portStr := strconv.Itoa(d.fouPort)
+				_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", portStr, "-j", "ACCEPT").Run()
+			}
 			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-i", d.name, "-j", "ACCEPT").Run()
 			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-i", d.name, "-j", "ACCEPT").Run()
 			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "FORWARD", "-o", d.name, "-j", "ACCEPT").Run()
@@ -270,4 +276,82 @@ func (d *L3TUNDevice) Close() error {
 		_ = exec.Command("ip", "link", "delete", d.name).Run()
 	})
 	return err
+}
+
+// OpenKernelFOUGRELink creates and configures a native Linux Kernel FOU (Foo-Over-UDP) GRE interface.
+// Unlike userspace raw sockets, the Linux kernel natively encapsulates/decapsulates with zero-copy,
+// wrapping GRE packets inside standard UDP packets with symmetric ports and encap-csum.
+func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP string, port, mtu int, customIface, customLocalCIDR, customPeerIP string) (*L3TUNDevice, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("l3-fou-gre: creating FOU GRE link requires root or CAP_NET_ADMIN")
+	}
+	_ = exec.Command("modprobe", "fou").Run()
+	_ = exec.Command("modprobe", "ip_gre").Run()
+
+	if port <= 0 || port > 65535 {
+		port = 5000
+	}
+	portStr := strconv.Itoa(port)
+
+	// Register FOU receive port in kernel if not already present
+	_ = exec.Command("ip", "fou", "add", "port", portStr, "ipproto", "47").Run()
+
+	if mtu <= 0 || mtu > 1450 {
+		mtu = 1400
+	}
+	mss := mtu - 40
+
+	ifaceName, localCIDR, peerIP := DeriveL3Subnet(tunnelID, role)
+	if customIface != "" {
+		ifaceName = customIface
+		if len(ifaceName) >= unix.IFNAMSIZ {
+			ifaceName = ifaceName[:unix.IFNAMSIZ-1]
+		}
+	}
+	if customLocalCIDR != "" && customPeerIP != "" {
+		localCIDR = customLocalCIDR
+		peerIP = customPeerIP
+	}
+
+	// Remove stale link if left behind from earlier run
+	_ = exec.Command("ip", "link", "del", ifaceName).Run()
+
+	// Add FOU GRE link with symmetric port and encap-csum
+	addArgs := []string{
+		"link", "add", ifaceName, "type", "gre",
+		"local", localPublicIP, "remote", remotePublicIP,
+		"encap", "fou", "encap-sport", portStr, "encap-dport", portStr,
+		"encap-csum", "ttl", "255",
+	}
+	if out, err := exec.Command("ip", addArgs...).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ip %s: %s (%w)", strings.Join(addArgs, " "), string(out), err)
+	}
+
+	// Address and bring up interface
+	if out, err := exec.Command("ip", "addr", "add", localCIDR, "peer", peerIP, "dev", ifaceName).CombinedOutput(); err != nil {
+		_ = exec.Command("ip", "link", "del", ifaceName).Run()
+		return nil, fmt.Errorf("ip addr add on %s: %s (%w)", ifaceName, string(out), err)
+	}
+	if err := exec.Command("ip", "link", "set", "dev", ifaceName, "mtu", strconv.Itoa(mtu), "up").Run(); err != nil {
+		_ = exec.Command("ip", "link", "del", ifaceName).Run()
+		return nil, err
+	}
+
+	// Ensure local firewalls allow FOU UDP port and traffic on the interface
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", portStr, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", ifaceName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", ifaceName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", ifaceName, "-j", "ACCEPT").Run()
+
+	dev := &L3TUNDevice{
+		name:        ifaceName,
+		localIP:     localCIDR,
+		peerIP:      peerIP,
+		mtu:         mtu,
+		mss:         mss,
+		isKernelGRE: true,
+		fouPort:     port,
+	}
+	dev.applyMSSClamp()
+	return dev, nil
 }

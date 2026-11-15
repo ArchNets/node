@@ -25,3 +25,8 @@ func OpenL3TUN(tunnelID int, role, password string, mtu int) (*L3TUNDevice, erro
 func OpenL3TUNWithSubnet(tunnelID int, role, password string, mtu int, customIface, customLocalCIDR, customPeerIP string) (*L3TUNDevice, error) {
 	return nil, errL3NotSupported
 }
+
+// OpenKernelFOUGRELink creates and configures a native Linux Kernel FOU GRE interface.
+func OpenKernelFOUGRELink(tunnelID int, role, localPublicIP, remotePublicIP string, port, mtu int, customIface, customLocalCIDR, customPeerIP string) (*L3TUNDevice, error) {
+	return nil, errL3NotSupported
+}

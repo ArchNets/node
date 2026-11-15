@@ -144,6 +144,9 @@ func runTestTransport() {
 	exitIP := testPeer
 	if testRole == "entry" {
 		entryIP = "0.0.0.0"
+		if testTransport != "l3-fou-gre" && testDirection != "direct" {
+			exitIP = ""
+		}
 	}
 
 	certMode := ""

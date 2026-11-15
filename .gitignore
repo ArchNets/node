@@ -22,4 +22,6 @@ __pycache__/
 *.pyc
 /main
 node/main
+.skills/
+
 
