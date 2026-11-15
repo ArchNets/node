@@ -59,6 +59,7 @@ type Config struct {
 	L3PeerIP           string
 	L3Iface            string
 	L3MTU              int
+	L3PrivatePort      int
 	SpoofSrcIP         string
 	SpoofSrcPool       []string
 	SpoofPeerSrcIP     string
@@ -667,10 +668,17 @@ func (e *Engine) startL3RawPump() error {
 	return nil
 }
 
+func (e *Engine) l3PrivatePort() int {
+	if e.cfg.L3PrivatePort > 0 && e.cfg.L3PrivatePort <= 65535 {
+		return e.cfg.L3PrivatePort
+	}
+	return 1234
+}
+
 func (e *Engine) startCarrierListener(listenIP string) error {
 	if e.isL3DirectTUNMode() {
 		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
-		privAddr := net.JoinHostPort(tunLocalIP, "1234")
+		privAddr := net.JoinHostPort(tunLocalIP, strconv.Itoa(e.l3PrivatePort()))
 		ln, err := net.Listen("tcp", privAddr)
 		if err != nil {
 			return fmt.Errorf("listen L3 private carrier on %s: %w", privAddr, err)
@@ -1385,7 +1393,7 @@ func (e *Engine) logDialFailure(err error) {
 		if e.lastDialLog.CompareAndSwap(last, now) {
 			if e.isL3DirectTUNMode() {
 				e.logger.WithFields(log.Fields{
-					"tunPeer":   net.JoinHostPort(e.l3TunDev.PeerIP(), "1234"),
+					"tunPeer":   net.JoinHostPort(e.l3TunDev.PeerIP(), strconv.Itoa(e.l3PrivatePort())),
 					"transport": e.cfg.Transport,
 					"entryIP":   e.cfg.EntryServerIP,
 					"err":       err,
@@ -1488,7 +1496,7 @@ func (e *Engine) exitPoolLoop() {
 
 func (e *Engine) dialCarrierStream() (net.Conn, error) {
 	if e.isL3DirectTUNMode() {
-		privTarget := net.JoinHostPort(e.l3TunDev.PeerIP(), "1234")
+		privTarget := net.JoinHostPort(e.l3TunDev.PeerIP(), strconv.Itoa(e.l3PrivatePort()))
 		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
 		rawDial := func() (net.Conn, error) {
 			return transport.DialTCPContextWithLocal(e.ctx, tunLocalIP, privTarget, 4*time.Second)

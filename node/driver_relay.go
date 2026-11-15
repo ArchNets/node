@@ -238,7 +238,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	var simpleAuth bool
 	var kcpDataShards, kcpParityShards, kcpMTU int
 	var l3LocalIP, l3PeerIP, l3Iface string
-	var l3MTU int
+	var l3MTU, l3PrivatePort int
 	var spoofSrcIP, spoofProfile string
 	var spoofSrcPool []string
 	var spoofPeerSrcIP string
@@ -264,6 +264,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		l3PeerIP = rc.L3PeerIP
 		l3Iface = rc.L3Iface
 		l3MTU = rc.L3MTU
+		l3PrivatePort = rc.L3PrivatePort
 		spoofSrcIP = rc.SpoofSrcIP
 		spoofSrcPool = rc.SpoofSrcPool
 		spoofPeerSrcIP = rc.SpoofPeerSrcIP
@@ -317,6 +318,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		L3PeerIP:           l3PeerIP,
 		L3Iface:            l3Iface,
 		L3MTU:              l3MTU,
+		L3PrivatePort:      l3PrivatePort,
 		SpoofSrcIP:         spoofSrcIP,
 		SpoofSrcPool:       spoofSrcPool,
 		SpoofPeerSrcIP:     spoofPeerSrcIP,
@@ -413,6 +415,7 @@ func carrierSettingsEqual(a, b relay.Config) bool {
 		a.L3PeerIP == b.L3PeerIP &&
 		a.L3Iface == b.L3Iface &&
 		a.L3MTU == b.L3MTU &&
+		a.L3PrivatePort == b.L3PrivatePort &&
 		a.SpoofSrcIP == b.SpoofSrcIP &&
 		a.SpoofPeerSrcIP == b.SpoofPeerSrcIP &&
 		a.SpoofProfile == b.SpoofProfile &&

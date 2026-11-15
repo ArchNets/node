@@ -77,6 +77,7 @@ type RelayTunnelConfig struct {
 	L3PeerIP         string   `json:"l3_peer_ip,omitempty"`
 	L3Iface          string   `json:"l3_iface,omitempty"`
 	L3MTU            int      `json:"l3_mtu,omitempty"`
+	L3PrivatePort    int      `json:"l3_private_port,omitempty"`
 	SpoofSrcIP       string   `json:"spoof_src_ip,omitempty"`
 	SpoofSrcPool     []string `json:"spoof_src_pool,omitempty"`
 	SpoofPeerSrcIP   string   `json:"spoof_peer_src_ip,omitempty"`
