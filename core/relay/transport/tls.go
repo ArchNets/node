@@ -22,8 +22,6 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-const DefaultNeutralTLSSNI = "cdn.cloudflare-ech.com"
-
 var knownRealityCamouflageDomains = map[string]bool{
 	"shariati.tums.ac.ir": true,
 	"rhc.ac.ir":           true,
@@ -60,13 +58,19 @@ func isNationalOrIrSNI(sni string) bool {
 	return false
 }
 
-// DefaultTLSSNI returns sni if it is a valid custom non-national domain, or falls back to DefaultNeutralTLSSNI.
-func DefaultTLSSNI(sni string) string {
+// CleanCustomTLSSNI returns sni if it is a valid custom user-configured domain (e.g. tunnel.example.com),
+// or returns "" when operating in bare-IP / self-signed mode (matching BackPack).
+func CleanCustomTLSSNI(sni string) string {
 	clean := strings.ToLower(strings.TrimSpace(sni))
 	if clean == "" || clean == "localhost" || clean == "archnet.local" || isNationalOrIrSNI(clean) {
-		return DefaultNeutralTLSSNI
+		return ""
 	}
 	return clean
+}
+
+// DefaultTLSSNI is an alias of CleanCustomTLSSNI for backward compatibility.
+func DefaultTLSSNI(sni string) string {
+	return CleanCustomTLSSNI(sni)
 }
 
 // resolveFallbackCertPaths checks standard ArchNet (/etc/archnets/) and Let's Encrypt
@@ -142,9 +146,12 @@ func BuildRelayTLSConfig(sni, certMode, certFile, keyFile string) (*tls.Config, 
 	return GenerateSelfSignedTLSConfig(sni)
 }
 
-// GenerateSelfSignedTLSConfig generates an in-memory ECDSA P-256 TLS certificate for the given SNI.
+// GenerateSelfSignedTLSConfig generates an in-memory ECDSA P-256 TLS certificate for the given SNI (or "localhost" / bare IP).
 func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
-	cleanSNI := DefaultTLSSNI(sni)
+	host := CleanCustomTLSSNI(sni)
+	if host == "" {
+		host = "localhost"
+	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -159,15 +166,19 @@ func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
 	tmpl := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName:   cleanSNI,
-			Organization: []string{cleanSNI},
+			CommonName:   host,
+			Organization: []string{host},
 		},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{cleanSNI},
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		tmpl.IPAddresses = []net.IP{ip}
+	} else {
+		tmpl.DNSNames = []string{host}
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
@@ -191,10 +202,10 @@ func GenerateSelfSignedTLSConfig(sni string) (*tls.Config, error) {
 
 // buildSelfSignedReverseClientTLSConfig constructs client TLS config for self-signed carrier connections.
 func buildSelfSignedReverseClientTLSConfig(sni string) *tls.Config {
-	cleanSNI := DefaultTLSSNI(sni)
+	serverName := CleanCustomTLSSNI(sni)
 	trustSelfSignedCert := true
 	return &tls.Config{
-		ServerName:         cleanSNI,
+		ServerName:         serverName,
 		InsecureSkipVerify: trustSelfSignedCert,
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tls.VersionTLS13,
@@ -204,7 +215,7 @@ func buildSelfSignedReverseClientTLSConfig(sni string) *tls.Config {
 
 // DialTLSReverseCarrier connects to EntryServerIP:CarrierPort over TLS 1.3 and authenticates with Password.
 func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Conn, error) {
-	cleanSNI := DefaultTLSSNI(sni)
+	serverName := CleanCustomTLSSNI(sni)
 	key, err := DeriveRealityKey(password, "archnet-tls-auth")
 	if err != nil {
 		return nil, err
@@ -221,12 +232,12 @@ func DialTLSReverseCarrier(dialCtx CarrierDialer, sni, password string) (net.Con
 	TuneTCPConn(rawConn)
 
 	uConn := utls.UClient(rawConn, &utls.Config{
-		ServerName:         cleanSNI,
+		ServerName:         serverName,
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"http/1.1"},
 	}, utls.HelloChrome_Auto)
 	if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
-		if sessionToken, sErr := DeriveRealitySessionID(password, cleanSNI); sErr == nil {
+		if sessionToken, sErr := DeriveRealitySessionID(password, serverName); sErr == nil {
 			uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
 			copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
 			uConn.HandshakeState.Hello.Raw = nil

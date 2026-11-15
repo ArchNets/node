@@ -231,22 +231,23 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 						target.Transport == "wssmux" ||
 						target.Transport == ""
 					if isTLS {
-						expectedToken, err := transport.DeriveRealitySessionID(target.Password, target.SNI)
+						effSNI := target.SNI
+						if target.Transport != "reverse-reality" && target.Transport != "" {
+							effSNI = transport.CleanCustomTLSSNI(target.SNI)
+						}
+						expectedToken, err := transport.DeriveRealitySessionID(target.Password, effSNI)
 						if err == nil && bytes.Equal(sid, expectedToken[:]) {
 							_ = conn.SetDeadline(time.Time{})
 							pConn := transport.NewPrefixConn(conn, captured)
 							target.Handler(pConn)
 							return
 						}
-						if target.Transport != "reverse-reality" && target.Transport != "" {
-							effSNI := transport.DefaultTLSSNI(target.SNI)
-							if effSNI != target.SNI {
-								if altToken, aErr := transport.DeriveRealitySessionID(target.Password, effSNI); aErr == nil && bytes.Equal(sid, altToken[:]) {
-									_ = conn.SetDeadline(time.Time{})
-									pConn := transport.NewPrefixConn(conn, captured)
-									target.Handler(pConn)
-									return
-								}
+						if effSNI != target.SNI {
+							if origToken, oErr := transport.DeriveRealitySessionID(target.Password, target.SNI); oErr == nil && bytes.Equal(sid, origToken[:]) {
+								_ = conn.SetDeadline(time.Time{})
+								pConn := transport.NewPrefixConn(conn, captured)
+								target.Handler(pConn)
+								return
 							}
 						}
 					}
@@ -262,7 +263,7 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 						target.Transport == "wss-reverse" ||
 						target.Transport == "wssmux" ||
 						target.Transport == ""
-					if isTLS && (strings.EqualFold(target.SNI, sni) || (target.Transport != "reverse-reality" && strings.EqualFold(transport.DefaultTLSSNI(target.SNI), sni))) {
+					if isTLS && (strings.EqualFold(target.SNI, sni) || (target.Transport != "reverse-reality" && strings.EqualFold(transport.CleanCustomTLSSNI(target.SNI), sni))) {
 						_ = conn.SetDeadline(time.Time{})
 						pConn := transport.NewPrefixConn(conn, captured)
 						target.Handler(pConn)

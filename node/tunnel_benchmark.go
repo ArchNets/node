@@ -162,11 +162,9 @@ func buildTransportCandidate(idx int, direction, tr, baseSNI string) BenchmarkCa
 	}
 	sni := ""
 	if spec.NeedsSNI {
-		if tr == "reverse-reality" || tr == "l3-sni" {
-			sni = baseSNI
-		} else {
-			sni = transport.DefaultTLSSNI(baseSNI)
-		}
+		sni = baseSNI
+	} else if tr == "tls-reverse" || tr == "wss-reverse" || tr == "wssmux" || tr == "quic-reverse" || tr == "quic" || tr == "l3-quic" {
+		sni = transport.CleanCustomTLSSNI(baseSNI)
 	}
 	return BenchmarkCandidate{
 		Index:         idx,
@@ -222,9 +220,9 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 		}
 		spec := transport.GetTransportSpec(tr)
 		if spec.NeedsSNI {
-			if tr != "reverse-reality" && tr != "l3-sni" {
-				sni = transport.DefaultTLSSNI(sni)
-			}
+			// Reality / L3-SNI
+		} else if tr == "tls-reverse" || tr == "wss-reverse" || tr == "wssmux" || tr == "quic-reverse" || tr == "quic" || tr == "l3-quic" {
+			sni = transport.CleanCustomTLSSNI(sni)
 		} else {
 			sni = ""
 		}
@@ -309,9 +307,11 @@ func BuildBenchmarkCandidates(cmd *panel.ScanCommand, baseCfg *panel.RelayTunnel
 				{"ws-reverse", "WebSocket Reverse (Decoy)", true, false},
 				{"reverse-reality", "Reverse Reality (Anti-DPI TLS 1.3)", true, true},
 			} {
-				candSNI := preset.SNI
-				if m.transport != "reverse-reality" {
-					candSNI = transport.DefaultTLSSNI(candSNI)
+				candSNI := ""
+				if m.transport == "reverse-reality" {
+					candSNI = preset.SNI
+				} else {
+					candSNI = transport.CleanCustomTLSSNI(preset.SNI)
 				}
 				candidates = append(candidates, BenchmarkCandidate{
 					Index:         idx,
@@ -775,9 +775,6 @@ func (c *TunnelController) evaluateCandidate(
 	}
 
 	displaySNI := cand.SNI
-	if cand.SNI == transport.DefaultNeutralTLSSNI {
-		displaySNI = "cdn.cloudflare-ech.com (Self-Signed)"
-	}
 
 	if sample == nil {
 		c.logger.WithFields(log.Fields{

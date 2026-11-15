@@ -2214,7 +2214,7 @@ func TestTLSReverseCarrierEndToEnd(t *testing.T) {
 		CarrierPort:   sharedPort,
 		ListenIP:      "127.0.0.1",
 		Transport:     "tls-reverse",
-		SNI:           "cdn.cloudflare-ech.com",
+		SNI:           "",
 		Password:      "test-tls-reverse-secret",
 		UseHalfDuplex: false,
 		Forwarders: []routing.ForwarderRule{
@@ -2234,7 +2234,7 @@ func TestTLSReverseCarrierEndToEnd(t *testing.T) {
 		EntryServerIP:      "127.0.0.1",
 		TargetIP:           "127.0.0.1",
 		Transport:          "tls-reverse",
-		SNI:                "cdn.cloudflare-ech.com",
+		SNI:                "",
 		Password:           "test-tls-reverse-secret",
 		UseHalfDuplex:      false,
 		MinHeldConnections: 4,
@@ -2282,7 +2282,7 @@ func TestTLSReverseCarrierEndToEnd(t *testing.T) {
 		t.Fatalf("tls probe dial: %v", err)
 	}
 	defer tlsProbe.Close()
-	_, _ = tlsProbe.Write([]byte("GET / HTTP/1.1\r\nHost: cdn.cloudflare-ech.com\r\n\r\n"))
+	_, _ = tlsProbe.Write([]byte("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
 	decoyBuf := make([]byte, 1024)
 	_ = tlsProbe.SetReadDeadline(time.Now().Add(3 * time.Second))
 	dn, dErr := tlsProbe.Read(decoyBuf)

@@ -46,62 +46,67 @@ func VerifyWSInitiator(password string, reqStr string) bool {
 }
 // Once the 101 Switching Protocols handshake succeeds, the raw stream is returned for zero-copy splicing.
 func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath string) (net.Conn, error) {
+	serverName := ""
+	hostHeader := "localhost"
 	if useTLS {
-		sni = DefaultTLSSNI(sni)
-	} else if sni == "" || sni == "localhost" {
-		sni = "localhost"
+		serverName = CleanCustomTLSSNI(sni)
+		if serverName != "" {
+			hostHeader = serverName
+		}
+	} else if sni != "" && sni != "localhost" {
+		hostHeader = sni
 	}
- path := strings.TrimSpace(wsPath)
- if path == "" || !strings.HasPrefix(path, "/") {
-  path = "/ws"
- }
- key, err := DeriveRealityKey(password, "archnet-ws-auth")
- if err != nil {
-  return nil, err
- }
- token, err := GenerateRealityToken(key, wsAuthMagic)
- if err != nil {
-  return nil, err
- }
- authHex := hex.EncodeToString(token[:])
+	path := strings.TrimSpace(wsPath)
+	if path == "" || !strings.HasPrefix(path, "/") {
+		path = "/ws"
+	}
+	key, err := DeriveRealityKey(password, "archnet-ws-auth")
+	if err != nil {
+		return nil, err
+	}
+	token, err := GenerateRealityToken(key, wsAuthMagic)
+	if err != nil {
+		return nil, err
+	}
+	authHex := hex.EncodeToString(token[:])
 
- var wsKeyRaw [16]byte
- _, _ = rand.Read(wsKeyRaw[:])
- wsKey := base64.StdEncoding.EncodeToString(wsKeyRaw[:])
+	var wsKeyRaw [16]byte
+	_, _ = rand.Read(wsKeyRaw[:])
+	wsKey := base64.StdEncoding.EncodeToString(wsKeyRaw[:])
 
- rawConn, err := dialCtx()
- if err != nil {
-  return nil, err
- }
- TuneTCPConn(rawConn)
- _ = rawConn.SetDeadline(time.Now().Add(6 * time.Second))
+	rawConn, err := dialCtx()
+	if err != nil {
+		return nil, err
+	}
+	TuneTCPConn(rawConn)
+	_ = rawConn.SetDeadline(time.Now().Add(6 * time.Second))
 
- var conn net.Conn = rawConn
- if useTLS {
-  trustSelfSignedCert := true
-  uConn := utls.UClient(rawConn, &utls.Config{
-   ServerName:         sni,
-   InsecureSkipVerify: trustSelfSignedCert,
-   NextProtos:         []string{"http/1.1"},
-  }, utls.HelloChrome_Auto)
-  if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
-   if sessionToken, sErr := DeriveRealitySessionID(password, sni); sErr == nil {
-    uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
-    copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
-    uConn.HandshakeState.Hello.Raw = nil
-   }
-  }
-  if err := uConn.Handshake(); err != nil {
-   _ = rawConn.Close()
-   return nil, fmt.Errorf("wss utls handshake: %w", err)
-  }
-  conn = uConn
- }
+	var conn net.Conn = rawConn
+	if useTLS {
+		trustSelfSignedCert := true
+		uConn := utls.UClient(rawConn, &utls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: trustSelfSignedCert,
+			NextProtos:         []string{"http/1.1"},
+		}, utls.HelloChrome_Auto)
+		if err := uConn.BuildHandshakeState(); err == nil && uConn.HandshakeState.Hello != nil {
+			if sessionToken, sErr := DeriveRealitySessionID(password, serverName); sErr == nil {
+				uConn.HandshakeState.Hello.SessionId = make([]byte, 32)
+				copy(uConn.HandshakeState.Hello.SessionId, sessionToken[:])
+				uConn.HandshakeState.Hello.Raw = nil
+			}
+		}
+		if err := uConn.Handshake(); err != nil {
+			_ = rawConn.Close()
+			return nil, fmt.Errorf("wss utls handshake: %w", err)
+		}
+		conn = uConn
+	}
 
- req := fmt.Sprintf(
-  "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nX-Requested-With: %s\r\n\r\n",
-  path, sni, wsKey, authHex,
- )
+	req := fmt.Sprintf(
+		"GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nX-Requested-With: %s\r\n\r\n",
+		path, hostHeader, wsKey, authHex,
+	)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		_ = conn.Close()
 		return nil, err

@@ -41,8 +41,6 @@ var (
 		"snapp.ir":            "185.166.104.93",
 		"telewebion.ir":       "185.165.205.132",
 	}
-
-	DefaultNeutralTLSSNI = "cdn.cloudflare-ech.com"
 )
 
 // IsNationalRealitySNI reports whether the SNI is an Iranian hospital or national camouflage domain,
@@ -64,11 +62,12 @@ func IsNationalRealitySNI(sni string) bool {
 	return strings.HasSuffix(clean, ".ac.ir") || strings.HasSuffix(clean, ".gov.ir")
 }
 
-// DefaultTLSSNI returns sni if it is a valid custom non-national domain, or falls back to DefaultNeutralTLSSNI.
-func DefaultTLSSNI(sni string) string {
+// CleanCustomTLSSNI returns sni if it is a valid custom user-configured domain (not a national Reality origin),
+// or returns "" (indicating bare-IP / self-signed mode matching BackPack).
+func CleanCustomTLSSNI(sni string) string {
 	clean := strings.ToLower(strings.TrimSpace(sni))
 	if clean == "" || clean == "localhost" || clean == "archnet.local" || IsNationalRealitySNI(clean) {
-		return DefaultNeutralTLSSNI
+		return ""
 	}
 	return clean
 }

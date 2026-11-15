@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	quicAuthMagic = "ARQC"
-	quicALPN      = "h3"
+	quicAuthMagic         = "ARQC"
+	quicALPN              = "h3"
+	QUICInitialPacketSize = 1232 // Matching BackPack: 1280B IPv6 MTU minus 40B IPv6 + 8B UDP header
 )
 
 // QuicStreamConn adapts a *quic.Stream into a full net.Conn with directional CloseWrite() support.
@@ -64,20 +65,21 @@ func (q *QuicStreamConn) Close() error {
 
 func DefaultQuicConfig() *quic.Config {
 	return &quic.Config{
-		MaxIncomingStreams:         4096,
-		MaxIncomingUniStreams:      1024,
-		KeepAlivePeriod:            15 * time.Second,
-		MaxIdleTimeout:             60 * time.Second,
-		InitialStreamReceiveWindow: 4 * 1024 * 1024,
-		MaxStreamReceiveWindow:     16 * 1024 * 1024,
+		MaxIncomingStreams:             4096,
+		MaxIncomingUniStreams:          1024,
+		KeepAlivePeriod:                15 * time.Second,
+		MaxIdleTimeout:                 60 * time.Second,
+		InitialStreamReceiveWindow:     4 * 1024 * 1024,
+		MaxStreamReceiveWindow:         16 * 1024 * 1024,
 		InitialConnectionReceiveWindow: 8 * 1024 * 1024,
 		MaxConnectionReceiveWindow:     32 * 1024 * 1024,
+		InitialPacketSize:              QUICInitialPacketSize,
 	}
 }
 
 // ListenQuicCarrier starts a QUIC listener on the given UDP address using TLS 1.3 (ALPN "h3").
 func ListenQuicCarrier(addr, sni, certMode, certFile, keyFile string) (*quic.Listener, *net.UDPConn, error) {
-	sni = DefaultTLSSNI(sni)
+	sni = CleanCustomTLSSNI(sni)
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, nil, err
@@ -106,10 +108,10 @@ func ListenQuicCarrier(addr, sni, certMode, certFile, keyFile string) (*quic.Lis
 
 // buildSelfSignedQuicClientTLSConfig builds client TLS config allowing self-signed reverse carrier certs.
 func buildSelfSignedQuicClientTLSConfig(sni string) *tls.Config {
-	sni = DefaultTLSSNI(sni)
+	serverName := CleanCustomTLSSNI(sni)
 	trustSelfSignedCert := true
 	return &tls.Config{
-		ServerName:         sni,
+		ServerName:         serverName,
 		InsecureSkipVerify: trustSelfSignedCert,
 		NextProtos:         []string{quicALPN},
 		MinVersion:         tls.VersionTLS13,
@@ -118,10 +120,21 @@ func buildSelfSignedQuicClientTLSConfig(sni string) *tls.Config {
 
 // DialQuicSession dials a QUIC connection to addr with TLS 1.3 SNI and ALPN "h3".
 func DialQuicSession(ctx context.Context, addr, sni string) (*quic.Conn, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return nil, err
+	}
+	_ = udpConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = udpConn.SetWriteBuffer(8 * 1024 * 1024)
+
 	tlsCfg := buildSelfSignedQuicClientTLSConfig(sni)
 	dialCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	return quic.DialAddr(dialCtx, addr, tlsCfg, DefaultQuicConfig())
+	return quic.Dial(dialCtx, udpConn, udpAddr, tlsCfg, DefaultQuicConfig())
 }
 
 // OpenQuicCarrierStream opens a new stream on an active *quic.Conn and authenticates it with the tunnel password.
