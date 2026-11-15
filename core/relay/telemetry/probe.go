@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -123,21 +124,37 @@ func HandleExitProbeStream(stream net.Conn, stats *Stats) {
 			n, err := stream.Read(buf)
 			if n > 0 {
 				totalReceived += uint64(n)
-				// Check for done marker across TCP read chunk boundary: tail + buf[:n]
-				combined := make([]byte, tailLen+n)
-				copy(combined, tail[:tailLen])
-				copy(combined[tailLen:], buf[:n])
-				if idx := indexUploadDone(combined); idx >= 0 {
-					totalReceived -= uint64(len(combined) - idx)
+				// 1. Check boundary seam (up to 32B tail + first 32B of buf[:n]) with zero heap allocation
+				if tailLen > 0 {
+					var seam [64]byte
+					copy(seam[:tailLen], tail[:tailLen])
+					headLen := n
+					if headLen > 32 {
+						headLen = 32
+					}
+					copy(seam[tailLen:tailLen+headLen], buf[:headLen])
+					if idx := indexUploadDone(seam[:tailLen+headLen]); idx >= 0 {
+						totalReceived -= uint64((tailLen + n) - idx)
+						break
+					}
+				}
+				// 2. Check within buf[:n] directly with zero heap allocation
+				if idx := indexUploadDone(buf[:n]); idx >= 0 {
+					totalReceived -= uint64(n - idx)
 					break
 				}
 				// Keep at most last 32 bytes in tail for next boundary check
-				if len(combined) >= 32 {
-					copy(tail[:], combined[len(combined)-32:])
+				if n >= 32 {
+					copy(tail[:], buf[n-32:n])
 					tailLen = 32
+				} else if tailLen+n <= 32 {
+					copy(tail[tailLen:], buf[:n])
+					tailLen += n
 				} else {
-					copy(tail[:], combined)
-					tailLen = len(combined)
+					keepFromTail := 32 - n
+					copy(tail[:keepFromTail], tail[tailLen-keepFromTail:tailLen])
+					copy(tail[keepFromTail:32], buf[:n])
+					tailLen = 32
 				}
 			}
 			if err != nil || time.Now().After(uploadDeadline) {
@@ -199,7 +216,7 @@ func HandleExitProbeStream(stream net.Conn, stats *Stats) {
 var uploadDoneMarker = []byte("__ARCHNET_UP_EOF__")
 
 func indexUploadDone(b []byte) int {
-	return strings.Index(string(b), string(uploadDoneMarker))
+	return bytes.Index(b, uploadDoneMarker)
 }
 
 func readDurationLine(r io.Reader) int {

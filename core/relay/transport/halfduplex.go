@@ -219,16 +219,16 @@ func (m *HalfDuplexMatcher) AcceptHalf(conn net.Conn) (*HalfDuplexConn, error) {
 	copy(pairID[:], intro[1:17])
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if m.closed {
+		m.mu.Unlock()
 		_ = conn.Close()
 		return nil, net.ErrClosed
 	}
 
 	now := time.Now()
 	for id, p := range m.pending {
-		if now.Sub(p.createdAt) > 10*time.Second {
+		if now.Sub(p.createdAt) > 8*time.Second {
 			_ = p.conn.Close()
 			delete(m.pending, id)
 		}
@@ -241,6 +241,7 @@ func (m *HalfDuplexMatcher) AcceptHalf(conn net.Conn) (*HalfDuplexConn, error) {
 			conn:      conn,
 			createdAt: now,
 		}
+		m.mu.Unlock()
 		return nil, nil
 	}
 
@@ -251,10 +252,12 @@ func (m *HalfDuplexMatcher) AcceptHalf(conn net.Conn) (*HalfDuplexConn, error) {
 			conn:      conn,
 			createdAt: now,
 		}
+		m.mu.Unlock()
 		return nil, nil
 	}
 
 	delete(m.pending, pairID)
+	m.mu.Unlock()
 
 	var uploadConn, downloadConn net.Conn
 	if role == HalfDuplexRoleUpload {

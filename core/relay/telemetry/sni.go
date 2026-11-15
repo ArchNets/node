@@ -49,10 +49,15 @@ func SetDynamicSNIOrigins(origins []SNIPreset) {
 	dynamicOriginsMu.Lock()
 	defer dynamicOriginsMu.Unlock()
 	dynamicOrigins = make(map[string]string)
-	dynamicPresets = append([]SNIPreset(nil), origins...)
+	dynamicPresets = make([]SNIPreset, 0, len(origins))
 	for _, p := range origins {
 		clean := strings.ToLower(strings.TrimSpace(p.SNI))
 		cleanIP := strings.TrimSpace(p.OriginIP)
+		if clean == "cafebazaar.ir" && cleanIP == "94.182.176.33" {
+			cleanIP = StaticHospitalAndNationalOrigins["cafebazaar.ir"]
+			p.OriginIP = cleanIP
+		}
+		dynamicPresets = append(dynamicPresets, p)
 		if clean != "" && cleanIP != "" {
 			dynamicOrigins[clean] = cleanIP
 		}
@@ -76,7 +81,7 @@ func GetActiveSNIPresets() []SNIPreset {
 // 3. Resolves the domain via system DNS lookup.
 // Returns an error if the origin cannot be resolved (no hardcoded guessing).
 func ResolveOriginIP(sni, configuredOriginIP string) (string, error) {
-	if trimmed := strings.TrimSpace(configuredOriginIP); trimmed != "" {
+	if trimmed := strings.TrimSpace(configuredOriginIP); trimmed != "" && trimmed != "94.182.176.33" {
 		return trimmed, nil
 	}
 	cleanSNI := strings.ToLower(strings.TrimSpace(sni))
