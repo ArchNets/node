@@ -30,13 +30,13 @@ func acquireBenchmarkPortGuard(basePort int, customPort int) {
 	if os.Geteuid() != 0 {
 		return
 	}
-	// Whitelist the benchmark coordinator (basePort) and all candidate sandbox ports (basePort..basePort+35)
-	if basePort > 0 && basePort <= 65500 {
-		pRange := fmt.Sprintf("%d:%d", basePort, basePort+35)
+	// Whitelist the benchmark coordinator (basePort) and all candidate sandbox ports (basePort..basePort+120)
+	if basePort > 0 && basePort <= 65400 {
+		pRange := fmt.Sprintf("%d:%d", basePort, basePort+120)
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", pRange, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", pRange, "-j", "ACCEPT").Run()
 	}
-	if customPort > 0 && customPort <= 65535 && (customPort < basePort || customPort > basePort+35) {
+	if customPort > 0 && customPort <= 65535 && (customPort < basePort || customPort > basePort+120) {
 		p := strconv.Itoa(customPort)
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
@@ -54,12 +54,12 @@ func releaseBenchmarkPortGuard(basePort int, customPort int) {
 	if os.Geteuid() != 0 {
 		return
 	}
-	if basePort > 0 && basePort <= 65500 {
-		pRange := fmt.Sprintf("%d:%d", basePort, basePort+35)
+	if basePort > 0 && basePort <= 65400 {
+		pRange := fmt.Sprintf("%d:%d", basePort, basePort+120)
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", pRange, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", pRange, "-j", "ACCEPT").Run()
 	}
-	if customPort > 0 && customPort <= 65535 && (customPort < basePort || customPort > basePort+35) {
+	if customPort > 0 && customPort <= 65535 && (customPort < basePort || customPort > basePort+120) {
 		p := strconv.Itoa(customPort)
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT").Run()
 		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT").Run()
@@ -582,8 +582,8 @@ func (c *TunnelController) runTunnelBenchmarkSweep(ctx context.Context, t panel.
 			coordReader = bufio.NewReader(coordConn)
 			exitCheckedIn = true
 			c.logger.WithField("remote", conn.RemoteAddr().String()).Info("[Benchmark] Exit node connected to 1-by-1 lockstep coordinator")
-		case <-time.After(35 * time.Second):
-			c.logger.Warn("[Benchmark] Exit coordinator did not connect within 35s; proceeding with standalone candidate evaluation")
+		case <-time.After(50 * time.Second):
+			c.logger.Warn("[Benchmark] Exit coordinator did not connect within 50s; proceeding with candidate evaluation")
 		}
 	}
 	defer func() {
