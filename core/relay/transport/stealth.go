@@ -371,6 +371,14 @@ func (s *StealthConn) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+func (s *StealthConn) UnderlyingConn() net.Conn {
+	return s.Conn
+}
+
+func (s *StealthConn) IsAlive() bool {
+	return IsStreamAlive(s.Conn)
+}
+
 func (s *StealthConn) CloseWrite() error {
 	if cw, ok := s.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()

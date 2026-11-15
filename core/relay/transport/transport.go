@@ -6,12 +6,48 @@ import (
 	"time"
 )
 
+// ExtractTCPConns extracts all underlying *net.TCPConn instances from a potentially wrapped net.Conn.
+func ExtractTCPConns(c net.Conn) []*net.TCPConn {
+	if c == nil {
+		return nil
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		return []*net.TCPConn{tc}
+	}
+	if hd, ok := c.(*HalfDuplexConn); ok {
+		var list []*net.TCPConn
+		if r := hd.ReadTCPConn(); r != nil {
+			list = append(list, r)
+		}
+		if w := hd.WriteTCPConn(); w != nil {
+			list = append(list, w)
+		}
+		return list
+	}
+	if p, ok := c.(*PrefixConn); ok {
+		return ExtractTCPConns(p.Conn)
+	}
+	type unwrapNetConn interface {
+		NetConn() net.Conn
+	}
+	if unc, ok := c.(unwrapNetConn); ok {
+		return ExtractTCPConns(unc.NetConn())
+	}
+	type unwrapConn interface {
+		UnderlyingConn() net.Conn
+	}
+	if uc, ok := c.(unwrapConn); ok {
+		return ExtractTCPConns(uc.UnderlyingConn())
+	}
+	return nil
+}
+
 // TuneTCPConn sets optimal TCP socket options for high-throughput zero-copy relaying.
 func TuneTCPConn(c net.Conn) {
-	if tc, ok := c.(*net.TCPConn); ok {
+	for _, tc := range ExtractTCPConns(c) {
 		_ = tc.SetNoDelay(true)
 		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(15 * time.Second)
+		_ = tc.SetKeepAlivePeriod(10 * time.Second)
 		_ = tc.SetReadBuffer(32 * 1024 * 1024)
 		_ = tc.SetWriteBuffer(32 * 1024 * 1024)
 		setPlatformTCPTune(tc)

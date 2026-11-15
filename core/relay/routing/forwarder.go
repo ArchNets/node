@@ -93,7 +93,11 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		targetIP = "127.0.0.1"
 	}
 	targetAddr := net.JoinHostPort(targetIP, strconv.Itoa(int(targetPort)))
-	targetConn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
+	targetConn, err := net.DialTimeout("tcp", targetAddr, 3*time.Second)
+	if err != nil {
+		time.Sleep(50 * time.Millisecond)
+		targetConn, err = net.DialTimeout("tcp", targetAddr, 3*time.Second)
+	}
 	if err != nil {
 		log.WithFields(log.Fields{
 			"targetAddr": targetAddr,

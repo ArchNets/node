@@ -134,6 +134,12 @@ func setPlatformTCPTune(tc *net.TCPConn) {
 	mtu := int(configuredMTU.Load())
 	if raw, err := tc.SyscallConn(); err == nil {
 		_ = raw.Control(func(fd uintptr) {
+			// Aggressive TCP KeepAlives (10s idle, 5s interval, 3 probes) so intermediate ISP firewalls never drop NAT state
+			_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_KEEPALIVE, 1)
+			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPIDLE, 10)
+			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, 5)
+			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_KEEPCNT, 3)
+
 			// Request BBR congestion control on Linux
 			_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
 			// Enable TCP_QUICKACK to accelerate slow-start window growth over high-RTT links
@@ -270,15 +276,12 @@ func IsStreamAlive(c net.Conn) bool {
 	if ac, ok := c.(StreamAliveChecker); ok {
 		return ac.IsAlive()
 	}
-	if tc, ok := c.(*net.TCPConn); ok {
-		return isTCPConnAlive(tc)
-	}
-	if hd, ok := c.(*HalfDuplexConn); ok {
-		if rTC := hd.ReadTCPConn(); rTC != nil && !isTCPConnAlive(rTC) {
-			return false
-		}
-		if wTC := hd.WriteTCPConn(); wTC != nil && !isTCPConnAlive(wTC) {
-			return false
+	conns := ExtractTCPConns(c)
+	if len(conns) > 0 {
+		for _, tc := range conns {
+			if !isTCPConnAlive(tc) {
+				return false
+			}
 		}
 		return true
 	}

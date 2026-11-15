@@ -1460,7 +1460,7 @@ func (e *Engine) exitPoolLoop() {
 				created, cOk := val.(time.Time)
 				if ok {
 					isDead := !transport.IsStreamAlive(conn)
-					isAged := cOk && now.Sub(created) > 30*time.Minute
+					isAged := cOk && now.Sub(created) > 5*time.Minute
 					if isDead || isAged {
 						_ = conn.Close()
 						e.idleStreams.Delete(key)
