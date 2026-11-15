@@ -24,12 +24,37 @@ import (
 
 const DefaultNeutralTLSSNI = "cdn.cloudflare-ech.com"
 
+var knownRealityCamouflageDomains = map[string]bool{
+	"shariati.tums.ac.ir": true,
+	"rhc.ac.ir":           true,
+	"tums.ac.ir":          true,
+	"farabi.tums.ac.ir":   true,
+	"sina.tums.ac.ir":     true,
+	"pasteur.ac.ir":       true,
+	"sbmu.ac.ir":          true,
+	"miladhospital.com":   true,
+	"divar.ir":            true,
+	"cafebazaar.ir":       true,
+	"snapp.ir":            true,
+	"telewebion.ir":       true,
+	"aparat.com":          true,
+	"digikala.com":        true,
+	"varzesh3.com":        true,
+	"iran.ir":             true,
+	"bmi.ir":              true,
+	"mellatbank.ir":       true,
+	"shaparak.ir":         true,
+}
+
 func isNationalOrIrSNI(sni string) bool {
 	clean := strings.ToLower(strings.TrimSpace(sni))
 	if clean == "" {
 		return false
 	}
-	if strings.HasSuffix(clean, ".ir") || strings.Contains(clean, ".tums.ac.ir") || strings.Contains(clean, "miladhospital") {
+	if knownRealityCamouflageDomains[clean] {
+		return true
+	}
+	if strings.HasSuffix(clean, ".ac.ir") || strings.HasSuffix(clean, ".gov.ir") {
 		return true
 	}
 	return false

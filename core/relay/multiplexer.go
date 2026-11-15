@@ -238,6 +238,17 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 							target.Handler(pConn)
 							return
 						}
+						if target.Transport != "reverse-reality" && target.Transport != "" {
+							effSNI := transport.DefaultTLSSNI(target.SNI)
+							if effSNI != target.SNI {
+								if altToken, aErr := transport.DeriveRealitySessionID(target.Password, effSNI); aErr == nil && bytes.Equal(sid, altToken[:]) {
+									_ = conn.SetDeadline(time.Time{})
+									pConn := transport.NewPrefixConn(conn, captured)
+									target.Handler(pConn)
+									return
+								}
+							}
+						}
 					}
 				}
 			}
@@ -251,7 +262,7 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 						target.Transport == "wss-reverse" ||
 						target.Transport == "wssmux" ||
 						target.Transport == ""
-					if isTLS && strings.EqualFold(target.SNI, sni) {
+					if isTLS && (strings.EqualFold(target.SNI, sni) || (target.Transport != "reverse-reality" && strings.EqualFold(transport.DefaultTLSSNI(target.SNI), sni))) {
 						_ = conn.SetDeadline(time.Time{})
 						pConn := transport.NewPrefixConn(conn, captured)
 						target.Handler(pConn)

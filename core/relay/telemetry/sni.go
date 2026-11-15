@@ -55,7 +55,13 @@ func IsNationalRealitySNI(sni string) bool {
 	if _, ok := StaticHospitalAndNationalOrigins[clean]; ok {
 		return true
 	}
-	return strings.HasSuffix(clean, ".ir")
+	dynamicOriginsMu.RLock()
+	_, inDyn := dynamicOrigins[clean]
+	dynamicOriginsMu.RUnlock()
+	if inDyn {
+		return true
+	}
+	return strings.HasSuffix(clean, ".ac.ir") || strings.HasSuffix(clean, ".gov.ir")
 }
 
 // DefaultTLSSNI returns sni if it is a valid custom non-national domain, or falls back to DefaultNeutralTLSSNI.

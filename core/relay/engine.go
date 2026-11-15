@@ -1011,11 +1011,8 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 			return
 		}
 		_ = tlsConn.SetDeadline(time.Time{})
-		action, inspectedConn, err := transport.InspectWSTraffic(tlsConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
+		action, inspectedConn, err := transport.InspectWSTraffic(tlsConn, e.cfg.SNI, e.cfg.Password, false)
 		if err != nil || action != transport.ActionReverseCarrier {
-			if action == transport.ActionUserClient && inspectedConn != nil {
-				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
-			}
 			return
 		}
 		carrierConn = inspectedConn
