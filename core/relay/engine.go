@@ -612,6 +612,25 @@ func (e *Engine) startL3RawPump() error {
 		e.l3PeerAddr.Store(&net.UDPAddr{IP: parsedPeer, Port: e.cfg.CarrierPort})
 	}
 
+	if e.cfg.Role == "exit" {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-e.ctx.Done():
+					return
+				case <-ticker.C:
+					if dst := e.l3PeerAddr.Load(); dst != nil && rawConn != nil {
+						_, _ = rawConn.WriteTo([]byte{0x00}, dst)
+					}
+				}
+			}
+		}()
+	}
+
 	e.l3TunDev.SetSender(func(wire []byte) error {
 		dst := e.l3PeerAddr.Load()
 		if dst == nil {
@@ -631,6 +650,16 @@ func (e *Engine) startL3RawPump() error {
 			if rErr != nil {
 				if !e.alive.Load() {
 					return
+				}
+				continue
+			}
+			if n <= 1 {
+				// Keepalive packet (used to punch NAT holes and learn peer address)
+				if from != nil && e.l3PeerAddr.Load() == nil {
+					switch a := from.(type) {
+					case *net.UDPAddr:
+						e.l3PeerAddr.Store(a)
+					}
 				}
 				continue
 			}

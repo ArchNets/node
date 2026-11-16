@@ -222,6 +222,9 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		entryIP = t.ExitServerIP
 	}
 	exitIP := t.ExitServerIP
+	if exitIP == "" && t.Role == "entry" {
+		exitIP = t.RemoteIP
+	}
 	if rc != nil {
 		if rc.ExitOverrideIP != "" {
 			exitIP = rc.ExitOverrideIP

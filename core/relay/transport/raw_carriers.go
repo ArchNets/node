@@ -1407,23 +1407,7 @@ func OpenL3RawCarrier(transportName, bindHost, password string, port int, isServ
 		return NewSRTPPacketConn(base, password, isServer), nil
 
 	case "l3-udp":
-		tag := deriveScopedTag(password, 17, port)
-		if rawConn, rErr := openBestRawConn(17, "ip4:17", bindHost, "", port16); rErr == nil {
-			return newRawUDPPacketConn(rawConn, isServer, port16, port16, tag), nil
-		}
-		listenPort := port
-		uAddr := &net.UDPAddr{IP: net.ParseIP(bindHost), Port: listenPort}
-		uConn, err := net.ListenUDP("udp", uAddr)
-		if err != nil {
-			uAddr = &net.UDPAddr{IP: net.ParseIP(bindHost), Port: 0}
-			uConn, err = net.ListenUDP("udp", uAddr)
-			if err != nil {
-				return nil, err
-			}
-		}
-		_ = uConn.SetReadBuffer(8 * 1024 * 1024)
-		_ = uConn.SetWriteBuffer(8 * 1024 * 1024)
-		return uConn, nil
+		return openBaseUDPPacketConn(bindHost, port, isServer)
 
 	case "spoof":
 		proto := byte(58)
