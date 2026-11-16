@@ -161,3 +161,13 @@ func TestIsHostnameEndpoint(t *testing.T) {
 	assert.False(t, isHostnameEndpoint("[2606:4700:d0::a29f:c001]:2408"))
 	assert.False(t, isHostnameEndpoint("no-port-here"))
 }
+
+func TestBuildDefaultOutbound_DomainStrategy(t *testing.T) {
+	for _, strat := range []string{"UseIPv4v6", "UseIPv6v4", "UseIPv4", ""} {
+		outbound, err := buildDefaultOutbound(strat)
+		assert.NoError(t, err)
+		assert.NotNil(t, outbound)
+		assert.Equal(t, "direct", outbound.Tag)
+		assert.NotNil(t, outbound.SenderSettings)
+	}
+}

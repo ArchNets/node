@@ -522,7 +522,11 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	settings := &coreConf.ShadowsocksServerConfig{
 		Cipher: cipher,
 	}
-	p := make([]byte, 32)
+	keyLength := 32
+	if cipher == "2022-blake3-aes-128-gcm" {
+		keyLength = 16
+	}
+	p := make([]byte, keyLength)
 	_, err := rand.Read(p)
 	if err != nil {
 		return fmt.Errorf("generate random password error: %s", err)
@@ -530,9 +534,13 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	randomPasswd := hex.EncodeToString(p)
 
 	if nodeInfo.Protocol.ServerKey != "" && strings.Contains(cipher, "2022") {
-		nodeInfo.Protocol.ServerKey = base64.StdEncoding.EncodeToString([]byte(nodeInfo.Protocol.ServerKey))
-		settings.Password = nodeInfo.Protocol.ServerKey
-		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
+		serverKey := nodeInfo.Protocol.ServerKey
+		if _, err := base64.StdEncoding.DecodeString(serverKey); err != nil {
+			serverKey = base64.StdEncoding.EncodeToString([]byte(serverKey))
+			nodeInfo.Protocol.ServerKey = serverKey
+		}
+		settings.Password = serverKey
+		randomPasswd = base64.StdEncoding.EncodeToString(p)
 		cipher = ""
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{

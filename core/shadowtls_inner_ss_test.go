@@ -2,9 +2,11 @@ package core
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/archnets/node/api/panel"
+	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 func TestBuildShadowTLSInnerSSInbound(t *testing.T) {
@@ -90,5 +92,57 @@ func TestBuildShadowTLSInnerSSInbound(t *testing.T) {
 	_, err = BuildShadowTLSInnerSSInbound(infoMethod, "test_tag_method")
 	if err != nil {
 		t.Fatalf("unexpected error for ShadowsocksMethod inner SS inbound: %v", err)
+	}
+}
+
+func TestBuildShadowsocks_2022PlaceholderKeyLength(t *testing.T) {
+	inbound := &coreConf.InboundDetourConfig{}
+	info128 := &panel.NodeInfo{
+		Type: "shadowsocks",
+		Protocol: &panel.Protocol{
+			Cipher:    "2022-blake3-aes-128-gcm",
+			ServerKey: base64.StdEncoding.EncodeToString([]byte("1234567890123456")),
+		},
+	}
+	if err := buildShadowsocks(info128, inbound); err != nil {
+		t.Fatalf("buildShadowsocks failed for aes-128-gcm: %v", err)
+	}
+
+	var settings coreConf.ShadowsocksServerConfig
+	if err := json.Unmarshal([]byte(*inbound.Settings), &settings); err != nil {
+		t.Fatalf("failed to unmarshal settings: %v", err)
+	}
+	if len(settings.Users) != 1 {
+		t.Fatalf("expected 1 user, got %d", len(settings.Users))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(settings.Users[0].Password)
+	if err != nil {
+		t.Fatalf("failed to decode placeholder user password: %v", err)
+	}
+	if len(decoded) != 16 {
+		t.Fatalf("expected 16-byte decoded key for aes-128-gcm, got %d bytes", len(decoded))
+	}
+
+	info256 := &panel.NodeInfo{
+		Type: "shadowsocks",
+		Protocol: &panel.Protocol{
+			Cipher:    "2022-blake3-aes-256-gcm",
+			ServerKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		},
+	}
+	inbound256 := &coreConf.InboundDetourConfig{}
+	if err := buildShadowsocks(info256, inbound256); err != nil {
+		t.Fatalf("buildShadowsocks failed for aes-256-gcm: %v", err)
+	}
+	var settings256 coreConf.ShadowsocksServerConfig
+	if err := json.Unmarshal([]byte(*inbound256.Settings), &settings256); err != nil {
+		t.Fatalf("failed to unmarshal settings: %v", err)
+	}
+	decoded256, err := base64.StdEncoding.DecodeString(settings256.Users[0].Password)
+	if err != nil {
+		t.Fatalf("failed to decode placeholder user password: %v", err)
+	}
+	if len(decoded256) != 32 {
+		t.Fatalf("expected 32-byte decoded key for aes-256-gcm, got %d bytes", len(decoded256))
 	}
 }
