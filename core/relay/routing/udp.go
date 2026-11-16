@@ -185,6 +185,9 @@ func StartUDPListenerLoop(
 					continue
 				}
 				transport.TuneTCPConn(stream)
+				if gamingMode {
+					transport.SetSocketQoS(stream)
+				}
 				_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
 				proto := RouteProtoUDP
 				if gamingMode {
@@ -215,6 +218,7 @@ func StartUDPListenerLoop(
 					// Attempt to claim twin stream for multi-path anti-jitter replication
 					if twin, tErr := claimStreamFn(500 * time.Millisecond); tErr == nil && twin != nil {
 						transport.TuneTCPConn(twin)
+						transport.SetSocketQoS(twin)
 						_ = twin.SetWriteDeadline(time.Now().Add(2 * time.Second))
 						if err := WriteRoutingHeader(twin, RouteProtoUDPGaming, uint16(targetPort)); err == nil {
 							if _, kErr := twin.Write(sessKey[:]); kErr == nil {
@@ -350,6 +354,7 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 	defer stream.Close()
 
 	transport.TuneTCPConn(stream)
+	transport.SetSocketQoS(stream)
 	var sessKey [8]byte
 	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.ReadFull(stream, sessKey[:]); err != nil {

@@ -49,12 +49,24 @@ func attachSocketBPFProtocolFilter(pc net.PacketConn, proto byte) error {
 	}
 	return sockErr
 }
-// SetSocketQoS marks IP_TOS = 0xB8 (DSCP 46 Expedited Forwarding) on Linux to prioritize game datagrams.
+// SetSocketQoS marks IP_TOS = 0xB8 (DSCP 46 Expedited Forwarding) and SO_PRIORITY = 6
+// on Linux to prioritize game datagrams and low-latency tunnel streams in kernel queues.
 func SetSocketQoS(conn any) {
+	if c, ok := conn.(net.Conn); ok {
+		for _, tc := range ExtractTCPConns(c) {
+			if raw, err := tc.SyscallConn(); err == nil {
+				_ = raw.Control(func(fd uintptr) {
+					_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TOS, 0xB8)
+					_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PRIORITY, 6)
+				})
+			}
+		}
+	}
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			_ = raw.Control(func(fd uintptr) {
 				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TOS, 0xB8)
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PRIORITY, 6)
 			})
 		}
 	}
