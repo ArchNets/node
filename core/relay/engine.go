@@ -197,7 +197,7 @@ func (e *Engine) Start() error {
 		}
 		dataShards := e.cfg.KCPDataShards
 		parityShards := e.cfg.KCPParityShards
-		if dataShards <= 0 && parityShards <= 0 && e.cfg.Transport != "l3-rudp-fec" {
+		if dataShards == 0 && parityShards == 0 && e.cfg.Transport != "l3-rudp-fec" {
 			for _, f := range e.cfg.Forwarders {
 				if f.GamingMode {
 					dataShards = 10
@@ -205,6 +205,10 @@ func (e *Engine) Start() error {
 					break
 				}
 			}
+		}
+		if dataShards < 0 || parityShards < 0 {
+			dataShards = 0
+			parityShards = 0
 		}
 		if dataShards > 0 && parityShards > 0 && mtu > 1312 {
 			mtu -= transport.FECOverhead
@@ -577,7 +581,7 @@ func (e *Engine) startL3RawPump() error {
 
 	dataShards := e.cfg.KCPDataShards
 	parityShards := e.cfg.KCPParityShards
-	if dataShards <= 0 && parityShards <= 0 && e.cfg.Transport != "l3-rudp-fec" {
+	if dataShards == 0 && parityShards == 0 && e.cfg.Transport != "l3-rudp-fec" {
 		for _, f := range e.cfg.Forwarders {
 			if f.GamingMode {
 				dataShards = 10
@@ -585,6 +589,10 @@ func (e *Engine) startL3RawPump() error {
 				break
 			}
 		}
+	}
+	if dataShards < 0 || parityShards < 0 {
+		dataShards = 0
+		parityShards = 0
 	}
 	if dataShards > 0 && parityShards > 0 {
 		if fecConn, fErr := transport.NewFECPacketConnWithSecret(rawConn, dataShards, parityShards, e.cfg.Password); fErr == nil {
