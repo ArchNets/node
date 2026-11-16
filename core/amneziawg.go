@@ -852,14 +852,14 @@ func (w *AmneziaWGCore) setupNAT() error {
 			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
 		}
 
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName))
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName))
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName))
 		}
 	}
 
@@ -971,9 +971,9 @@ func (w *AmneziaWGCore) teardownNAT() {
 	if w.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", w.InterfaceName))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type port-unreachable -j DROP", w.InterfaceName))
 	}
 
 	// Always clean up MASQUERADE (added in both paths)

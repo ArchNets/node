@@ -977,14 +977,14 @@ func (o *OpenVPNCore) setupNAT() error {
 			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
 		}
 
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -i %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -i %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName))
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 2 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -o %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -o %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName))
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -I OUTPUT 1 -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -o %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -o %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName))
 		}
 	}
 
@@ -1100,9 +1100,9 @@ func (o *OpenVPNCore) teardownNAT() {
 	if o.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", o.InterfaceName))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type destination-unreachable -j DROP", o.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -o %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -o %s -p icmp --icmp-type port-unreachable -j DROP", o.InterfaceName))
 	}
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", subnet, defaultIface))
