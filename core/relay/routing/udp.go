@@ -133,9 +133,13 @@ func StartL3DirectUDPForwarder(
 	var sessionsMu sync.Mutex
 	sessions := make(map[string]*directSess)
 
-	// Session idle reaper
+	const l3DirectIdleTimeout = 10 * time.Minute
+	raddr := &net.UDPAddr{IP: net.ParseIP(tunPeerIP), Port: targetPort}
+	laddr := &net.UDPAddr{IP: net.ParseIP(tunLocalIP), Port: 0}
+
+	// Session idle reaper (10-minute timeout for stable gaming sessions)
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -151,7 +155,7 @@ func StartL3DirectUDPForwarder(
 				now := time.Now().Unix()
 				sessionsMu.Lock()
 				for k, s := range sessions {
-					if now-s.lastActive.Load() > int64(UDPSessionIdleTime/time.Second) {
+					if now-s.lastActive.Load() > int64(l3DirectIdleTimeout/time.Second) {
 						_ = s.tunConn.Close()
 						delete(sessions, k)
 					}
@@ -160,9 +164,6 @@ func StartL3DirectUDPForwarder(
 			}
 		}
 	}()
-
-	raddr := &net.UDPAddr{IP: net.ParseIP(tunPeerIP), Port: targetPort}
-	laddr := &net.UDPAddr{IP: net.ParseIP(tunLocalIP), Port: 0}
 
 	go func() {
 		buf := make([]byte, 65536)
@@ -228,9 +229,15 @@ func StartL3DirectUDPForwarder(
 
 					downBuf := make([]byte, 65536)
 					for {
-						_ = s.tunConn.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
-						nr, _, rErr := s.tunConn.ReadFrom(downBuf)
+						_ = s.tunConn.SetReadDeadline(time.Now().Add(l3DirectIdleTimeout))
+						nr, rErr := s.tunConn.Read(downBuf)
 						if rErr != nil {
+							if netErr, ok := rErr.(net.Error); ok && netErr.Timeout() {
+								if time.Now().Unix()-s.lastActive.Load() > int64(l3DirectIdleTimeout/time.Second) {
+									return
+								}
+								continue
+							}
 							return
 						}
 						if nr <= 0 {
@@ -245,11 +252,9 @@ func StartL3DirectUDPForwarder(
 			}
 
 			sess.lastActive.Store(time.Now().Unix())
-			_ = sess.tunConn.SetWriteDeadline(time.Now().Add(150 * time.Millisecond))
 			if nw, wErr := sess.tunConn.Write(buf[:n]); wErr == nil && nw > 0 && stats != nil {
 				stats.AddUpload(int64(nw))
 			}
-			_ = sess.tunConn.SetWriteDeadline(time.Time{})
 		}
 	}()
 }
