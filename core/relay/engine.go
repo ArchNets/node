@@ -1847,6 +1847,17 @@ func (e *Engine) telemetryLoop() {
 			if e.cfg.Role == "entry" && e.Stats.PoolIdleConnections.Load() > 0 {
 				_, _ = telemetry.MeasureLatency(e.ClaimReverseStream, e.Stats)
 			}
+			if fec, ok := e.l3RawConn.(*transport.FECPacketConn); ok {
+				data, parity, rec := fec.Stats()
+				if data > 0 || parity > 0 {
+					e.logger.WithFields(log.Fields{
+						"dataShards":   data,
+						"parityShards": parity,
+						"recovered":    rec,
+						"transport":    e.cfg.Transport,
+					}).Warn("[Relay] UDPspeeder Reed-Solomon FEC active on carrier")
+				}
+			}
 		case <-probeTicker.C:
 			if e.cfg.Role == "entry" && e.cfg.EnableProbe && e.Stats.PoolIdleConnections.Load() > 0 {
 				if sample, err := telemetry.RunBandwidthProbe(e.ClaimReverseStream, e.Stats, 2*time.Second); err == nil && e.cfg.OnProbeSample != nil {

@@ -174,6 +174,10 @@ type FECPacketConn struct {
 	pending       []fecRebuiltPacket
 	closed        atomic.Bool
 	closeCh       chan struct{}
+
+	StatsDataPackets      atomic.Uint64
+	StatsParityPackets    atomic.Uint64
+	StatsRecoveredPackets atomic.Uint64
 }
 
 type fecRebuiltPacket struct {
@@ -299,6 +303,7 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		binary.LittleEndian.PutUint16(c.sendFrame[4:6], h1)
 	}
 	n, err := c.below.WriteTo(c.sendFrame, addr)
+	c.StatsDataPackets.Add(1)
 	if c.headerMask != 0 {
 		h0 := binary.LittleEndian.Uint32(c.sendFrame[0:4]) ^ uint32(c.headerMask>>32)
 		h1 := binary.LittleEndian.Uint16(c.sendFrame[4:6]) ^ uint16(c.headerMask&0xFFFF)
@@ -354,6 +359,7 @@ func (c *FECPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 						binary.LittleEndian.PutUint16(c.sendFrame[4:6], h1)
 					}
 					_, _ = c.below.WriteTo(c.sendFrame, c.sendPeer)
+					c.StatsParityPackets.Add(1)
 					if c.headerMask != 0 {
 						h0 := binary.LittleEndian.Uint32(c.sendFrame[0:4]) ^ uint32(c.headerMask>>32)
 						h1 := binary.LittleEndian.Uint16(c.sendFrame[4:6]) ^ uint16(c.headerMask&0xFFFF)
@@ -570,6 +576,7 @@ func (c *FECPacketConn) absorb(raw []byte, addr net.Addr) ([]byte, bool) {
 							if sz >= 2 && int(sz) <= len(recShard) {
 								recPayload := append([]byte(nil), recShard[FECLenPrefix:int(sz)]...)
 								c.pending = append(c.pending, fecRebuiltPacket{data: recPayload, addr: set.addr})
+								c.StatsRecoveredPackets.Add(1)
 							}
 						}
 					}
@@ -605,6 +612,11 @@ func (c *FECPacketConn) discardShardsLocked() {
 			delete(c.shardSet, sID)
 		}
 	}
+}
+
+// Stats returns the cumulative number of data packets, parity packets, and recovered packets.
+func (c *FECPacketConn) Stats() (data, parity, recovered uint64) {
+	return c.StatsDataPackets.Load(), c.StatsParityPackets.Load(), c.StatsRecoveredPackets.Load()
 }
 
 func (c *FECPacketConn) Close() error {
