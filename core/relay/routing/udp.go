@@ -213,7 +213,7 @@ func StartUDPListenerLoop(
 
 				if gamingMode {
 					// Attempt to claim twin stream for multi-path anti-jitter replication
-					if twin, tErr := claimStreamFn(150 * time.Millisecond); tErr == nil && twin != nil {
+					if twin, tErr := claimStreamFn(500 * time.Millisecond); tErr == nil && twin != nil {
 						transport.TuneTCPConn(twin)
 						_ = twin.SetWriteDeadline(time.Now().Add(2 * time.Second))
 						if err := WriteRoutingHeader(twin, RouteProtoUDPGaming, uint16(targetPort)); err == nil {

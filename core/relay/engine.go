@@ -1195,7 +1195,7 @@ func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 			return nil, fmt.Errorf("timeout waiting for reverse pool connection")
 		case item := <-e.idlePool:
 			e.Stats.PoolIdleConnections.Add(-1)
-			if time.Since(item.createdAt) > 30*time.Minute || !transport.IsStreamAlive(item.conn) {
+			if time.Since(item.createdAt) > 5*time.Minute || !transport.IsStreamAlive(item.conn) {
 				_ = item.conn.Close()
 				continue
 			}

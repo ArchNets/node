@@ -107,7 +107,7 @@ func NewWireGuardCore(tag string, port int, address string, interfaceName string
 	}
 
 	if mtu == 0 {
-		mtu = 1420 // Default WireGuard MTU
+		mtu = 1280 // Default WireGuard MTU for safe fragmentation-free tunneling
 	}
 
 	if interfaceName == "" {

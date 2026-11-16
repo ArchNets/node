@@ -135,7 +135,7 @@ func NewAmneziaWGCore(tag string, port int, address string, interfaceName string
 	publicKey := privateKey.PublicKey()
 
 	if mtu == 0 {
-		mtu = 1420
+		mtu = 1280
 	}
 
 	if interfaceName == "" {
