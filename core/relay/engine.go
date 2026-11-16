@@ -171,8 +171,8 @@ func NewEngine(cfg Config) *Engine {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	poolCap := cfg.MinHeldConnections * 4
-	if poolCap < 32 {
-		poolCap = 32
+	if poolCap < 64 {
+		poolCap = 64
 	}
 
 	return &Engine{
@@ -181,7 +181,7 @@ func NewEngine(cfg Config) *Engine {
 		ctx:         ctx,
 		cancel:      cancel,
 		idlePool:    make(chan pooledStream, poolCap),
-		replenishCh: make(chan struct{}, 1),
+		replenishCh: make(chan struct{}, 64),
 		logger:      cfg.Logger,
 	}
 }
@@ -1411,10 +1411,10 @@ func (e *Engine) logDialFailure(err error) {
 
 func (e *Engine) exitPoolLoop() {
 	defer e.wg.Done()
-	tickDuration := 500 * time.Millisecond
+	tickDuration := 100 * time.Millisecond
 	if e.cfg.TunnelID >= 1000 {
-		// Benchmark sandbox instances: fast 250ms ticker so probe phases never starve
-		tickDuration = 250 * time.Millisecond
+		// Benchmark sandbox instances: fast 100ms ticker so probe phases never starve
+		tickDuration = 100 * time.Millisecond
 	}
 	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
@@ -1479,6 +1479,15 @@ func (e *Engine) exitPoolLoop() {
 		}
 
 		minHeld := int64(e.cfg.MinHeldConnections)
+		if minHeld < 16 && len(e.cfg.Forwarders) > 0 {
+			minHeld = 16
+		}
+		for _, f := range e.cfg.Forwarders {
+			if f.GamingMode && minHeld < 24 {
+				minHeld = 24
+				break
+			}
+		}
 		var current int64
 		if e.isDirect() {
 			current = e.Stats.PoolIdleConnections.Load() + dialingCount.Load()
