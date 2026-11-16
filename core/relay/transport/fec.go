@@ -466,6 +466,10 @@ func (c *FECPacketConn) absorb(raw []byte, addr net.Addr) ([]byte, bool) {
 	c.recvMu.Lock()
 	defer c.recvMu.Unlock()
 
+	if c.closed.Load() || c.shardSet == nil {
+		return nil, false
+	}
+
 	in := fecPacket(raw)
 	seqid := in.seqid()
 	flag := in.flag()
@@ -502,6 +506,9 @@ func (c *FECPacketConn) absorb(raw []byte, addr net.Addr) ([]byte, bool) {
 		}
 	}
 
+	if c.shardSet == nil {
+		c.shardSet = make(map[uint32]*fecShardSet)
+	}
 	shardID := seqid / uint32(c.totalShards)
 	set, exists := c.shardSet[shardID]
 	if !exists {
@@ -628,7 +635,7 @@ func (c *FECPacketConn) Close() error {
 				putFECShard([]byte(pkt))
 			}
 		}
-		c.shardSet = nil
+		c.shardSet = make(map[uint32]*fecShardSet)
 		c.recvMu.Unlock()
 		return c.below.Close()
 	}
