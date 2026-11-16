@@ -32,6 +32,7 @@ type WireGuardCore struct {
 
 	wgClient   *wgctrl.Client
 	peers      sync.Map // map[string]*WireGuardPeer (key: UUID)
+	keyToPeer  sync.Map // map[string]*WireGuardPeer (key: PublicKey.String())
 	users      *WGUserMap
 	limiterRef *limiter.Limiter
 	running    atomic.Bool
@@ -269,6 +270,7 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		}
 
 		w.peers.Store(user.Uuid, peer)
+		w.keyToPeer.Store(peer.PublicKey.String(), peer)
 		w.users.uuidToID[user.Uuid] = user.Id
 		w.users.idToUUID[user.Id] = user.Uuid
 		w.users.ipToUID[assignedIP] = user.Id
@@ -315,6 +317,7 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 			if peer, ok := w.peers.Load(uuid); ok {
 				wgPeer := peer.(*WireGuardPeer)
 				assignedIP = wgPeer.IP
+				w.keyToPeer.Delete(wgPeer.PublicKey.String())
 				removedPeers = append(removedPeers, wgtypes.PeerConfig{
 					PublicKey: wgPeer.PublicKey,
 					Remove:    true,
@@ -595,18 +598,14 @@ func (w *WireGuardCore) collectStats() {
 	var newlyActive bool
 
 	for _, peer := range device.Peers {
-		// Find the user ID for this peer
+		// Find the user ID for this peer in O(1) time
 		var uid int
 		var assignedIP string
-		w.peers.Range(func(key, value interface{}) bool {
-			wgPeer := value.(*WireGuardPeer)
-			if wgPeer.PublicKey == peer.PublicKey {
-				uid = wgPeer.UID
-				assignedIP = wgPeer.IP
-				return false
-			}
-			return true
-		})
+		if val, ok := w.keyToPeer.Load(peer.PublicKey.String()); ok {
+			wgPeer := val.(*WireGuardPeer)
+			uid = wgPeer.UID
+			assignedIP = wgPeer.IP
+		}
 
 		if uid == 0 {
 			continue // Unknown peer

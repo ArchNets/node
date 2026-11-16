@@ -88,6 +88,7 @@ type AmneziaWGCore struct {
 	DisableCookies         bool
 
 	peers      sync.Map // map[string]*WireGuardPeer (key: UUID)
+	keyToPeer  sync.Map // map[string]*WireGuardPeer (key: PublicKey.String())
 	users      *WGUserMap
 	limiterRef *limiter.Limiter
 	running    atomic.Bool
@@ -291,6 +292,7 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 			IP:        assignedIP,
 		}
 		w.peers.Store(user.Uuid, peer)
+		w.keyToPeer.Store(peerPublicKey.String(), peer)
 		w.users.uuidToID[user.Uuid] = user.Id
 		w.users.idToUUID[user.Id] = user.Uuid
 		w.users.ipToUID[assignedIP] = user.Id
@@ -337,6 +339,7 @@ func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 				if wgPeer, ok := peer.(*WireGuardPeer); ok && wgPeer.IP != "" {
 					delete(w.users.ipToUID, wgPeer.IP)
 					UnregisterTunnelUser(wgPeer.IP)
+					w.keyToPeer.Delete(wgPeer.PublicKey.String())
 				}
 			}
 			w.peers.Delete(uuid)
@@ -597,18 +600,14 @@ func (w *AmneziaWGCore) collectStats() {
 		tx, _ := strconv.ParseInt(txStr, 10, 64)
 		handshake, _ := strconv.ParseInt(handshakeStr, 10, 64)
 
-		// Find user by public key
+		// Find user by public key in O(1) time
 		var uid int
 		var assignedIP string
-		w.peers.Range(func(key, value interface{}) bool {
-			peer := value.(*WireGuardPeer)
-			if peer.PublicKey.String() == pubKey {
-				uid = peer.UID
-				assignedIP = peer.IP
-				return false
-			}
-			return true
-		})
+		if val, ok := w.keyToPeer.Load(pubKey); ok {
+			peer := val.(*WireGuardPeer)
+			uid = peer.UID
+			assignedIP = peer.IP
+		}
 
 		if uid == 0 {
 			continue

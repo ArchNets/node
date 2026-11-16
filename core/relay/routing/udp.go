@@ -130,8 +130,7 @@ func StartL3DirectUDPForwarder(
 		lastActive atomic.Int64
 	}
 
-	var sessionsMu sync.Mutex
-	sessions := make(map[string]*directSess)
+	var sessions sync.Map // key: string, value: *directSess
 
 	const l3DirectIdleTimeout = 10 * time.Minute
 	raddr := &net.UDPAddr{IP: net.ParseIP(tunPeerIP), Port: targetPort}
@@ -144,23 +143,22 @@ func StartL3DirectUDPForwarder(
 		for {
 			select {
 			case <-ctx.Done():
-				sessionsMu.Lock()
-				for k, s := range sessions {
-					_ = s.tunConn.Close()
-					delete(sessions, k)
-				}
-				sessionsMu.Unlock()
+				sessions.Range(func(k, v any) bool {
+					_ = v.(*directSess).tunConn.Close()
+					sessions.Delete(k)
+					return true
+				})
 				return
 			case <-ticker.C:
 				now := time.Now().Unix()
-				sessionsMu.Lock()
-				for k, s := range sessions {
+				sessions.Range(func(k, v any) bool {
+					s := v.(*directSess)
 					if now-s.lastActive.Load() > int64(l3DirectIdleTimeout/time.Second) {
 						_ = s.tunConn.Close()
-						delete(sessions, k)
+						sessions.Delete(k)
 					}
-				}
-				sessionsMu.Unlock()
+					return true
+				})
 			}
 		}
 	}()
@@ -182,11 +180,11 @@ func StartL3DirectUDPForwarder(
 			}
 
 			key := clientAddr.String()
-			sessionsMu.Lock()
-			sess, exists := sessions[key]
-			sessionsMu.Unlock()
-
-			if !exists {
+			val, exists := sessions.Load(key)
+			var sess *directSess
+			if exists {
+				sess = val.(*directSess)
+			} else {
 				tunUDP, dErr := net.DialUDP("udp", laddr, raddr)
 				if dErr != nil {
 					log.WithFields(log.Fields{
@@ -208,47 +206,45 @@ func StartL3DirectUDPForwarder(
 				}
 				sess.lastActive.Store(time.Now().Unix())
 
-				sessionsMu.Lock()
-				sessions[key] = sess
-				sessionsMu.Unlock()
-
-				// Downlink reader: from peer on TUN interface -> back to client
-				go func(k string, s *directSess) {
-					if stats != nil {
-						stats.ActiveConnections.Add(1)
-						defer stats.ActiveConnections.Add(-1)
-					}
-					defer func() {
-						_ = s.tunConn.Close()
-						sessionsMu.Lock()
-						if sessions[k] == s {
-							delete(sessions, k)
+				actual, loaded := sessions.LoadOrStore(key, sess)
+				if loaded {
+					_ = tunUDP.Close()
+					sess = actual.(*directSess)
+				} else {
+					// Downlink reader: from peer on TUN interface -> back to client
+					go func(k string, s *directSess) {
+						if stats != nil {
+							stats.ActiveConnections.Add(1)
+							defer stats.ActiveConnections.Add(-1)
 						}
-						sessionsMu.Unlock()
-					}()
+						defer func() {
+							_ = s.tunConn.Close()
+							sessions.Delete(k)
+						}()
 
-					downBuf := make([]byte, 65536)
-					for {
-						_ = s.tunConn.SetReadDeadline(time.Now().Add(l3DirectIdleTimeout))
-						nr, rErr := s.tunConn.Read(downBuf)
-						if rErr != nil {
-							if netErr, ok := rErr.(net.Error); ok && netErr.Timeout() {
-								if time.Now().Unix()-s.lastActive.Load() > int64(l3DirectIdleTimeout/time.Second) {
-									return
+						downBuf := make([]byte, 65536)
+						for {
+							_ = s.tunConn.SetReadDeadline(time.Now().Add(l3DirectIdleTimeout))
+							nr, rErr := s.tunConn.Read(downBuf)
+							if rErr != nil {
+								if netErr, ok := rErr.(net.Error); ok && netErr.Timeout() {
+									if time.Now().Unix()-s.lastActive.Load() > int64(l3DirectIdleTimeout/time.Second) {
+										return
+									}
+									continue
 								}
+								return
+							}
+							if nr <= 0 {
 								continue
 							}
-							return
+							s.lastActive.Store(time.Now().Unix())
+							if nw, wErr := udpConn.WriteToUDP(downBuf[:nr], s.clientAddr); wErr == nil && nw > 0 && stats != nil {
+								stats.AddDownload(int64(nw))
+							}
 						}
-						if nr <= 0 {
-							continue
-						}
-						s.lastActive.Store(time.Now().Unix())
-						if nw, wErr := udpConn.WriteToUDP(downBuf[:nr], s.clientAddr); wErr == nil && nw > 0 && stats != nil {
-							stats.AddDownload(int64(nw))
-						}
-					}
-				}(key, sess)
+					}(key, sess)
+				}
 			}
 
 			sess.lastActive.Store(time.Now().Unix())
