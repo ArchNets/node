@@ -1294,6 +1294,19 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 
 	e.udpForwarderMap.Store(listenPort, udpConn)
 
+	if e.isL3DirectTUNMode() && e.l3TunDev != nil {
+		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
+		tunPeerIP := e.l3TunDev.PeerIP()
+		e.logger.WithFields(log.Fields{
+			"listenPort": listenPort,
+			"targetPort": targetPort,
+			"tunPeer":    tunPeerIP,
+			"gaming":     gamingMode,
+		}).Info("[Relay] Routing UDP forwarder directly over L3 TUN interface (zero reverse pool contention)")
+		routing.StartL3DirectUDPForwarder(e.ctx, udpConn, tunLocalIP, tunPeerIP, targetPort, e.Stats, gamingMode)
+		return nil
+	}
+
 	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats, gamingMode)
 	return nil
 }

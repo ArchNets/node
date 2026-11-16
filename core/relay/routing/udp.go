@@ -107,6 +107,153 @@ func (d *udpSeqDeduplicator) checkAndRecord(seq uint32) bool {
 	return true
 }
 
+// StartL3DirectUDPForwarder forwards client UDP datagrams directly over the virtual L3 TUN interface
+// to tunPeerIP:targetPort without claiming any reverse pool TCP streams.
+// This completely isolates game UDP traffic from port 443 web proxy congestion and eliminates TCP HOL blocking.
+func StartL3DirectUDPForwarder(
+	ctx context.Context,
+	udpConn *net.UDPConn,
+	tunLocalIP, tunPeerIP string,
+	targetPort int,
+	stats *telemetry.Stats,
+	gamingMode bool,
+) {
+	if gamingMode {
+		_ = udpConn.SetReadBuffer(8 * 1024 * 1024)
+		_ = udpConn.SetWriteBuffer(8 * 1024 * 1024)
+		transport.SetSocketQoS(udpConn)
+	}
+
+	type directSess struct {
+		tunConn    *net.UDPConn
+		clientAddr *net.UDPAddr
+		lastActive atomic.Int64
+	}
+
+	var sessionsMu sync.Mutex
+	sessions := make(map[string]*directSess)
+
+	// Session idle reaper
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				sessionsMu.Lock()
+				for k, s := range sessions {
+					_ = s.tunConn.Close()
+					delete(sessions, k)
+				}
+				sessionsMu.Unlock()
+				return
+			case <-ticker.C:
+				now := time.Now().Unix()
+				sessionsMu.Lock()
+				for k, s := range sessions {
+					if now-s.lastActive.Load() > int64(UDPSessionIdleTime/time.Second) {
+						_ = s.tunConn.Close()
+						delete(sessions, k)
+					}
+				}
+				sessionsMu.Unlock()
+			}
+		}
+	}()
+
+	raddr := &net.UDPAddr{IP: net.ParseIP(tunPeerIP), Port: targetPort}
+	laddr := &net.UDPAddr{IP: net.ParseIP(tunLocalIP), Port: 0}
+
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, clientAddr, err := udpConn.ReadFromUDP(buf)
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					continue
+				}
+			}
+			if n <= 0 || n > MaxUDPFrameSize {
+				continue
+			}
+
+			key := clientAddr.String()
+			sessionsMu.Lock()
+			sess, exists := sessions[key]
+			sessionsMu.Unlock()
+
+			if !exists {
+				tunUDP, dErr := net.DialUDP("udp", laddr, raddr)
+				if dErr != nil {
+					log.WithFields(log.Fields{
+						"target": raddr.String(),
+						"err":    dErr,
+					}).Warn("[Relay] Direct L3 UDP dial to peer failed")
+					continue
+				}
+				_ = tunUDP.SetReadBuffer(8 * 1024 * 1024)
+				_ = tunUDP.SetWriteBuffer(8 * 1024 * 1024)
+				if gamingMode {
+					transport.SetSocketQoS(tunUDP)
+				}
+
+				addrCopy := *clientAddr
+				sess = &directSess{
+					tunConn:    tunUDP,
+					clientAddr: &addrCopy,
+				}
+				sess.lastActive.Store(time.Now().Unix())
+
+				sessionsMu.Lock()
+				sessions[key] = sess
+				sessionsMu.Unlock()
+
+				// Downlink reader: from peer on TUN interface -> back to client
+				go func(k string, s *directSess) {
+					if stats != nil {
+						stats.ActiveConnections.Add(1)
+						defer stats.ActiveConnections.Add(-1)
+					}
+					defer func() {
+						_ = s.tunConn.Close()
+						sessionsMu.Lock()
+						if sessions[k] == s {
+							delete(sessions, k)
+						}
+						sessionsMu.Unlock()
+					}()
+
+					downBuf := make([]byte, 65536)
+					for {
+						_ = s.tunConn.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+						nr, _, rErr := s.tunConn.ReadFrom(downBuf)
+						if rErr != nil {
+							return
+						}
+						if nr <= 0 {
+							continue
+						}
+						s.lastActive.Store(time.Now().Unix())
+						if nw, wErr := udpConn.WriteToUDP(downBuf[:nr], s.clientAddr); wErr == nil && nw > 0 && stats != nil {
+							stats.AddDownload(int64(nw))
+						}
+					}
+				}(key, sess)
+			}
+
+			sess.lastActive.Store(time.Now().Unix())
+			_ = sess.tunConn.SetWriteDeadline(time.Now().Add(150 * time.Millisecond))
+			if nw, wErr := sess.tunConn.Write(buf[:n]); wErr == nil && nw > 0 && stats != nil {
+				stats.AddUpload(int64(nw))
+			}
+			_ = sess.tunConn.SetWriteDeadline(time.Time{})
+		}
+	}()
+}
+
 // StartUDPListenerLoop binds UDP listener on Entry and frames datagrams over claimed streams.
 func StartUDPListenerLoop(
 	ctx context.Context,
