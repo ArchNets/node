@@ -608,14 +608,20 @@ func (e *Engine) startL3RawPump() error {
 	if peerIPStr == "" && len(e.cfg.FloatingIPs) > 0 {
 		peerIPStr = strings.TrimSpace(e.cfg.FloatingIPs[0])
 	}
-	if parsedPeer := net.ParseIP(peerIPStr); parsedPeer != nil {
-		e.l3PeerAddr.Store(&net.UDPAddr{IP: parsedPeer, Port: e.cfg.CarrierPort})
+	if e.cfg.Role == "exit" {
+		if parsedPeer := net.ParseIP(peerIPStr); parsedPeer != nil {
+			e.l3PeerAddr.Store(&net.UDPAddr{IP: parsedPeer, Port: e.cfg.CarrierPort})
+		}
 	}
 
 	if e.cfg.Role == "exit" {
 		e.wg.Add(1)
 		go func() {
 			defer e.wg.Done()
+			// Send immediate initial keepalive to punch NAT and register with Entry
+			if dst := e.l3PeerAddr.Load(); dst != nil && rawConn != nil {
+				_, _ = rawConn.WriteTo([]byte{0x00}, dst)
+			}
 			ticker := time.NewTicker(2 * time.Second)
 			defer ticker.Stop()
 			for {
@@ -655,7 +661,7 @@ func (e *Engine) startL3RawPump() error {
 			}
 			if n <= 1 {
 				// Keepalive packet (used to punch NAT holes and learn peer address)
-				if from != nil && e.l3PeerAddr.Load() == nil {
+				if from != nil && (e.cfg.Role == "entry" || e.l3PeerAddr.Load() == nil) {
 					switch a := from.(type) {
 					case *net.UDPAddr:
 						e.l3PeerAddr.Store(a)
@@ -666,28 +672,10 @@ func (e *Engine) startL3RawPump() error {
 			if e.l3TunDev != nil {
 				if err := e.l3TunDev.InjectWirePacket(buf[:n]); err == nil {
 					e.Stats.AddDownload(int64(n))
-					if from != nil && e.l3PeerAddr.Load() == nil {
+					if from != nil && (e.cfg.Role == "entry" || e.l3PeerAddr.Load() == nil) {
 						switch a := from.(type) {
 						case *net.UDPAddr:
-							port := a.Port
-							if port <= 0 {
-								port = e.cfg.CarrierPort
-							}
-							e.l3PeerAddr.Store(&net.UDPAddr{IP: a.IP, Port: port})
-						case *net.IPAddr:
-							e.l3PeerAddr.Store(&net.UDPAddr{IP: a.IP, Port: e.cfg.CarrierPort})
-						default:
-							host, portStr, sErr := net.SplitHostPort(from.String())
-							if sErr != nil {
-								host = from.String()
-							}
-							port := e.cfg.CarrierPort
-							if pNum, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil && pNum > 0 {
-								port = int(pNum)
-							}
-							if ip := net.ParseIP(host); ip != nil {
-								e.l3PeerAddr.Store(&net.UDPAddr{IP: ip, Port: port})
-							}
+							e.l3PeerAddr.Store(a)
 						}
 					}
 				}
