@@ -485,7 +485,20 @@ func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {
 	go c.runTunnelBenchmarkSweep(ctx, t, newSCtx)
 }
 
+var (
+	lastImmediateProbeMu    sync.Mutex
+	lastImmediateProbeTimes = make(map[int]time.Time)
+)
+
 func (c *TunnelController) runImmediateBandwidthProbe(t panel.TunnelInfo) {
+	lastImmediateProbeMu.Lock()
+	if last, ok := lastImmediateProbeTimes[t.Id]; ok && time.Since(last) < 30*time.Second {
+		lastImmediateProbeMu.Unlock()
+		return
+	}
+	lastImmediateProbeTimes[t.Id] = time.Now()
+	lastImmediateProbeMu.Unlock()
+
 	if c.relayDriver == nil {
 		return
 	}
