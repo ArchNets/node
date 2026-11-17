@@ -420,6 +420,11 @@ func (c *TunnelController) isScanRunning(tunnelId int) bool {
 	return entryRunning || exitRunning
 }
 
+var (
+	lastExecutedProbeTimes   = make(map[int]int64)
+	lastExecutedProbeTimesMu sync.Mutex
+)
+
 func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {
 	cmd := t.ScanCommand
 	if cmd == nil {
@@ -427,6 +432,21 @@ func (c *TunnelController) handleScanCommand(t panel.TunnelInfo) {
 	}
 
 	if cmd.ProbeNow {
+		if t.Role != "entry" {
+			return
+		}
+		lastExecutedProbeTimesMu.Lock()
+		if cmd.StartTime > 0 && cmd.StartTime <= lastExecutedProbeTimes[t.Id] {
+			lastExecutedProbeTimesMu.Unlock()
+			return
+		}
+		if cmd.StartTime > 0 {
+			lastExecutedProbeTimes[t.Id] = cmd.StartTime
+		} else {
+			lastExecutedProbeTimes[t.Id] = time.Now().Unix()
+		}
+		lastExecutedProbeTimesMu.Unlock()
+
 		go c.runImmediateBandwidthProbe(t)
 		return
 	}

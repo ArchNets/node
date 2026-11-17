@@ -950,6 +950,7 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	transport.TuneTCPConn(conn)
 	e.activeStreams.Store(conn, struct{}{})
 	defer func() {
 		_ = conn.Close()
@@ -967,18 +968,46 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 		binary.BigEndian.PutUint16(frameBuf[:2], uint16(len(wire)))
 		copy(frameBuf[2:], wire)
 		e.Stats.AddUpload(int64(len(wire)))
+		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 		_, err := conn.Write(frameBuf[:2+len(wire)])
+		_ = conn.SetWriteDeadline(time.Time{})
 		return err
 	})
+
+	// Background in-band keepalive ticker so stateful firewalls never drop idle TCP NAT state
+	heartbeatDone := make(chan struct{})
+	defer close(heartbeatDone)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		var pingFrame [2]byte // 0x00 0x00 represents keepalive ping
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_, _ = conn.Write(pingFrame[:])
+				_ = conn.SetWriteDeadline(time.Time{})
+				writeMu.Unlock()
+			}
+		}
+	}()
 
 	var lenBuf [2]byte
 	wireBuf := make([]byte, 65536)
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 			return
 		}
 		pktLen := int(binary.BigEndian.Uint16(lenBuf[:]))
-		if pktLen <= 0 || pktLen > 65535 {
+		if pktLen == 0 {
+			// In-band heartbeat ping received, continue to maintain active session
+			continue
+		}
+		if pktLen > 65535 {
 			return
 		}
 		if _, err := io.ReadFull(conn, wireBuf[:pktLen]); err != nil {
