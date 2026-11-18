@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/archnets/node/core/relay"
+	"github.com/archnets/node/core/relay/routing"
 	"github.com/archnets/node/core/relay/telemetry"
 	"github.com/archnets/node/core/relay/transport"
 	log "github.com/sirupsen/logrus"
@@ -30,6 +31,13 @@ var (
 	testDebug      bool
 	testProbe      bool
 	testDuration   int
+	testFwdPort     int
+	testTargetPort  int
+	testFwdFlowMode string
+	testFwdRatio    float64
+	testFwdBurst    int
+	testFwdStrict   bool
+	testFwdStall    int
 	testPeer2      string
 )
 
@@ -73,6 +81,13 @@ func init() {
 	testTransportCmd.Flags().BoolVar(&testDebug, "debug", true, "Enable verbose debug logs")
 	testTransportCmd.Flags().BoolVar(&testProbe, "probe", true, "Run continuous speed probes once connected (entry role)")
 	testTransportCmd.Flags().IntVar(&testDuration, "duration", 0, "Automatically stop and exit after N seconds (0 = run until Ctrl+C)")
+	testTransportCmd.Flags().IntVar(&testFwdPort, "fwd-port", 0, "Forwarder listen port on entry (0 = none)")
+	testTransportCmd.Flags().IntVar(&testTargetPort, "target-port", 0, "Target port on exit (0 = none)")
+	testTransportCmd.Flags().StringVar(&testFwdFlowMode, "flow-mode", "bidirectional", "Forwarder flow mode: bidirectional, upload_only, download_only")
+	testTransportCmd.Flags().Float64Var(&testFwdRatio, "flow-ratio", 0.04, "Flow gate reverse ratio (default: 0.04)")
+	testTransportCmd.Flags().IntVar(&testFwdBurst, "flow-burst", 64, "Flow gate reverse burst in KB (default: 64)")
+	testTransportCmd.Flags().BoolVar(&testFwdStrict, "flow-strict", false, "Flow gate strict disconnect on limit")
+	testTransportCmd.Flags().IntVar(&testFwdStall, "flow-stall", 20, "Flow gate stall timeout in seconds (default: 20)")
 
 	command.AddCommand(testTransportCmd)
 }
@@ -154,6 +169,31 @@ func runTestTransport() {
 		certMode = "self"
 	}
 
+	var forwarders []routing.ForwarderRule
+	if testFwdPort > 0 && testTargetPort > 0 {
+		forwarders = []routing.ForwarderRule{
+			{
+				ID:               101,
+				Protocol:         "tcp",
+				ListenIP:         "0.0.0.0",
+				ListenPort:       testFwdPort,
+				TargetPort:       testTargetPort,
+				FlowMode:         testFwdFlowMode,
+				ReverseRatio:     testFwdRatio,
+				ReverseBurstKB:   testFwdBurst,
+				Strict:           testFwdStrict,
+				ThrottleStallSec: testFwdStall,
+			},
+		}
+		if os.Geteuid() == 0 {
+			fp := strconv.Itoa(testFwdPort)
+			_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-p", "tcp", "--dport", fp, "-j", "ACCEPT").Run()
+			defer func() {
+				_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-D", "INPUT", "-p", "tcp", "--dport", fp, "-j", "ACCEPT").Run()
+			}()
+		}
+	}
+
 	cfg := relay.Config{
 		TunnelID:           1, // Use 1 so logDialFailure prints all dial errors
 		Role:               testRole,
@@ -172,6 +212,7 @@ func runTestTransport() {
 		FisherConnections:  2,
 		MinHeldConnections: 4,
 		CertMode:           certMode,
+		Forwarders:         forwarders,
 		Logger:             log.WithField("transport", testTransport),
 	}
 

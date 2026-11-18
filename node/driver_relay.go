@@ -97,23 +97,52 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 	var forwarderRules []routing.ForwarderRule
 	for _, f := range t.Forwarders {
 		gaming := false
+		flowMode := "bidirectional"
+		reverseRatio := routing.DefaultReverseRatio
+		reverseBurstKB := routing.DefaultReverseBurstKB
+		strict := false
+		throttleStallSec := routing.DefaultThrottleStallSec
+
 		if f.Config != "" {
 			var fwdCfg struct {
-				Gaming bool `json:"gaming"`
+				Gaming           bool    `json:"gaming"`
+				FlowMode         string  `json:"flow_mode"`
+				ReverseRatio     float64 `json:"reverse_ratio"`
+				ReverseBurstKB   int     `json:"reverse_burst_kb"`
+				Strict           bool    `json:"strict"`
+				ThrottleStallSec int     `json:"throttle_stall_sec"`
 			}
 			if json.Unmarshal([]byte(f.Config), &fwdCfg) == nil {
 				gaming = fwdCfg.Gaming
+				if fwdCfg.FlowMode != "" {
+					flowMode = fwdCfg.FlowMode
+				}
+				if fwdCfg.ReverseRatio > 0 {
+					reverseRatio = fwdCfg.ReverseRatio
+				}
+				if fwdCfg.ReverseBurstKB > 0 {
+					reverseBurstKB = fwdCfg.ReverseBurstKB
+				}
+				strict = fwdCfg.Strict
+				if fwdCfg.ThrottleStallSec > 0 {
+					throttleStallSec = fwdCfg.ThrottleStallSec
+				}
 			}
 		}
 		forwarderRules = append(forwarderRules, routing.ForwarderRule{
-			ID:         f.Id,
-			Protocol:   f.Protocol,
-			ListenIP:   f.ListenIP,
-			ListenPort: f.ListenPort,
-			TargetIP:   f.TargetIP,
-			TargetPort: f.TargetPort,
-			PortRange:  f.PortRange,
-			GamingMode: gaming,
+			ID:               f.Id,
+			Protocol:         f.Protocol,
+			ListenIP:         f.ListenIP,
+			ListenPort:       f.ListenPort,
+			TargetIP:         f.TargetIP,
+			TargetPort:       f.TargetPort,
+			PortRange:        f.PortRange,
+			GamingMode:       gaming,
+			FlowMode:         flowMode,
+			ReverseRatio:     reverseRatio,
+			ReverseBurstKB:   reverseBurstKB,
+			Strict:           strict,
+			ThrottleStallSec: throttleStallSec,
 		})
 	}
 
@@ -344,6 +373,9 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 
 	// If existing engine is running and carrier settings are identical, update forwarders in-place without restarting
 	if old, ok := d.engines[t.Id]; ok && old != nil && old.IsAlive() && carrierSettingsEqual(old.Config(), cfg) {
+		if forwardersEqual(old.Config().Forwarders, forwarderRules) {
+			return nil
+		}
 		d.logger.WithFields(log.Fields{
 			"tunnelId": t.Id,
 			"role":     t.Role,
@@ -379,6 +411,28 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		"carrier":   carrierPort,
 	}).Info("[Relay] Native Go Relay Engine started")
 	return nil
+}
+
+func forwardersEqual(a, b []routing.ForwarderRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID ||
+			a[i].Protocol != b[i].Protocol ||
+			a[i].ListenPort != b[i].ListenPort ||
+			a[i].TargetPort != b[i].TargetPort ||
+			a[i].PortRange != b[i].PortRange ||
+			a[i].GamingMode != b[i].GamingMode ||
+			a[i].FlowMode != b[i].FlowMode ||
+			a[i].ReverseRatio != b[i].ReverseRatio ||
+			a[i].ReverseBurstKB != b[i].ReverseBurstKB ||
+			a[i].Strict != b[i].Strict ||
+			a[i].ThrottleStallSec != b[i].ThrottleStallSec {
+			return false
+		}
+	}
+	return true
 }
 
 func hasGamingForwarder(rules []routing.ForwarderRule) bool {

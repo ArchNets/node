@@ -52,6 +52,7 @@ type UDPSession struct {
 	WriteMu    sync.Mutex
 	gamingSeq  atomic.Uint32
 	rxDedup    udpSeqDeduplicator
+	gate       *FlowGate
 }
 
 // udpSeqDeduplicator prevents duplicate packet delivery when twin streams receive the same packet.
@@ -117,6 +118,7 @@ func StartL3DirectUDPForwarder(
 	targetPort int,
 	stats *telemetry.Stats,
 	gamingMode bool,
+	ruleOpt ...*ForwarderRule,
 ) {
 	if gamingMode {
 		_ = udpConn.SetReadBuffer(8 * 1024 * 1024)
@@ -124,10 +126,16 @@ func StartL3DirectUDPForwarder(
 		transport.SetSocketQoS(udpConn)
 	}
 
+	var rule *ForwarderRule
+	if len(ruleOpt) > 0 {
+		rule = ruleOpt[0]
+	}
+
 	type directSess struct {
 		tunConn    *net.UDPConn
 		clientAddr *net.UDPAddr
 		lastActive atomic.Int64
+		gate       *FlowGate
 	}
 
 	var sessions sync.Map // key: string, value: *directSess
@@ -200,9 +208,15 @@ func StartL3DirectUDPForwarder(
 				}
 
 				addrCopy := *clientAddr
+				var gate *FlowGate
+				if rule != nil && rule.FlowMode != "" && rule.FlowMode != "bidirectional" {
+					gate = NewFlowGate(*rule)
+					logGateActivationOnce(targetPort, rule.FlowMode)
+				}
 				sess = &directSess{
 					tunConn:    tunUDP,
 					clientAddr: &addrCopy,
+					gate:       gate,
 				}
 				sess.lastActive.Store(time.Now().Unix())
 
@@ -238,6 +252,19 @@ func StartL3DirectUDPForwarder(
 							if nr <= 0 {
 								continue
 							}
+							if s.gate != nil {
+								if rule.FlowMode == "upload_only" {
+									allowed, closeS := s.gate.CheckUDPReverse(nr)
+									if !allowed {
+										if closeS {
+											return
+										}
+										continue
+									}
+								} else if rule.FlowMode == "download_only" {
+									s.gate.AddAllowed(nr)
+								}
+							}
 							s.lastActive.Store(time.Now().Unix())
 							if nw, wErr := udpConn.WriteToUDP(downBuf[:nr], s.clientAddr); wErr == nil && nw > 0 && stats != nil {
 								stats.AddDownload(int64(nw))
@@ -247,6 +274,19 @@ func StartL3DirectUDPForwarder(
 				}
 			}
 
+			if sess.gate != nil {
+				if rule.FlowMode == "download_only" {
+					allowed, closeS := sess.gate.CheckUDPReverse(n)
+					if !allowed {
+						if closeS {
+							_ = sess.tunConn.Close()
+						}
+						continue
+					}
+				} else if rule.FlowMode == "upload_only" {
+					sess.gate.AddAllowed(n)
+				}
+			}
 			sess.lastActive.Store(time.Now().Unix())
 			if nw, wErr := sess.tunConn.Write(buf[:n]); wErr == nil && nw > 0 && stats != nil {
 				stats.AddUpload(int64(nw))
@@ -263,11 +303,16 @@ func StartUDPListenerLoop(
 	claimStreamFn func(timeout time.Duration) (net.Conn, error),
 	stats *telemetry.Stats,
 	gamingMode bool,
+	ruleOpt ...*ForwarderRule,
 ) {
 	if gamingMode {
 		_ = udpConn.SetReadBuffer(4 * 1024 * 1024)
 		_ = udpConn.SetWriteBuffer(4 * 1024 * 1024)
 		transport.SetSocketQoS(udpConn)
+	}
+	var rule *ForwarderRule
+	if len(ruleOpt) > 0 {
+		rule = ruleOpt[0]
 	}
 	var sessionsMu sync.Mutex
 	sessions := make(map[string]*UDPSession)
@@ -356,9 +401,15 @@ func StartUDPListenerLoop(
 				_ = stream.SetWriteDeadline(time.Time{})
 
 				addrCopy := *clientAddr
+				var gate *FlowGate
+				if rule != nil && rule.FlowMode == "download_only" {
+					gate = NewFlowGate(*rule)
+					logGateActivationOnce(targetPort, rule.FlowMode)
+				}
 				sess = &UDPSession{
 					Stream:     stream,
 					ClientAddr: &addrCopy,
+					gate:       gate,
 				}
 				sess.lastActive.Store(time.Now().Unix())
 
@@ -411,6 +462,10 @@ func StartUDPListenerLoop(
 							payload = payload[4:]
 						}
 
+						if sess.gate != nil && rule.FlowMode == "download_only" {
+							sess.gate.AddAllowed(len(payload))
+						}
+
 						if nw, err := udpConn.WriteToUDP(payload, sess.ClientAddr); err == nil && nw > 0 && stats != nil {
 							stats.AddDownload(int64(nw))
 						}
@@ -454,6 +509,16 @@ func StartUDPListenerLoop(
 				copy(frame[2:], buf[:n])
 			}
 
+			if sess.gate != nil && rule.FlowMode == "download_only" {
+				allowed, closeS := sess.gate.CheckUDPReverse(n)
+				if !allowed {
+					if closeS {
+						_ = sess.Stream.Close()
+					}
+					continue
+				}
+			}
+
 			sess.WriteMu.Lock()
 			sess.lastActive.Store(time.Now().Unix())
 			writeTimeout := 1 * time.Second
@@ -494,12 +559,18 @@ type exitGamingSession struct {
 	mu        sync.Mutex
 	streams   []net.Conn
 	closeOnce sync.Once
+	gate      *FlowGate
 }
 
 var exitGamingSessMap sync.Map // [8]byte -> *exitGamingSession
 
-func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats) {
+func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats, ruleOpt ...*ForwarderRule) {
 	defer stream.Close()
+
+	var rule *ForwarderRule
+	if len(ruleOpt) > 0 {
+		rule = ruleOpt[0]
+	}
 
 	transport.TuneTCPConn(stream)
 	transport.SetSocketQoS(stream)
@@ -532,14 +603,24 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 		_ = udpConn.SetWriteBuffer(4 * 1024 * 1024)
 		transport.SetSocketQoS(udpConn)
 
+		var gate *FlowGate
+		if rule != nil && rule.FlowMode == "upload_only" {
+			gate = NewFlowGate(*rule)
+			logGateActivationOnce(int(targetPort), rule.FlowMode)
+		}
+
 		newSess := &exitGamingSession{
 			key:     sessKey,
 			udpConn: udpConn,
 			streams: []net.Conn{stream},
+			gate:    gate,
 		}
 		actual, loaded := exitGamingSessMap.LoadOrStore(sessKey, newSess)
 		if loaded {
 			_ = udpConn.Close()
+			if gate != nil {
+				gate.Close()
+			}
 			sess = actual.(*exitGamingSession)
 			sess.mu.Lock()
 			sess.streams = append(sess.streams, stream)
@@ -551,6 +632,9 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 				defer func() {
 					exitGamingSessMap.Delete(gs.key)
 					_ = gs.udpConn.Close()
+					if gs.gate != nil {
+						gs.gate.Close()
+					}
 					gs.mu.Lock()
 					for _, st := range gs.streams {
 						_ = st.Close()
@@ -566,6 +650,15 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 					}
 					if n <= 0 || n > MaxUDPFrameSize {
 						continue
+					}
+					if gs.gate != nil && rule.FlowMode == "upload_only" {
+						allowed, closeS := gs.gate.CheckUDPReverse(n)
+						if !allowed {
+							if closeS {
+								return
+							}
+							continue
+						}
 					}
 					seq := gs.txSeq.Add(1)
 					frame := getUDPFrameBuffer(6 + n)
@@ -637,6 +730,9 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 			continue // Duplicate dropped; twin stream already delivered this packet!
 		}
 		data := payload[4:frameLen]
+		if sess.gate != nil && rule != nil && rule.FlowMode == "upload_only" {
+			sess.gate.AddAllowed(len(data))
+		}
 		_ = sess.udpConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if n, err := sess.udpConn.Write(data); err == nil && n > 0 && stats != nil {
 			stats.AddUpload(int64(n))
@@ -645,12 +741,24 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 }
 
 // HandleExitUDPForward handles exit UDP stream by un-framing datagrams to target UDP socket.
-func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats, gamingMode bool) {
+func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, stats *telemetry.Stats, gamingMode bool, ruleOpt ...*ForwarderRule) {
 	if gamingMode {
-		handleExitGamingUDPForward(stream, targetIP, targetPort, stats)
+		handleExitGamingUDPForward(stream, targetIP, targetPort, stats, ruleOpt...)
 		return
 	}
 	defer stream.Close()
+
+	var rule *ForwarderRule
+	if len(ruleOpt) > 0 {
+		rule = ruleOpt[0]
+	}
+
+	var gate *FlowGate
+	if rule != nil && rule.FlowMode == "upload_only" {
+		gate = NewFlowGate(*rule)
+		defer gate.Close()
+		logGateActivationOnce(int(targetPort), rule.FlowMode)
+	}
 
 	if targetIP == "" {
 		targetIP = "127.0.0.1"
@@ -707,6 +815,9 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 			}
 
 			_ = udpConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if gate != nil && rule.FlowMode == "upload_only" {
+				gate.AddAllowed(len(data))
+			}
 			if n, err := udpConn.Write(data); err == nil && n > 0 && stats != nil {
 				stats.AddUpload(int64(n))
 			}

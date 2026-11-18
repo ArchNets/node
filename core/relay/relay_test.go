@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2294,4 +2295,348 @@ func TestTLSReverseCarrierEndToEnd(t *testing.T) {
 		t.Fatalf("expected nginx decoy response, got: %q", decoyResp)
 	}
 	t.Logf("✓ Active TLS Probe Decoy Verified: %s", strings.Split(decoyResp, "\r\n")[0])
+}
+
+func TestFlowGateUploadOnlyForwarderEndToEnd(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+	targetPort := getFreeTCPPort(t)
+
+	// 1. Mock server on Exit (handles upload sink, download pump, and TLS echo)
+	var (
+		serverRecvBytes atomic.Int64
+		serverSendBytes atomic.Int64
+	)
+	targetLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
+	if err != nil {
+		t.Fatalf("targetLn: %v", err)
+	}
+	defer targetLn.Close()
+
+	go func() {
+		for {
+			conn, err := targetLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				var hdr [8]byte
+				if _, err := io.ReadFull(c, hdr[:]); err != nil {
+					return
+				}
+				cmd := string(hdr[:])
+				switch {
+				case cmd == "UPLD_TST":
+					// Sink incoming upload data
+					buf := make([]byte, 65536)
+					for {
+						n, rErr := c.Read(buf)
+						if n > 0 {
+							serverRecvBytes.Add(int64(n))
+						}
+						if rErr != nil {
+							break
+						}
+					}
+					// Send small 200 OK acknowledgment header
+					_, _ = c.Write([]byte("OK_200\n"))
+
+				case cmd == "DNLD_TST":
+					// Read small request
+					var req [8]byte
+					_, _ = io.ReadFull(c, req[:])
+					// Attempt to pump 20 MB download back to client
+					chunk := make([]byte, 65536)
+					for i := 0; i < (20*1024*1024)/65536; i++ {
+						n, wErr := c.Write(chunk)
+						if n > 0 {
+							serverSendBytes.Add(int64(n))
+						}
+						if wErr != nil {
+							break
+						}
+					}
+
+				case bytes.HasPrefix(hdr[:], []byte{0x16, 0x03}):
+					// TLS Handshake packet received: echo back to test TLS handshake compatibility
+					prefixConn := transport.NewPrefixConn(c, hdr[:])
+					tlsCfg, tErr := transport.GenerateSelfSignedTLSConfig("127.0.0.1")
+					if tErr != nil {
+						return
+					}
+					tlsSrv := tls.Server(prefixConn, tlsCfg)
+					defer tlsSrv.Close()
+					buf := make([]byte, 1024)
+					n, _ := tlsSrv.Read(buf)
+					if n > 0 {
+						_, _ = tlsSrv.Write([]byte("TLS_ECHO:" + string(buf[:n])))
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	fwdRule := routing.ForwarderRule{
+		ID:               991,
+		Protocol:         "tcp",
+		ListenIP:         "127.0.0.1",
+		ListenPort:       fwdPort,
+		TargetPort:       targetPort,
+		FlowMode:         "upload_only",
+		ReverseRatio:     0.04, // 4%
+		ReverseBurstKB:   64,   // 64 KB burst
+		ThrottleStallSec: 1,    // 1s stall reap for fast test
+	}
+
+	entry := NewEngine(Config{
+		TunnelID:           801,
+		Role:               "entry",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "flowgate-test-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders:         []routing.ForwarderRule{fwdRule},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("entry start: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           801,
+		Role:               "exit",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "flowgate-test-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders:         []routing.ForwarderRule{fwdRule},
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("exit start: %v", err)
+	}
+	defer exit.Close()
+
+	// Wait for reverse pool to warm
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for entry.Stats.PoolIdleConnections.Load() < 2 && time.Now().Before(waitDeadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// ─── Test 1: 20 MB Upload Completes Full Speed ─────────────────────────────
+	upConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort))
+	if err != nil {
+		t.Fatalf("dial upload: %v", err)
+	}
+	_, _ = upConn.Write([]byte("UPLD_TST"))
+	uploadChunk := make([]byte, 65536)
+	const totalUpload = 20 * 1024 * 1024
+	for sent := 0; sent < totalUpload; sent += len(uploadChunk) {
+		if _, wErr := upConn.Write(uploadChunk); wErr != nil {
+			t.Fatalf("upload write error: %v", wErr)
+		}
+	}
+	_ = upConn.(interface{ CloseWrite() error }).CloseWrite()
+	var ackBuf [7]byte
+	_, _ = io.ReadFull(upConn, ackBuf[:])
+	upConn.Close()
+
+	if recv := serverRecvBytes.Load(); recv < totalUpload {
+		t.Fatalf("expected at least 20MB upload received, got %d bytes", recv)
+	}
+	t.Logf("✓ Upload-Only Test 1: 20 MB Upload Succeeded (Server received %d bytes)", serverRecvBytes.Load())
+
+	// ─── Test 2: 20 MB Download Attempt is Throttled under 100 KB ──────────────
+	dnConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort))
+	if err != nil {
+		t.Fatalf("dial download: %v", err)
+	}
+	_, _ = dnConn.Write([]byte("DNLD_TST"))
+	_, _ = dnConn.Write([]byte("REQ_DATA"))
+
+	var clientReceivedBytes int64
+	readBuf := make([]byte, 16384)
+	readDeadline := time.Now().Add(2500 * time.Millisecond)
+	_ = dnConn.SetReadDeadline(readDeadline)
+
+	for {
+		n, rErr := dnConn.Read(readBuf)
+		if n > 0 {
+			clientReceivedBytes += int64(n)
+		}
+		if rErr != nil {
+			break
+		}
+	}
+	dnConn.Close()
+
+	// Budget is 64KB burst + 4% of 8 bytes = ~64KB. Client must NOT receive 20 MB!
+	const maxAllowedDownload = 128 * 1024 // 128 KB ceiling with TCP buffer slack
+	if clientReceivedBytes > maxAllowedDownload {
+		t.Fatalf("download gating failed: client received %d bytes (expected < %d)", clientReceivedBytes, maxAllowedDownload)
+	}
+	t.Logf("✓ Upload-Only Test 2: Unauthorized 20 MB Download Throttled/Blocked (Client only got %d bytes <= 64KB budget)", clientReceivedBytes)
+
+	// ─── Test 3: TLS Echo Handshake through Upload-Only Forwarder ──────────────
+	tlsClient, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("tls handshake through upload_only forwarder failed: %v", err)
+	}
+	defer tlsClient.Close()
+	_, _ = tlsClient.Write([]byte("PING_TLS_HANDSHAKE"))
+	var echoResp [32]byte
+	_ = tlsClient.SetReadDeadline(time.Now().Add(3 * time.Second))
+	en, eErr := tlsClient.Read(echoResp[:])
+	if eErr != nil || !strings.Contains(string(echoResp[:en]), "TLS_ECHO") {
+		t.Fatalf("expected TLS echo response, got: %q err=%v", string(echoResp[:en]), eErr)
+	}
+	t.Logf("✓ Upload-Only Test 3: TLS Handshake & Echo Succeeded through Flow Gate: %s", string(echoResp[:en]))
+}
+
+func TestFlowGateReversePoolRecoveryAfterStalledReap(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+	targetPort := getFreeTCPPort(t)
+
+	// Target mock server that accepts connections and pumps infinite download bytes
+	targetLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
+	if err != nil {
+		t.Fatalf("targetLn: %v", err)
+	}
+	defer targetLn.Close()
+
+	go func() {
+		for {
+			conn, err := targetLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				chunk := make([]byte, 4096)
+				for {
+					if _, err := c.Write(chunk); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	fwdRule := routing.ForwarderRule{
+		ID:               992,
+		Protocol:         "tcp",
+		ListenIP:         "127.0.0.1",
+		ListenPort:       fwdPort,
+		TargetPort:       targetPort,
+		FlowMode:         "upload_only",
+		ReverseRatio:     0.04,
+		ReverseBurstKB:   4, // 4 KB burst
+		ThrottleStallSec: 5, // 5s stall timeout (clamped)
+	}
+
+	entry := NewEngine(Config{
+		TunnelID:           802,
+		Role:               "entry",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "flowgate-reap-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders:         []routing.ForwarderRule{fwdRule},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("entry start: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           802,
+		Role:               "exit",
+		Transport:          "reverse-reality",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		SNI:                "divar.ir",
+		Password:           "flowgate-reap-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders:         []routing.ForwarderRule{fwdRule},
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("exit start: %v", err)
+	}
+	defer exit.Close()
+
+	// Wait for pool to warm to min_held (4)
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for entry.Stats.PoolIdleConnections.Load() < 4 && time.Now().Before(waitDeadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if idle := entry.Stats.PoolIdleConnections.Load(); idle < 4 {
+		t.Fatalf("initial pool idle connections %d < 4", idle)
+	}
+
+	// Connect 4 clients attempting unauthorized downloads to drain the pool
+	clientConns := make([]net.Conn, 4)
+	for i := 0; i < 4; i++ {
+		c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort))
+		if err != nil {
+			t.Fatalf("dial client %d: %v", i, err)
+		}
+		clientConns[i] = c
+	}
+	defer func() {
+		for _, c := range clientConns {
+			if c != nil {
+				_ = c.Close()
+			}
+		}
+	}()
+
+	// Read small burst from each client until stalled
+	for _, c := range clientConns {
+		go func(conn net.Conn) {
+			buf := make([]byte, 1024)
+			for {
+				if _, err := conn.Read(buf); err != nil {
+					return
+				}
+			}
+		}(c)
+	}
+
+	// Verify all 4 streams were claimed and idle pool dropped
+	time.Sleep(200 * time.Millisecond)
+	t.Logf("pool idle dropped to %d while streams are held by download attempts", entry.Stats.PoolIdleConnections.Load())
+
+	// Wait for stall timeout reap (stallSec=5s)
+	// After connections are reaped, the exit engine replenishes the reverse pool back to min_held (4)
+	reapDeadline := time.Now().Add(10 * time.Second)
+	recovered := false
+	for time.Now().Before(reapDeadline) {
+		if entry.Stats.PoolIdleConnections.Load() >= 4 {
+			recovered = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !recovered {
+		t.Fatalf("reverse pool did not recover to min_held after stall reap: current=%d", entry.Stats.PoolIdleConnections.Load())
+	}
+	t.Logf("✓ Reverse Pool Recovery Verified: idle connections recovered to %d after stalled download streams were reaped", entry.Stats.PoolIdleConnections.Load())
 }

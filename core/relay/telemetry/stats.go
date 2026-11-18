@@ -158,6 +158,12 @@ func unwrapWriteTCP(w io.Writer) *net.TCPConn {
 // and PrefixConn), it runs zero-copy kernel splice(2) via 1 MiB pipes.
 // Otherwise, it falls back to a pooled 128KB user-space buffer loop.
 func SpliceCopy(dst io.Writer, src io.Reader, counter *atomic.Int64) (int64, error) {
+	return SpliceCopyWithCallback(dst, src, counter, nil)
+}
+
+// SpliceCopyWithCallback moves data from src to dst, invoking onChunk on each byte slice transferred.
+// This preserves zero-copy kernel splice(2) on Linux while feeding flow-gate budget accounting.
+func SpliceCopyWithCallback(dst io.Writer, src io.Reader, counter *atomic.Int64, onChunk func(n int)) (int64, error) {
 	var total int64
 
 	if drainer, ok := src.(interface{ DrainPrefixTo(io.Writer) (int64, error) }); ok {
@@ -166,6 +172,9 @@ func SpliceCopy(dst io.Writer, src io.Reader, counter *atomic.Int64) (int64, err
 			total += n
 			if counter != nil {
 				counter.Add(n)
+			}
+			if onChunk != nil {
+				onChunk(int(n))
 			}
 		}
 		if err != nil {
@@ -180,6 +189,9 @@ func SpliceCopy(dst io.Writer, src io.Reader, counter *atomic.Int64) (int64, err
 			total += int64(n)
 			if counter != nil {
 				counter.Add(int64(n))
+			}
+			if onChunk != nil {
+				onChunk(n)
 			}
 		})
 		if handled {
@@ -198,6 +210,9 @@ func SpliceCopy(dst io.Writer, src io.Reader, counter *atomic.Int64) (int64, err
 				total += int64(nw)
 				if counter != nil {
 					counter.Add(int64(nw))
+				}
+				if onChunk != nil {
+					onChunk(nw)
 				}
 			}
 			if wErr != nil {

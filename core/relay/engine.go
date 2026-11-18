@@ -119,6 +119,7 @@ type Engine struct {
 	alive         atomic.Bool
 	lastDialLog   atomic.Int64
 	carrierFwd    atomic.Int64
+	forwarderRules atomic.Pointer[[]routing.ForwarderRule]
 	logger        *log.Entry
 }
 
@@ -175,7 +176,10 @@ func NewEngine(cfg Config) *Engine {
 		poolCap = 64
 	}
 
-	return &Engine{
+	fwdSlice := make([]routing.ForwarderRule, len(cfg.Forwarders))
+	copy(fwdSlice, cfg.Forwarders)
+
+	eng := &Engine{
 		cfg:         cfg,
 		Stats:       telemetry.NewStats(),
 		ctx:         ctx,
@@ -184,6 +188,8 @@ func NewEngine(cfg Config) *Engine {
 		replenishCh: make(chan struct{}, 64),
 		logger:      cfg.Logger,
 	}
+	eng.forwarderRules.Store(&fwdSlice)
+	return eng
 }
 
 // Start launches the relay engine according to its role ("entry" or "exit").
@@ -335,7 +341,11 @@ func (e *Engine) IsAlive() bool {
 
 // Config returns the engine's configuration.
 func (e *Engine) Config() Config {
-	return e.cfg
+	cfg := e.cfg
+	if p := e.forwarderRules.Load(); p != nil {
+		cfg.Forwarders = *p
+	}
+	return cfg
 }
 
 func (e *Engine) isDirect() bool {
@@ -508,7 +518,8 @@ func (e *Engine) startEntry() error {
 					}).Warn("[Relay] User UDP forwarder matches UDP carrier port; skipped duplicate socket bind on entry")
 					continue
 				}
-				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort, rule.GamingMode); err != nil {
+				ruleCopy := rule
+				if err := e.startUDPForwarderListener(rule.ListenIP, lPort, tPort, &ruleCopy); err != nil {
 					e.logger.WithFields(log.Fields{"port": lPort, "err": err}).Warn("Failed to start UDP forwarder listener")
 				}
 			}
@@ -844,7 +855,7 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 		e.cfg,
 		e.handleIncomingCarrier,
 		func(c net.Conn, targetPort uint16) {
-			go routing.HandleEntryTCPClient(c, targetPort, e.ClaimReverseStream, e.Stats)
+			go routing.HandleEntryTCPClient(c, targetPort, e.ClaimReverseStream, e.Stats, e.findForwarderRuleFor(e.cfg.CarrierPort, targetPort))
 		},
 	)
 	if err != nil {
@@ -1304,13 +1315,75 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 				}
 			}
 			transport.TuneTCPConn(clientConn)
-			go routing.HandleEntryTCPClient(clientConn, uint16(targetPort), e.ClaimReverseStream, e.Stats)
+			go routing.HandleEntryTCPClient(clientConn, uint16(targetPort), e.ClaimReverseStream, e.Stats, e.findForwarderRuleFor(listenPort, uint16(targetPort)))
 		}
 	}()
 	return nil
 }
 
-func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPort int, gamingMode bool) error {
+func (e *Engine) findForwarderRule(targetPort uint16) *routing.ForwarderRule {
+	return e.findForwarderRuleFor(0, targetPort)
+}
+
+// findForwarderRuleFor resolves the forwarder rule for a stream. listenPort is 0 when unknown
+// (Exit side only sees the target port from the routing header). Exact listen->target pairs win;
+// otherwise the most restrictive matching rule is chosen. Carrier-shared listeners are never gated.
+func (e *Engine) findForwarderRuleFor(listenPort int, targetPort uint16) *routing.ForwarderRule {
+	rulesPtr := e.forwarderRules.Load()
+	if rulesPtr == nil {
+		return nil
+	}
+	rules := *rulesPtr
+
+	var candidate *routing.ForwarderRule
+	for i := range rules {
+		r := &rules[i]
+		for _, p := range routing.ExpandPortRange(*r) {
+			lPort, tPort := p[0], p[1]
+			if tPort != int(targetPort) {
+				continue
+			}
+			if listenPort > 0 && lPort != listenPort {
+				continue
+			}
+			if lPort == e.cfg.CarrierPort {
+				if listenPort > 0 {
+					return nil // exact carrier-shared listener: never gate
+				}
+				continue
+			}
+			if listenPort > 0 {
+				return r // exact pair match
+			}
+			if candidate == nil || flowRestrictiveness(r) > flowRestrictiveness(candidate) {
+				candidate = r
+			}
+		}
+	}
+	return candidate
+}
+
+func flowRestrictiveness(r *routing.ForwarderRule) int {
+	if r.FlowMode == "" || r.FlowMode == "bidirectional" {
+		return 0
+	}
+	if r.Strict {
+		return 2
+	}
+	return 1
+}
+
+func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPort int, rule *routing.ForwarderRule) error {
+	gamingMode := false
+	if rule != nil {
+		gamingMode = rule.GamingMode
+		if rule.FlowMode != "" && rule.FlowMode != "bidirectional" {
+			e.logger.WithFields(log.Fields{
+				"port":     listenPort,
+				"flowMode": rule.FlowMode,
+			}).Warn("[Relay] UDP forwarder configured with non-bidirectional flow mode; two-way protocols like WireGuard/OpenVPN require bidirectional")
+		}
+	}
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
@@ -1340,11 +1413,11 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 			"tunPeer":    tunPeerIP,
 			"gaming":     gamingMode,
 		}).Info("[Relay] Routing UDP forwarder directly over L3 TUN interface (zero reverse pool contention)")
-		routing.StartL3DirectUDPForwarder(e.ctx, udpConn, tunLocalIP, tunPeerIP, targetPort, e.Stats, gamingMode)
+		routing.StartL3DirectUDPForwarder(e.ctx, udpConn, tunLocalIP, tunPeerIP, targetPort, e.Stats, gamingMode, rule)
 		return nil
 	}
 
-	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats, gamingMode)
+	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats, gamingMode, rule)
 	return nil
 }
 
@@ -1354,10 +1427,14 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 		return errors.New("cannot update forwarders on stopped engine")
 	}
 
+	fwdSlice := make([]routing.ForwarderRule, len(newRules))
+	copy(fwdSlice, newRules)
+	e.forwarderRules.Store(&fwdSlice)
+
 	desiredTCP := make(map[int]int) // listenPort -> targetPort
 	desiredUDP := make(map[int]struct {
 		targetPort int
-		gamingMode bool
+		rule       routing.ForwarderRule
 		listenIP   string
 	})
 
@@ -1373,11 +1450,11 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 			if proto == "udp" || proto == "tcp,udp" || proto == "both" {
 				desiredUDP[lPort] = struct {
 					targetPort int
-					gamingMode bool
+					rule       routing.ForwarderRule
 					listenIP   string
 				}{
 					targetPort: tPort,
-					gamingMode: rule.GamingMode,
+					rule:       rule,
 					listenIP:   rule.ListenIP,
 				}
 			}
@@ -1415,8 +1492,9 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 	})
 	for lPort, cfg := range desiredUDP {
 		if _, exists := e.udpForwarderMap.Load(lPort); !exists {
-			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": cfg.targetPort, "gaming": cfg.gamingMode}).Info("[Relay] Binding new UDP forwarder listener")
-			_ = e.startUDPForwarderListener(cfg.listenIP, lPort, cfg.targetPort, cfg.gamingMode)
+			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": cfg.targetPort, "gaming": cfg.rule.GamingMode}).Info("[Relay] Binding new UDP forwarder listener")
+			ruleCopy := cfg.rule
+			_ = e.startUDPForwarderListener(cfg.listenIP, lPort, cfg.targetPort, &ruleCopy)
 		}
 	}
 
@@ -1546,10 +1624,11 @@ func (e *Engine) exitPoolLoop() {
 		}
 
 		minHeld := int64(e.cfg.MinHeldConnections)
-		if minHeld < 16 && len(e.cfg.Forwarders) > 0 {
+		liveRules := e.Config().Forwarders
+		if minHeld < 16 && len(liveRules) > 0 {
 			minHeld = 16
 		}
-		for _, f := range e.cfg.Forwarders {
+		for _, f := range liveRules {
 			if f.GamingMode && minHeld < 24 {
 				minHeld = 24
 				break
@@ -1857,11 +1936,14 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 
 	switch proto {
 	case routing.RouteProtoTCP:
-		routing.HandleExitTCPForward(stream, e.cfg.TargetIP, targetPort, e.Stats)
+		fwdRule := e.findForwarderRule(targetPort)
+		routing.HandleExitTCPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, fwdRule)
 	case routing.RouteProtoUDP:
-		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, false)
+		fwdRule := e.findForwarderRule(targetPort)
+		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, false, fwdRule)
 	case routing.RouteProtoUDPGaming:
-		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, true)
+		fwdRule := e.findForwarderRule(targetPort)
+		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, true, fwdRule)
 	case routing.RouteProtoTUN:
 		e.runL3StreamDuplex(stream)
 	case routing.RouteProtoProbe:
