@@ -1438,12 +1438,22 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 		listenIP   string
 	})
 
+	isTCPCarrier := !e.isDirect() && !e.isQuicTransport() && !e.isPacketTransport()
+	var carrierSharedFwd int64
 	for _, rule := range newRules {
 		pairs := routing.ExpandPortRange(rule)
 		for _, pair := range pairs {
 			lPort := pair[0]
 			tPort := pair[1]
 			proto := strings.ToLower(rule.Protocol)
+			if isTCPCarrier && lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both" || proto == "") {
+				carrierSharedFwd = int64(tPort)
+				e.logger.WithFields(log.Fields{
+					"carrierPort": lPort,
+					"targetPort":  tPort,
+				}).Info("[Relay] Sharing carrier port with user forwarder (single-port multiplexing)")
+				continue
+			}
 			if proto == "tcp" || proto == "tcp,udp" || proto == "both" || proto == "" {
 				desiredTCP[lPort] = tPort
 			}
@@ -1460,6 +1470,7 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 			}
 		}
 	}
+	e.carrierFwd.Store(carrierSharedFwd)
 
 	// 1. Reconcile TCP listeners
 	e.tcpForwarderMap.Range(func(key, val any) bool {

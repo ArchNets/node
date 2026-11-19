@@ -202,6 +202,12 @@ func InspectWSTraffic(conn net.Conn, sni, password string, hasUserForwarder bool
 		}
 	}
 
+	if hasUserForwarder {
+		_ = conn.SetDeadline(time.Time{})
+		prefixAll := append(headerBytes, leftover...)
+		return ActionUserClient, NewPrefixConn(conn, prefixAll), nil
+	}
+
 	// Serve deterministic per-tunnel Nginx decoy page to unauthenticated HTTP visitors/probes
 	go ServeDecoyHTTP(conn, reqStr, password)
 	return ActionDPIProbe, nil, nil
