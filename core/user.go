@@ -17,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/anytls"
 	hysteria2 "github.com/xtls/xray-core/proxy/hysteria/account"
+	"github.com/xtls/xray-core/proxy/masque"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
 	"github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	"github.com/xtls/xray-core/proxy/trojan"
@@ -162,6 +163,8 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 		users = buildHysteria2Users(p.Tag, p.Users)
 	case "tuic":
 		users = buildTuicUsers(p.Tag, p.Users)
+	case "masque":
+		users = buildMasqueUsers(p.Tag, p.Users)
 	case "anytls":
 		users = buildAnyTLSUsers(p.Tag, p.Users)
 	case "shadowtls":
@@ -361,6 +364,28 @@ func buildTuicUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
 		Level:   0,
 		Email:   format.UserTag(tag, userInfo.Uuid),
 		Account: serial.ToTypedMessage(tuicAccount),
+	}
+}
+
+func buildMasqueUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
+	users = make([]*protocol.User, len(userInfo))
+	for i := range userInfo {
+		users[i] = buildMasqueUser(tag, &userInfo[i])
+	}
+	return users
+}
+
+func buildMasqueUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
+	// MASQUE uses HTTP Basic auth: email and password
+	// Map client UUID as password, and formatted user tag as email identifier
+	masqueAccount := &masque.Account{
+		Password: userInfo.Uuid,
+	}
+	userEmail := format.UserTag(tag, userInfo.Uuid)
+	return &protocol.User{
+		Level:   0,
+		Email:   userEmail,
+		Account: serial.ToTypedMessage(masqueAccount),
 	}
 }
 
