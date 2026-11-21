@@ -85,7 +85,7 @@ func (c *Controller) checkAndConnect() {
 		wsScheme = "wss"
 	}
 
-	wsURL := fmt.Sprintf("%s://%s/v1/node/terminal/connect?server_id=%d&secret_key=%s",
+	wsURL := fmt.Sprintf("%s://%s/v1/server/terminal/connect?server_id=%d&secret_key=%s",
 		wsScheme, u.Host, c.serverID, url.QueryEscape(c.secretKey))
 
 	header := make(http.Header)
