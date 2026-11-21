@@ -11,6 +11,7 @@ import (
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/conf"
 	"github.com/archnets/node/core"
+	"github.com/archnets/node/core/terminal"
 	"github.com/archnets/node/limiter"
 	"github.com/archnets/node/node"
 	log "github.com/sirupsen/logrus"
@@ -98,6 +99,11 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Warn("Tunnel controller failed to start, will retry on next poll")
 	}
 	defer tunnelCtrl.Close()
+
+	// Initialize and start remote terminal controller for panel SSH sessions
+	terminalCtrl := terminal.NewController(c.ApiConfig.ApiHost, c.ApiConfig.ServerId, c.ApiConfig.SecretKey)
+	terminalCtrl.Start()
+	defer terminalCtrl.Close()
 	if watch {
 		if _, err := os.Stat(config); err == nil {
 			// On file change, just signal reload; do not run reload concurrently here
