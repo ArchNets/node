@@ -187,6 +187,12 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 		}
 
 		if msgType == websocket.TextMessage {
+			// Check if heartbeat ping/pong message
+			if string(msg) == `{"type":"ping"}` || string(msg) == "ping" {
+				_ = ws.WriteMessage(websocket.TextMessage, []byte("pong"))
+				continue
+			}
+
 			// Check if resize message
 			var resize TerminalResizeMessage
 			if err := json.Unmarshal(msg, &resize); err == nil && resize.Type == "resize" && resize.Cols > 0 && resize.Rows > 0 {
