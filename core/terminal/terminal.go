@@ -13,7 +13,29 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/archnets/node/core/filesystem"
 )
+
+// FsRequest describes a file system operation forwarded from backend
+type FsRequest struct {
+	ID       string `json:"id"`
+	Action   string `json:"action"` // list, read, write, delete
+	Path     string `json:"path"`
+	Content  string `json:"content,omitempty"`
+	IsBase64 bool   `json:"is_base64,omitempty"`
+}
+
+// FsResponse describes a file system operation result back to backend
+type FsResponse struct {
+	ID       string                `json:"id"`
+	Success  bool                  `json:"success"`
+	Error    string                `json:"error,omitempty"`
+	Path     string                `json:"path,omitempty"`
+	Files    []filesystem.FileItem `json:"files,omitempty"`
+	Content  string                `json:"content,omitempty"`
+	IsBinary bool                  `json:"is_binary,omitempty"`
+}
 
 // TerminalResizeMessage describes a window dimension resize packet from client
 type TerminalResizeMessage struct {
@@ -193,6 +215,15 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 				continue
 			}
 
+			// Check if remote filesystem control message
+			if len(msg) > 0 && msg[0] == '{' {
+				var fsReq FsRequest
+				if err := json.Unmarshal(msg, &fsReq); err == nil && fsReq.Action != "" && fsReq.ID != "" {
+					go c.handleFsRequest(ws, &fsReq)
+					continue
+				}
+			}
+
 			// Check if resize message
 			var resize TerminalResizeMessage
 			if err := json.Unmarshal(msg, &resize); err == nil && resize.Type == "resize" && resize.Cols > 0 && resize.Rows > 0 {
@@ -222,5 +253,60 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 	select {
 	case <-stdoutDone:
 	case <-time.After(1 * time.Second):
+	}
+}
+
+func (c *Controller) handleFsRequest(ws *websocket.Conn, req *FsRequest) {
+	resp := FsResponse{
+		ID:      req.ID,
+		Success: true,
+	}
+
+	switch req.Action {
+	case "list":
+		files, err := filesystem.ListDirectory(req.Path)
+		if err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Path = req.Path
+			resp.Files = files
+		}
+
+	case "read":
+		content, isBinary, err := filesystem.ReadFile(req.Path)
+		if err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Path = req.Path
+			resp.Content = content
+			resp.IsBinary = isBinary
+		}
+
+	case "write":
+		err := filesystem.WriteFile(req.Path, req.Content, req.IsBase64)
+		if err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Path = req.Path
+		}
+
+	case "delete":
+		err := filesystem.DeletePath(req.Path)
+		if err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		}
+
+	default:
+		resp.Success = false
+		resp.Error = fmt.Sprintf("unsupported action %s", req.Action)
+	}
+
+	data, err := json.Marshal(resp)
+	if err == nil {
+		_ = ws.WriteMessage(websocket.TextMessage, data)
 	}
 }
