@@ -293,13 +293,19 @@ show_log() {
     if [[ x"${release}" == x"alpine" ]]; then   
         echo -e "${red}Log viewing is not supported on Alpine systems for now.${plain}\n" && exit 1
     else
+        local c_esc=$(printf '\033')
+        local c_red="${c_esc}[0;31m"
+        local c_yellow="${c_esc}[0;33m"
+        local c_green="${c_esc}[0;32m"
+        local c_plain="${c_esc}[0m"
+
         journalctl -u archnets -e --no-pager -f | sed -u \
-            -e "s/WARNING/${yellow}&${plain}/g" \
-            -e "s/Warning/${yellow}&${plain}/g" \
-            -e "s/ERROR/${red}&${plain}/g" \
-            -e "s/Error/${red}&${plain}/g" \
-            -e "s/INFO/${green}&${plain}/g" \
-            -e "s/Info/${green}&${plain}/g"
+            -e "s/\[Warning\]/${c_yellow}[Warning]${c_plain}/g" \
+            -e "s/WARNING/${c_yellow}WARNING${c_plain}/g" \
+            -e "s/\[Error\]/${c_red}[Error]${c_plain}/g" \
+            -e "s/ERROR/${c_red}ERROR${c_plain}/g" \
+            -e "s/\[Info\]/${c_green}[Info]${c_plain}/g" \
+            -e "s/INFO/${c_green}INFO${c_plain}/g"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
