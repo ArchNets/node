@@ -127,12 +127,24 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 		shell = "/bin/sh"
 	}
 
-	cmd := exec.Command(shell)
+	cmd := exec.Command(shell, "-l")
+	// Set standard root working directory so it doesn't open in /usr/local/archnets
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+		cmd.Dir = homeDir
+	} else {
+		cmd.Dir = "/root"
+	}
+
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
+		"HOME=/root",
+		"USER=root",
+		"SHELL=/bin/bash",
 		"LANG=en_US.UTF-8",
 		"LC_ALL=en_US.UTF-8",
+		"PROMPT_COLOR=1",
+		"force_color_prompt=yes",
 	)
 
 	// Allocate PTY
@@ -194,5 +206,15 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 		}
 	}
 
-	<-stdoutDone
+	// Terminate PTY and process immediately when WebSocket disconnects so stdout reader unblocks
+	_ = ptmx.Close()
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
+
+	select {
+	case <-stdoutDone:
+	case <-time.After(1 * time.Second):
+	}
 }
