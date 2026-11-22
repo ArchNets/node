@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -230,6 +231,70 @@ func BuildWireguardOutboundJSON(outbounditem panel.Outbound, endpoint string) (m
 	jsonsettings["noKernelTun"] = true
 
 	return jsonsettings, nil
+}
+
+func BuildMasqueWarpOutbound(outbounditem panel.Outbound) (*core.OutboundHandlerConfig, error) {
+	addresses, _ := wireguardAddresses(outbounditem.WireguardAddress)
+	if len(addresses) == 0 {
+		addresses = []string{"172.16.0.2"}
+	}
+
+	endpointHost := "162.159.198.2"
+	var endpointPort uint16 = 443
+	if outbounditem.WireguardPeerEndpoint != "" {
+		host, portStr, err := net.SplitHostPort(outbounditem.WireguardPeerEndpoint)
+		if err == nil {
+			endpointHost = host
+			if p, pErr := strconv.ParseUint(portStr, 10, 16); pErr == nil {
+				endpointPort = uint16(p)
+			}
+		} else {
+			endpointHost = outbounditem.WireguardPeerEndpoint
+		}
+	}
+
+	clientConfig := map[string]interface{}{
+		"address": endpointHost,
+		"port":    endpointPort,
+	}
+	clientJSON, _ := json.Marshal(clientConfig)
+	rawSettings := json.RawMessage(clientJSON)
+
+	protoT := coreConf.TransportProtocol("masque")
+	sni := outbounditem.SNI
+	if sni == "" {
+		sni = "consumer-masque.cloudflareclient.com"
+	}
+
+	outbound := &coreConf.OutboundDetourConfig{
+		Tag:      outbounditem.Name,
+		Protocol: "masque",
+		Settings: &rawSettings,
+		StreamSetting: &coreConf.StreamConfig{
+			Network:  &protoT,
+			Security: "tls",
+			TLSSettings: &coreConf.TLSConfig{
+				ServerName: sni,
+			},
+			MASQUESettings: &coreConf.MasqueConfig{
+				Host: "cloudflareaccess.com",
+				Path: "/",
+				Warp: &coreConf.MasqueWarpConfig{
+					PrivateKey: outbounditem.WireguardPrivateKey,
+					PublicKey:  outbounditem.WireguardPeerPublicKey,
+					Address:    addresses,
+				},
+			},
+		},
+	}
+
+	log.WithFields(log.Fields{
+		"tag":      outbounditem.Name,
+		"endpoint": fmt.Sprintf("%s:%d", endpointHost, endpointPort),
+		"sni":      sni,
+	}).Info("Built MASQUE Cloudflare WARP outbound config")
+
+	return outbound.Build()
 }
 
 func BuildWireguardOutbound(outbounditem panel.Outbound, endpoint string) (*core.OutboundHandlerConfig, error) {
@@ -541,6 +606,20 @@ func GetCustomConfig(serverconfig *panel.ServerConfigResponse) (*dns.Config, []*
 				wgOutbounds[outbounditem.Name] = &WireguardOutbound{
 					Config:   custom_outbound,
 					Outbound: outbounditem,
+				}
+				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
+				continue
+			case "masque":
+				custom_outbound, err := BuildMasqueWarpOutbound(outbounditem)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"name": outbounditem.Name,
+						"err":  err,
+					}).Warn("Failed to build MASQUE WARP outbound, skipping")
+					continue
+				}
+				if hasOutboundWithTag(coreOutboundConfig, custom_outbound.Tag) {
+					continue
 				}
 				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
 				continue
