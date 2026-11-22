@@ -300,6 +300,25 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 			fullCaptured = captured
 		}
 
+		// If this looks like an HTTP request whose headers were fragmented across TCP segments,
+		// accumulate up to 4096 bytes until "\r\n\r\n" arrives so WS token/path headers are never truncated.
+		if len(fullCaptured) >= 4 {
+			prefix4 := string(fullCaptured[:4])
+			isHTTP := prefix4 == "GET " || prefix4 == "POST" || prefix4 == "HEAD" || prefix4 == "OPTI" || prefix4 == "PUT "
+			if isHTTP && !bytes.Contains(fullCaptured, []byte("\r\n\r\n")) {
+				_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+				for len(fullCaptured) < 4096 && !bytes.Contains(fullCaptured, []byte("\r\n\r\n")) {
+					more, rErr := conn.Read(peekBuf)
+					if more > 0 {
+						fullCaptured = append(fullCaptured, peekBuf[:more]...)
+					}
+					if rErr != nil {
+						break
+					}
+				}
+			}
+		}
+
 		// 1. Check for Stealth carrier match
 		for _, target := range snapshot {
 			if target.Transport == "stealth" {
@@ -327,7 +346,7 @@ func (d *CarrierPortDemuxer) dispatchConnection(conn net.Conn) {
 		}
 
 		// 3. Check for WebSocket Upgrade match (by token or path)
-		if nPeek > 0 {
+		if len(fullCaptured) > len(hdr) {
 			reqStr := string(fullCaptured)
 			if strings.Contains(reqStr, "Upgrade: websocket") || strings.Contains(reqStr, "X-Requested-With:") {
 				for _, target := range snapshot {

@@ -2729,3 +2729,117 @@ func TestBidirectionalHalfCloseCompletesDownload(t *testing.T) {
 		t.Fatalf("response truncated on half-close: got %d bytes, want %d bytes", len(got), len(expectedResp))
 	}
 }
+
+func TestLIFOIdlePoolAndSweeper(t *testing.T) {
+	eng := NewEngine(Config{
+		TunnelID:           956,
+		Role:               "entry",
+		MinHeldConnections: 4,
+	})
+	defer eng.Close()
+
+	// Push 2 live pipes: older first, newer second
+	o1, o2 := net.Pipe()
+	defer o1.Close()
+	defer o2.Close()
+	n1, n2 := net.Pipe()
+	defer n1.Close()
+	defer n2.Close()
+
+	eng.pushIdleStream(o1)
+	eng.pushIdleStream(n1)
+
+	if got := eng.Stats.PoolIdleConnections.Load(); got != 2 {
+		t.Fatalf("expected 2 idle connections, got %d", got)
+	}
+
+	// ClaimReverseStream must return the newest (n1) first (LIFO)
+	claimed, err := eng.ClaimReverseStream(time.Second)
+	if err != nil {
+		t.Fatalf("ClaimReverseStream: %v", err)
+	}
+	if claimed != n1 {
+		t.Fatalf("expected LIFO newest stream n1, got %v", claimed)
+	}
+
+	// Age out remaining o1 and verify sweepEntryIdlePool removes it
+	eng.idlePoolMu.Lock()
+	eng.idlePool[0].createdAt = time.Now().Add(-31 * time.Minute)
+	eng.idlePoolMu.Unlock()
+
+	eng.sweepEntryIdlePool()
+	if got := eng.Stats.PoolIdleConnections.Load(); got != 0 {
+		t.Fatalf("expected aged stream to be swept, remaining=%d", got)
+	}
+}
+
+func TestTier2FragmentedWebSocketDemux(t *testing.T) {
+	sharedPort := getFreeTCPPort(t)
+	var got1, got2 atomic.Int32
+
+	eng1 := NewEngine(Config{
+		TunnelID:     961,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.10",
+		Transport:    "ws-reverse",
+		WSPath:       "/ws-a",
+		Password:     "frag-ws-secret-a",
+	})
+	if err := eng1.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer eng1.Close()
+
+	eng2 := NewEngine(Config{
+		TunnelID:     962,
+		Role:         "entry",
+		CarrierPort:  sharedPort,
+		ListenIP:     "127.0.0.1",
+		ExitServerIP: "192.0.2.11",
+		Transport:    "ws-reverse",
+		WSPath:       "/ws-b",
+		Password:     "frag-ws-secret-b",
+	})
+	if err := eng2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer eng2.Close()
+
+	// Replace handlers on shared demuxer snapshot to observe routing cleanly
+	sharedMultiMu.Lock()
+	demuxer := sharedListeners[sharedPort]
+	demuxer.mu.Lock()
+	demuxer.targets[961].Handler = func(c net.Conn) {
+		got1.Add(1)
+		_ = c.Close()
+	}
+	demuxer.targets[962].Handler = func(c net.Conn) {
+		got2.Add(1)
+		_ = c.Close()
+	}
+	demuxer.mu.Unlock()
+	sharedMultiMu.Unlock()
+
+	// Dial and send fragmented WS Upgrade targeting /ws-b in 3 separate TCP writes
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", sharedPort), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	_, _ = conn.Write([]byte("GET /ws-b "))
+	time.Sleep(15 * time.Millisecond)
+	_, _ = conn.Write([]byte("HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\n"))
+	time.Sleep(15 * time.Millisecond)
+	_, _ = conn.Write([]byte("Connection: Upgrade\r\n\r\n"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && got2.Load() == 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got2.Load() != 1 || got1.Load() != 0 {
+		t.Fatalf("expected fragmented WS request to route to tunnel 962, got1=%d got2=%d", got1.Load(), got2.Load())
+	}
+}

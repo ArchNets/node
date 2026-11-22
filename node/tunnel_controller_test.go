@@ -321,3 +321,32 @@ func TestPingTarget(t *testing.T) {
 		t.Errorf("pingTarget with 127.0.0.1 should have >= 0 latency, got %d", latency)
 	}
 }
+
+func TestTunnelControllerCachedConfigFallbackAndTasks(t *testing.T) {
+	tmpDir := t.TempDir()
+	tc := NewTunnelController(nil, 99, &conf.Conf{})
+	tc.tunnelDir = tmpDir
+
+	sample := &panel.TunnelData{
+		CoreConfig: &panel.CoreConfig{MTU: 1424},
+		Tunnels: []panel.TunnelInfo{
+			{Id: 1, Name: "cached", Role: "entry", Method: "unconfigured"},
+		},
+	}
+	tc.saveCachedConfig(sample)
+
+	loaded, err := tc.loadCachedConfig()
+	if err != nil {
+		t.Fatalf("loadCachedConfig failed: %v", err)
+	}
+	if len(loaded.Tunnels) != 1 || loaded.Tunnels[0].Id != 1 || loaded.CoreConfig.MTU != 1424 {
+		t.Fatalf("unexpected cached config: %+v", loaded)
+	}
+
+	// Ensure startTasks starts periodic pollers cleanly and Close tears them down without panic
+	tc.startTasks()
+	if tc.configMonitorPeriodic == nil || tc.statusReportPeriodic == nil {
+		t.Fatal("expected startTasks to initialize periodic tasks")
+	}
+	_ = tc.Close()
+}

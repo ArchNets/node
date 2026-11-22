@@ -461,6 +461,28 @@ func hasGamingForwarder(rules []routing.ForwarderRule) bool {
 	return false
 }
 
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
 func carrierSettingsEqual(a, b relay.Config) bool {
 	return a.Transport == b.Transport &&
 		hasGamingForwarder(a.Forwarders) == hasGamingForwarder(b.Forwarders) &&
@@ -476,6 +498,10 @@ func carrierSettingsEqual(a, b relay.Config) bool {
 		a.UseFisher == b.UseFisher &&
 		a.FisherConnections == b.FisherConnections &&
 		a.MinHeldConnections == b.MinHeldConnections &&
+		stringSlicesEqual(a.FloatingIPs, b.FloatingIPs) &&
+		boolPtrEqual(a.TCPNoDelay, b.TCPNoDelay) &&
+		stringSlicesEqual(a.PCKFlags, b.PCKFlags) &&
+		stringSlicesEqual(a.SpoofSrcPool, b.SpoofSrcPool) &&
 		a.CertMode == b.CertMode &&
 		a.CertFile == b.CertFile &&
 		a.KeyFile == b.KeyFile &&

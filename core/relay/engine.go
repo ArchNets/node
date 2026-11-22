@@ -93,6 +93,8 @@ type idleStreamEntry struct {
 }
 
 // Engine is the L4 reverse tunnel & zero-copy relay engine in pure Go.
+const carrierShardCount = 4
+
 type Engine struct {
 	cfg           Config
 	Stats         *telemetry.Stats
@@ -100,13 +102,16 @@ type Engine struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 	mu            sync.Mutex
-	dialSessMu    sync.Mutex
 	carrierLn      net.Listener
 	quicLn         *quic.Listener
 	quicUDPConn    *net.UDPConn
 	udpCarrierLn   *transport.UDPCarrierListener
-	activeQuicConn   *quic.Conn
-	activeMuxSess    *transport.MuxSession
+	activeQuicShards [carrierShardCount]*quic.Conn
+	quicShardMu      [carrierShardCount]sync.Mutex
+	quicShardRR      atomic.Uint64
+	activeMuxShards  [carrierShardCount]*transport.MuxSession
+	muxShardMu       [carrierShardCount]sync.Mutex
+	muxShardRR       atomic.Uint64
 	acceptedMuxSess  sync.Map // *transport.MuxSession -> struct{}{}
 	acceptedQuicConn sync.Map // *quic.Conn -> struct{}{}
 	tcpForwarderMap  sync.Map // int (listenPort) -> net.Listener
@@ -118,8 +123,11 @@ type Engine struct {
 	udpListeners  []*net.UDPConn
 	hdMatcher     *transport.HalfDuplexMatcher
 	tlsServerCfg  *tls.Config
-	idlePool      chan pooledStream
-	replenishCh   chan struct{}
+	idlePoolMu      sync.Mutex
+	idlePool        []pooledStream
+	idlePoolMax     int
+	idlePoolAvailCh chan struct{}
+	replenishCh     chan struct{}
 	idleWaiters   atomic.Int64
 	idleStreams   sync.Map // Tracks net.Conn -> struct{}{} currently waiting for routing header on Exit
 	activeStreams sync.Map
@@ -188,13 +196,15 @@ func NewEngine(cfg Config) *Engine {
 	copy(fwdSlice, cfg.Forwarders)
 
 	eng := &Engine{
-		cfg:         cfg,
-		Stats:       telemetry.NewStats(),
-		ctx:         ctx,
-		cancel:      cancel,
-		idlePool:    make(chan pooledStream, poolCap),
-		replenishCh: make(chan struct{}, 64),
-		logger:      cfg.Logger,
+		cfg:             cfg,
+		Stats:           telemetry.NewStats(),
+		ctx:             ctx,
+		cancel:          cancel,
+		idlePool:        make([]pooledStream, 0, poolCap),
+		idlePoolMax:     poolCap,
+		idlePoolAvailCh: make(chan struct{}, 1),
+		replenishCh:     make(chan struct{}, 64),
+		logger:          cfg.Logger,
 	}
 	eng.forwarderRules.Store(&fwdSlice)
 	return eng
@@ -384,15 +394,23 @@ func (e *Engine) Close() error {
 
 	UnregisterSharedCarrier(e.cfg.TunnelID, e.cfg.CarrierPort)
 
+	for i := 0; i < carrierShardCount; i++ {
+		e.quicShardMu[i].Lock()
+		if e.activeQuicShards[i] != nil {
+			_ = e.activeQuicShards[i].CloseWithError(0, "engine closed")
+			e.activeQuicShards[i] = nil
+		}
+		e.quicShardMu[i].Unlock()
+
+		e.muxShardMu[i].Lock()
+		if e.activeMuxShards[i] != nil {
+			_ = e.activeMuxShards[i].Close()
+			e.activeMuxShards[i] = nil
+		}
+		e.muxShardMu[i].Unlock()
+	}
+
 	e.mu.Lock()
-	if e.activeQuicConn != nil {
-		_ = e.activeQuicConn.CloseWithError(0, "engine closed")
-		e.activeQuicConn = nil
-	}
-	if e.activeMuxSess != nil {
-		_ = e.activeMuxSess.Close()
-		e.activeMuxSess = nil
-	}
 	if e.carrierLn != nil {
 		_ = e.carrierLn.Close()
 	}
@@ -440,16 +458,17 @@ func (e *Engine) Close() error {
 	}
 	e.mu.Unlock()
 
-	for {
-		select {
-		case item := <-e.idlePool:
-			_ = item.conn.Close()
-			e.Stats.PoolIdleConnections.Add(-1)
-		default:
-			goto drained
-		}
+	e.idlePoolMu.Lock()
+	drainedCount := int64(len(e.idlePool))
+	for i, item := range e.idlePool {
+		_ = item.conn.Close()
+		e.idlePool[i] = pooledStream{}
 	}
-drained:
+	e.idlePool = e.idlePool[:0]
+	e.idlePoolMu.Unlock()
+	if drainedCount > 0 {
+		e.Stats.PoolIdleConnections.Add(-drainedCount)
+	}
 
 	e.activeStreams.Range(func(key, _ any) bool {
 		if c, ok := key.(net.Conn); ok {
@@ -863,7 +882,7 @@ func (e *Engine) startCarrierListener(listenIP string) error {
 		e.cfg,
 		e.handleIncomingCarrier,
 		func(c net.Conn, targetPort uint16) {
-			go routing.HandleEntryTCPClient(c, targetPort, e.ClaimReverseStream, e.Stats, e.findForwarderRuleFor(e.cfg.CarrierPort, targetPort))
+			go routing.HandleEntryTCPClient(c, targetPort, e.claimTrackedReverseStream, e.Stats, e.findForwarderRuleFor(e.cfg.CarrierPort, targetPort))
 		},
 	)
 	if err != nil {
@@ -1102,7 +1121,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		action, inspectedConn, err := transport.InspectTLSReverseTraffic(rawConn, e.tlsServerCfg, e.cfg.SNI, e.cfg.Password, hasUserFwd)
 		if err != nil || action != transport.ActionReverseCarrier {
 			if action == transport.ActionUserClient && inspectedConn != nil {
-				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			}
 			return
 		}
@@ -1119,7 +1138,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		if err != nil {
 			if hasUserFwd && nHdr > 0 {
 				_ = rawConn.SetReadDeadline(time.Time{})
-				go routing.HandleEntryTCPClient(transport.NewPrefixConn(rawConn, hdr[:nHdr]), uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+				go routing.HandleEntryTCPClient(transport.NewPrefixConn(rawConn, hdr[:nHdr]), uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			} else {
 				_ = rawConn.Close()
 			}
@@ -1128,7 +1147,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		if hdr[0] != 0x16 {
 			if hasUserFwd {
 				_ = rawConn.SetReadDeadline(time.Time{})
-				go routing.HandleEntryTCPClient(transport.NewPrefixConn(rawConn, hdr[:nHdr]), uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+				go routing.HandleEntryTCPClient(transport.NewPrefixConn(rawConn, hdr[:nHdr]), uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			} else {
 				_ = rawConn.Close()
 			}
@@ -1152,7 +1171,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		action, inspectedConn, err := transport.InspectWSTraffic(rawConn, e.cfg.SNI, e.cfg.Password, hasUserFwd)
 		if err != nil || action != transport.ActionReverseCarrier {
 			if action == transport.ActionUserClient && inspectedConn != nil {
-				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			}
 			return
 		}
@@ -1162,7 +1181,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		action, inspectedConn, err := transport.InspectTCPTraffic(rawConn, e.cfg.Password, hasUserFwd)
 		if err != nil || action != transport.ActionReverseCarrier {
 			if action == transport.ActionUserClient && inspectedConn != nil {
-				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			}
 			return
 		}
@@ -1172,7 +1191,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 		action, inspectedConn, err := transport.InspectStealthTraffic(rawConn, e.cfg.Password, hasUserFwd)
 		if err != nil || action != transport.ActionReverseCarrier {
 			if action == transport.ActionUserClient && inspectedConn != nil {
-				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+				go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			}
 			return
 		}
@@ -1194,7 +1213,7 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 			carrierConn = inspectedConn
 
 		case transport.ActionUserClient:
-			go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.ClaimReverseStream, e.Stats)
+			go routing.HandleEntryTCPClient(inspectedConn, uint16(targetFwd), e.claimTrackedReverseStream, e.Stats)
 			return
 
 		case transport.ActionDPIProbe:
@@ -1229,6 +1248,78 @@ func (e *Engine) handleIncomingCarrier(rawConn net.Conn) {
 	}
 }
 
+type trackedStreamConn struct {
+	net.Conn
+	engine    *Engine
+	closeOnce sync.Once
+}
+
+func (t *trackedStreamConn) Close() error {
+	var err error
+	t.closeOnce.Do(func() {
+		if t.engine != nil {
+			t.engine.activeStreams.Delete(t)
+		}
+		err = t.Conn.Close()
+	})
+	return err
+}
+
+func (t *trackedStreamConn) UnderlyingConn() net.Conn {
+	return t.Conn
+}
+
+func (t *trackedStreamConn) ReadTCPConn() *net.TCPConn {
+	if tc, ok := t.Conn.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := t.Conn.(interface{ ReadTCPConn() *net.TCPConn }); ok {
+		return u.ReadTCPConn()
+	}
+	return nil
+}
+
+func (t *trackedStreamConn) WriteTCPConn() *net.TCPConn {
+	if tc, ok := t.Conn.(*net.TCPConn); ok {
+		return tc
+	}
+	if u, ok := t.Conn.(interface{ WriteTCPConn() *net.TCPConn }); ok {
+		return u.WriteTCPConn()
+	}
+	return nil
+}
+
+func (t *trackedStreamConn) DrainPrefixTo(w io.Writer) (int64, error) {
+	if drainer, ok := t.Conn.(interface{ DrainPrefixTo(io.Writer) (int64, error) }); ok {
+		return drainer.DrainPrefixTo(w)
+	}
+	return 0, nil
+}
+
+func (t *trackedStreamConn) CloseWrite() error {
+	if tc, ok := t.Conn.(*net.TCPConn); ok {
+		return tc.CloseWrite()
+	}
+	if hc, ok := t.Conn.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return t.Close()
+}
+
+func (t *trackedStreamConn) CloseRead() error {
+	if tc, ok := t.Conn.(*net.TCPConn); ok {
+		return tc.CloseRead()
+	}
+	if hc, ok := t.Conn.(interface{ CloseRead() error }); ok {
+		return hc.CloseRead()
+	}
+	return t.Close()
+}
+
+func (t *trackedStreamConn) IsAlive() bool {
+	return transport.IsStreamAlive(t.Conn)
+}
+
 func (e *Engine) pushIdleStream(stream net.Conn) {
 	select {
 	case <-e.ctx.Done():
@@ -1242,47 +1333,102 @@ func (e *Engine) pushIdleStream(stream net.Conn) {
 		createdAt: time.Now(),
 	}
 
+	e.idlePoolMu.Lock()
+	var evicted net.Conn
+	if len(e.idlePool) >= e.idlePoolMax {
+		evicted = e.idlePool[0].conn
+		copy(e.idlePool, e.idlePool[1:])
+		e.idlePool[len(e.idlePool)-1] = item
+	} else {
+		e.idlePool = append(e.idlePool, item)
+	}
+	idleCount := int64(len(e.idlePool))
+	e.Stats.PoolIdleConnections.Store(idleCount)
+	e.idlePoolMu.Unlock()
+
+	if evicted != nil {
+		_ = evicted.Close()
+	}
+
+	if idleCount == 1 {
+		e.logger.WithFields(log.Fields{
+			"carrierPort": e.cfg.CarrierPort,
+			"remote":      stream.RemoteAddr().String(),
+		}).Info("[Relay] Entry reverse carrier pool active: authenticated reverse socket received")
+		if e.cfg.OnPoolActive != nil {
+			go e.cfg.OnPoolActive(e.cfg.TunnelID)
+		}
+	}
+
 	select {
-	case e.idlePool <- item:
-		idleCount := e.Stats.PoolIdleConnections.Add(1)
-		if idleCount == 1 {
-			e.logger.WithFields(log.Fields{
-				"carrierPort": e.cfg.CarrierPort,
-				"remote":      stream.RemoteAddr().String(),
-			}).Info("[Relay] Entry reverse carrier pool active: authenticated reverse socket received")
-			if e.cfg.OnPoolActive != nil {
-				go e.cfg.OnPoolActive(e.cfg.TunnelID)
-			}
-		}
+	case e.idlePoolAvailCh <- struct{}{}:
 	default:
-		select {
-		case old := <-e.idlePool:
-			_ = old.conn.Close()
-		default:
-			e.Stats.PoolIdleConnections.Add(1)
-		}
-		select {
-		case e.idlePool <- item:
-		default:
-			_ = stream.Close()
-			e.Stats.PoolIdleConnections.Add(-1)
-		}
 	}
 }
 
-// ClaimReverseStream claims a warm connection from the idle pool for forwarding.
+func (e *Engine) sweepEntryIdlePool() {
+	now := time.Now()
+	var dead []net.Conn
+
+	e.idlePoolMu.Lock()
+	if len(e.idlePool) == 0 {
+		e.idlePoolMu.Unlock()
+		return
+	}
+	kept := e.idlePool[:0]
+	for _, item := range e.idlePool {
+		if now.Sub(item.createdAt) > 30*time.Minute || !transport.IsStreamAlive(item.conn) {
+			dead = append(dead, item.conn)
+			continue
+		}
+		kept = append(kept, item)
+	}
+	// Clear trailing references for GC
+	for i := len(kept); i < len(e.idlePool); i++ {
+		e.idlePool[i] = pooledStream{}
+	}
+	e.idlePool = kept
+	e.Stats.PoolIdleConnections.Store(int64(len(e.idlePool)))
+	e.idlePoolMu.Unlock()
+
+	for _, c := range dead {
+		_ = c.Close()
+	}
+	if len(dead) > 0 && e.isDirect() {
+		e.triggerReplenish()
+	}
+}
+
+// ClaimReverseStream claims the warmest (most recently added, LIFO) connection from the idle pool.
 func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
 	for {
-		select {
-		case <-e.ctx.Done():
-			return nil, e.ctx.Err()
-		case <-timer.C:
-			return nil, fmt.Errorf("timeout waiting for reverse pool connection")
-		case item := <-e.idlePool:
-			e.Stats.PoolIdleConnections.Add(-1)
+		var (
+			item    pooledStream
+			gotItem bool
+			more    bool
+		)
+		e.idlePoolMu.Lock()
+		n := len(e.idlePool)
+		if n > 0 {
+			item = e.idlePool[n-1]
+			e.idlePool[n-1] = pooledStream{}
+			e.idlePool = e.idlePool[:n-1]
+			more = n-1 > 0
+			gotItem = true
+			e.Stats.PoolIdleConnections.Store(int64(n - 1))
+		}
+		e.idlePoolMu.Unlock()
+
+		if gotItem {
+			if more {
+				select {
+				case e.idlePoolAvailCh <- struct{}{}:
+				default:
+				}
+			}
 			if time.Since(item.createdAt) > 30*time.Minute || !transport.IsStreamAlive(item.conn) {
 				_ = item.conn.Close()
 				continue
@@ -1292,7 +1438,28 @@ func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 			}
 			return item.conn, nil
 		}
+
+		select {
+		case <-e.ctx.Done():
+			return nil, e.ctx.Err()
+		case <-timer.C:
+			return nil, fmt.Errorf("timeout waiting for reverse pool connection")
+		case <-e.idlePoolAvailCh:
+		}
 	}
+}
+
+func (e *Engine) claimTrackedReverseStream(timeout time.Duration) (net.Conn, error) {
+	conn, err := e.ClaimReverseStream(timeout)
+	if err != nil {
+		return nil, err
+	}
+	tc := &trackedStreamConn{
+		Conn:   conn,
+		engine: e,
+	}
+	e.activeStreams.Store(tc, struct{}{})
+	return tc, nil
 }
 
 func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPort int) error {
@@ -1338,7 +1505,7 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 				}
 			}
 			transport.TuneTCPConn(clientConn)
-			go routing.HandleEntryTCPClient(clientConn, uint16(targetPort), e.ClaimReverseStream, e.Stats, e.findForwarderRuleFor(listenPort, uint16(targetPort)))
+			go routing.HandleEntryTCPClient(clientConn, uint16(targetPort), e.claimTrackedReverseStream, e.Stats, e.findForwarderRuleFor(listenPort, uint16(targetPort)))
 		}
 	}()
 	return nil
@@ -1440,7 +1607,7 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 		return nil
 	}
 
-	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.ClaimReverseStream, e.Stats, gamingMode, rule)
+	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.claimTrackedReverseStream, e.Stats, gamingMode, rule)
 	return nil
 }
 
@@ -1741,13 +1908,11 @@ func (e *Engine) dialCarrierStream() (net.Conn, error) {
 }
 
 func (e *Engine) dialMuxCarrier() (net.Conn, error) {
-	e.dialSessMu.Lock()
-	defer e.dialSessMu.Unlock()
+	idx := int((e.muxShardRR.Add(1) - 1) % carrierShardCount)
+	e.muxShardMu[idx].Lock()
+	defer e.muxShardMu[idx].Unlock()
 
-	e.mu.Lock()
-	muxSess := e.activeMuxSess
-	e.mu.Unlock()
-
+	muxSess := e.activeMuxShards[idx]
 	if muxSess == nil || muxSess.IsClosed() {
 		baseConn, err := e.dialSingleCarrier()
 		if err != nil {
@@ -1755,29 +1920,23 @@ func (e *Engine) dialMuxCarrier() (net.Conn, error) {
 		}
 		e.bindL3TUNDuplex(baseConn)
 		newSess := transport.NewMuxSession(baseConn, true)
-		e.mu.Lock()
-		e.activeMuxSess = newSess
+		e.activeMuxShards[idx] = newSess
 		muxSess = newSess
-		e.mu.Unlock()
 	}
 
 	stream, err := muxSess.OpenStream()
 	if err != nil {
 		_ = muxSess.Close()
-		e.mu.Lock()
-		if e.activeMuxSess == muxSess {
-			e.activeMuxSess = nil
+		if e.activeMuxShards[idx] == muxSess {
+			e.activeMuxShards[idx] = nil
 		}
-		e.mu.Unlock()
 		baseConn, bErr := e.dialSingleCarrier()
 		if bErr != nil {
 			return nil, bErr
 		}
 		e.bindL3TUNDuplex(baseConn)
 		retrySess := transport.NewMuxSession(baseConn, true)
-		e.mu.Lock()
-		e.activeMuxSess = retrySess
-		e.mu.Unlock()
+		e.activeMuxShards[idx] = retrySess
 		return retrySess.OpenStream()
 	}
 	return stream, nil
@@ -1790,39 +1949,31 @@ func (e *Engine) dialQuicCarrier() (net.Conn, error) {
 	}
 	addr := net.JoinHostPort(candidates[0], strconv.Itoa(e.cfg.CarrierPort))
 
-	e.dialSessMu.Lock()
-	defer e.dialSessMu.Unlock()
+	idx := int((e.quicShardRR.Add(1) - 1) % carrierShardCount)
+	e.quicShardMu[idx].Lock()
+	defer e.quicShardMu[idx].Unlock()
 
-	e.mu.Lock()
-	qConn := e.activeQuicConn
-	e.mu.Unlock()
-
+	qConn := e.activeQuicShards[idx]
 	if qConn == nil || qConn.Context().Err() != nil {
 		newConn, err := transport.DialQuicSession(e.ctx, addr, e.cfg.SNI)
 		if err != nil {
 			return nil, err
 		}
-		e.mu.Lock()
-		e.activeQuicConn = newConn
+		e.activeQuicShards[idx] = newConn
 		qConn = newConn
-		e.mu.Unlock()
 	}
 
 	stream, err := transport.OpenQuicCarrierStream(e.ctx, qConn, e.cfg.SNI, e.cfg.Password)
 	if err != nil {
 		_ = qConn.CloseWithError(0, "stream open failed")
-		e.mu.Lock()
-		if e.activeQuicConn == qConn {
-			e.activeQuicConn = nil
+		if e.activeQuicShards[idx] == qConn {
+			e.activeQuicShards[idx] = nil
 		}
-		e.mu.Unlock()
 		retryConn, rErr := transport.DialQuicSession(e.ctx, addr, e.cfg.SNI)
 		if rErr != nil {
 			return nil, rErr
 		}
-		e.mu.Lock()
-		e.activeQuicConn = retryConn
-		e.mu.Unlock()
+		e.activeQuicShards[idx] = retryConn
 		return transport.OpenQuicCarrierStream(e.ctx, retryConn, e.cfg.SNI, e.cfg.Password)
 	}
 	return stream, nil
@@ -2033,6 +2184,9 @@ func (e *Engine) telemetryLoop() {
 	fiveSecTicker := time.NewTicker(5 * time.Second)
 	defer fiveSecTicker.Stop()
 
+	poolSweepTicker := time.NewTicker(10 * time.Second)
+	defer poolSweepTicker.Stop()
+
 	latencyTicker := time.NewTicker(30 * time.Second)
 	defer latencyTicker.Stop()
 
@@ -2052,6 +2206,10 @@ func (e *Engine) telemetryLoop() {
 			return
 		case <-fiveSecTicker.C:
 			e.Stats.UpdateRollingThroughput()
+		case <-poolSweepTicker.C:
+			if e.cfg.Role == "entry" || e.isDirect() {
+				e.sweepEntryIdlePool()
+			}
 		case <-initLatencyTimer.C:
 			if e.cfg.Role == "entry" && e.Stats.PoolIdleConnections.Load() > 0 && e.Stats.LatencyMs.Load() == 0 {
 				_, _ = telemetry.MeasureLatency(e.ClaimReverseStream, e.Stats)

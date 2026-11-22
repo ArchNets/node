@@ -168,26 +168,30 @@ func (c *TunnelController) Start() error {
 		c.logger.WithField("err", err).Warn("Tunnel: Auto-installation failed, proceeding with existing binaries if possible")
 	}
 
-	// Fetch initial config
+	// Fetch initial config; fall back to cached config if panel is temporarily unreachable at boot,
+	// and always start background poll/status tasks so recovery is automatic.
 	resp, err := c.apiClient.GetTunnelConfig()
-	if err != nil {
-		return fmt.Errorf("failed to fetch tunnel config: %v", err)
-	}
-	if resp.Data == nil {
-		return fmt.Errorf("tunnel config response has no data")
+	if err != nil || resp == nil || resp.Data == nil {
+		c.logger.WithField("err", err).Warn("Tunnel: initial config fetch failed; trying cached config fallback")
+		if cached, cErr := c.loadCachedConfig(); cErr == nil && cached != nil {
+			if aErr := c.applyConfig(cached); aErr != nil {
+				c.logger.WithField("err", aErr).Warn("Tunnel: failed to apply cached tunnel config")
+			} else {
+				c.logger.WithField("tunnelCount", len(cached.Tunnels)).Info("Tunnel: started from cached config while waiting for panel")
+			}
+		}
+	} else {
+		if applyErr := c.applyConfig(resp.Data); applyErr != nil {
+			c.logger.WithField("err", applyErr).Warn("Tunnel: initial apply config failed, will retry on next poll")
+		} else {
+			c.saveCachedConfig(resp.Data)
+			configJSON, _ := json.Marshal(resp.Data)
+			hash := sha256.Sum256(configJSON)
+			c.lastConfigHash = hex.EncodeToString(hash[:])
+		}
 	}
 
-	// Apply configuration
-	if err := c.applyConfig(resp.Data); err != nil {
-		return fmt.Errorf("failed to apply tunnel config: %v", err)
-	}
-
-	// Set initial config hash so configMonitor doesn't re-apply immediately
-	configJSON, _ := json.Marshal(resp.Data)
-	hash := sha256.Sum256(configJSON)
-	c.lastConfigHash = hex.EncodeToString(hash[:])
-
-	// Start background tasks
+	// Always start background tasks so configMonitor retries every 5s even if boot fetch failed
 	c.startTasks()
 
 	c.logger.WithFields(log.Fields{
@@ -196,6 +200,36 @@ func (c *TunnelController) Start() error {
 	}).Info("Tunnel controller started")
 
 	return nil
+}
+
+func (c *TunnelController) cachedConfigPath() string {
+	return filepath.Join(c.tunnelDir, "last_config.json")
+}
+
+func (c *TunnelController) saveCachedConfig(data *panel.TunnelData) {
+	if data == nil || c.tunnelDir == "" {
+		return
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	tmpPath := c.cachedConfigPath() + ".tmp"
+	if err := os.WriteFile(tmpPath, raw, 0600); err == nil {
+		_ = os.Rename(tmpPath, c.cachedConfigPath())
+	}
+}
+
+func (c *TunnelController) loadCachedConfig() (*panel.TunnelData, error) {
+	raw, err := os.ReadFile(c.cachedConfigPath())
+	if err != nil {
+		return nil, err
+	}
+	var data panel.TunnelData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, err
+	}
+	return &data, nil
 }
 
 // CheckAndInstallBinaries checks for missing binaries and installs them
@@ -360,6 +394,7 @@ func (c *TunnelController) configMonitor() error {
 		return nil
 	}
 
+	c.saveCachedConfig(resp.Data)
 	c.lastConfigHash = configHash
 	return nil
 }

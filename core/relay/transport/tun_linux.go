@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -157,14 +158,21 @@ func (d *L3TUNDevice) InjectWirePacket(wire []byte) error {
 
 func (d *L3TUNDevice) readPumpLoop() {
 	buf := make([]byte, tunReadBuf)
+	consecutiveErrs := 0
 	for !d.closed.Load() {
 		n, err := d.file.Read(buf)
 		if err != nil {
-			if d.closed.Load() {
+			if d.closed.Load() || errors.Is(err, os.ErrClosed) || errors.Is(err, unix.EBADF) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.EIO) {
 				return
 			}
+			consecutiveErrs++
+			if consecutiveErrs > 50 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
+		consecutiveErrs = 0
 		if n < 20 {
 			continue
 		}

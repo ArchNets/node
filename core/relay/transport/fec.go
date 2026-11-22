@@ -457,7 +457,11 @@ func (c *FECPacketConn) popPending(p []byte) (int, net.Addr, bool) {
 		return 0, nil, false
 	}
 	pkt := c.pending[0]
+	c.pending[0] = fecRebuiltPacket{}
 	c.pending = c.pending[1:]
+	if len(c.pending) == 0 {
+		c.pending = c.pending[:0]
+	}
 	copied := copy(p, pkt.data)
 	return copied, pkt.addr, true
 }
