@@ -17,7 +17,6 @@ import (
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/anytls"
 	hysteria2 "github.com/xtls/xray-core/proxy/hysteria/account"
-	"github.com/xtls/xray-core/proxy/masque"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
 	"github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	"github.com/xtls/xray-core/proxy/trojan"
@@ -140,10 +139,6 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 	defer v.users.mapLock.Unlock()
 	for i := range p.Users {
 		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
-		if p.NodeInfo.Type == "masque" {
-			cleanTag := strings.ReplaceAll(p.Tag, ":", "_")
-			v.users.uidMap[fmt.Sprintf("%s|%s", cleanTag, p.Users[i].Uuid)] = p.Users[i].Id
-		}
 	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
@@ -167,8 +162,6 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 		users = buildHysteria2Users(p.Tag, p.Users)
 	case "tuic":
 		users = buildTuicUsers(p.Tag, p.Users)
-	case "masque":
-		users = buildMasqueUsers(p.Tag, p.Users)
 	case "anytls":
 		users = buildAnyTLSUsers(p.Tag, p.Users)
 	case "shadowtls":
@@ -368,30 +361,6 @@ func buildTuicUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
 		Level:   0,
 		Email:   format.UserTag(tag, userInfo.Uuid),
 		Account: serial.ToTypedMessage(tuicAccount),
-	}
-}
-
-func buildMasqueUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildMasqueUser(tag, &userInfo[i])
-	}
-	return users
-}
-
-func buildMasqueUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
-	// MASQUE uses HTTP Basic auth: email (user) and password
-	// Xray-core's proxy/masque validator strictly prohibits ":" in user.Email because Basic Auth format is user:pass.
-	// Clean colon delimiters in tag (e.g. "masque:54" -> "masque_54") so userEmail never contains ":"
-	cleanTag := strings.ReplaceAll(tag, ":", "_")
-	masqueAccount := &masque.Account{
-		Password: userInfo.Uuid,
-	}
-	userEmail := fmt.Sprintf("%s|%s", cleanTag, userInfo.Uuid)
-	return &protocol.User{
-		Level:   0,
-		Email:   userEmail,
-		Account: serial.ToTypedMessage(masqueAccount),
 	}
 }
 

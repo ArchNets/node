@@ -60,8 +60,6 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		err = buildHysteria2(nodeInfo, in)
 	case "tuic":
 		err = buildTuic(nodeInfo, in)
-	case "masque":
-		err = buildMasque(nodeInfo, in)
 	case "anytls":
 		err = buildAnyTLS(nodeInfo, in)
 	case "socks":
@@ -637,55 +635,6 @@ func buildTuic(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) 
 	if err != nil {
 		return fmt.Errorf("marshal tuic settings error: %s", err)
 	}
-	return nil
-}
-
-func buildMasque(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
-	inbound.Protocol = "masque"
-
-	// Address pool for MASQUE CONNECT-IP leases (at most 1 IPv4 and 1 IPv6 prefix)
-	addresses := []string{"10.14.0.1/24", "fd14::1/64"}
-	if nodeInfo.Protocol.WireguardAddress != "" {
-		parts := strings.Split(nodeInfo.Protocol.WireguardAddress, ",")
-		var customAddrs []string
-		for _, p := range parts {
-			if s := strings.TrimSpace(p); s != "" {
-				customAddrs = append(customAddrs, s)
-			}
-		}
-		if len(customAddrs) > 0 {
-			addresses = customAddrs
-		}
-	}
-
-	mtu := uint32(1400)
-	if nodeInfo.Protocol.WireguardMTU > 0 {
-		mtu = uint32(nodeInfo.Protocol.WireguardMTU)
-	}
-
-	settings := &coreConf.MasqueServerConfig{
-		Address: addresses,
-		MTU:     mtu,
-	}
-
-	t := coreConf.TransportProtocol("masque")
-	path := "/.well-known/masque/ip/*/*/"
-	if nodeInfo.Protocol.Path != "" {
-		path = nodeInfo.Protocol.Path
-	}
-
-	inbound.StreamSetting = &coreConf.StreamConfig{
-		Network: &t,
-		MASQUESettings: &coreConf.MasqueConfig{
-			Path: path,
-		},
-	}
-
-	sets, err := json.Marshal(settings)
-	if err != nil {
-		return fmt.Errorf("marshal masque settings error: %s", err)
-	}
-	inbound.Settings = (*json.RawMessage)(&sets)
 	return nil
 }
 
