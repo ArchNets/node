@@ -46,7 +46,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		security = node.Protocol.Security
 	case "shadowsocks":
 		security = ""
-	case "tuic":
+	case "tuic", "masque":
 		security = "tls"
 	case "hysteria", "hysteria2":
 		security = "tls"

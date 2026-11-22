@@ -63,6 +63,7 @@ func NewClientV1(c *conf.NodeApiConfig) (*ClientV1, error) {
 		"tuic",
 		"hysteria",
 		"hysteria2",
+		"masque",
 		"anytls",
 		"vless",
 		"ssh",

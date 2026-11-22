@@ -140,6 +140,10 @@ func (v *XrayCore) AddUsers(p *AddUsersParams) (added int, err error) {
 	defer v.users.mapLock.Unlock()
 	for i := range p.Users {
 		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
+		if p.NodeInfo.Type == "masque" {
+			cleanTag := strings.ReplaceAll(p.Tag, ":", "_")
+			v.users.uidMap[fmt.Sprintf("%s|%s", cleanTag, p.Users[i].Uuid)] = p.Users[i].Id
+		}
 	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
@@ -376,12 +380,14 @@ func buildMasqueUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.
 }
 
 func buildMasqueUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
-	// MASQUE uses HTTP Basic auth: email and password
-	// Map client UUID as password, and formatted user tag as email identifier
+	// MASQUE uses HTTP Basic auth: email (user) and password
+	// Xray-core's proxy/masque validator strictly prohibits ":" in user.Email because Basic Auth format is user:pass.
+	// Clean colon delimiters in tag (e.g. "masque:54" -> "masque_54") so userEmail never contains ":"
+	cleanTag := strings.ReplaceAll(tag, ":", "_")
 	masqueAccount := &masque.Account{
 		Password: userInfo.Uuid,
 	}
-	userEmail := format.UserTag(tag, userInfo.Uuid)
+	userEmail := fmt.Sprintf("%s|%s", cleanTag, userInfo.Uuid)
 	return &protocol.User{
 		Level:   0,
 		Email:   userEmail,
