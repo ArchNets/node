@@ -446,11 +446,17 @@ func StartUDPListenerLoop(
 					}
 				}
 
+				primary := sess.Stream
+				twin := sess.StreamTwin
+
 				sessionsMu.Lock()
 				sessions[key] = sess
 				sessionsMu.Unlock()
 
 				pumpStream := func(st net.Conn) {
+					if st == nil {
+						return
+					}
 					var lenBuf [2]byte
 					frameBuf := make([]byte, 65536)
 					for {
@@ -486,7 +492,7 @@ func StartUDPListenerLoop(
 					}
 				}
 
-				go func(k string, s *UDPSession) {
+				go func(k string, s *UDPSession, primaryConn, twinConn net.Conn) {
 					if stats != nil {
 						stats.ActiveConnections.Add(1)
 						defer stats.ActiveConnections.Add(-1)
@@ -508,19 +514,20 @@ func StartUDPListenerLoop(
 					}()
 
 					var pumpWG sync.WaitGroup
-					if s.StreamTwin != nil {
-						twin := s.StreamTwin
+					if twinConn != nil {
 						pumpWG.Add(1)
 						go func() {
 							defer pumpWG.Done()
-							pumpStream(twin)
-							_ = twin.Close()
+							pumpStream(twinConn)
+							_ = twinConn.Close()
 						}()
 					}
-					pumpStream(s.Stream)
-					_ = s.Stream.Close()
+					pumpStream(primaryConn)
+					if primaryConn != nil {
+						_ = primaryConn.Close()
+					}
 					pumpWG.Wait()
-				}(key, sess)
+				}(key, sess, primary, twin)
 			}
 
 			var frame []byte
@@ -540,8 +547,18 @@ func StartUDPListenerLoop(
 				allowed, closeS := sess.gate.CheckUDPReverse(n)
 				if !allowed {
 					if closeS {
-						_ = sess.Stream.Close()
+						sess.WriteMu.Lock()
+						if sess.Stream != nil {
+							_ = sess.Stream.Close()
+							sess.Stream = nil
+						}
+						if sess.StreamTwin != nil {
+							_ = sess.StreamTwin.Close()
+							sess.StreamTwin = nil
+						}
+						sess.WriteMu.Unlock()
 					}
+					putUDPFrameBuffer(frame)
 					continue
 				}
 			}

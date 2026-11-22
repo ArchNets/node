@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"sync"
+	"sync/atomic"
 
 	"github.com/archnets/node/api/panel"
 	certutil "github.com/archnets/node/common/cert"
@@ -81,6 +82,8 @@ type TunnelController struct {
 	lastConfigHash        string
 	lastRestartTs         map[int]int64
 	lastRestartMu         sync.Mutex
+	lastQuickReportUnixNs atomic.Int64
+	closed                atomic.Bool
 
 	// Pluggable Tunnel Drivers
 	relayDriver *RelayDriver
@@ -98,7 +101,7 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		RegisterTunnelDriver(m, relayDrv)
 	}
 
-	return &TunnelController{
+	tc := &TunnelController{
 		tag:                  tag,
 		apiClient:            apiClient,
 		serverId:             serverId,
@@ -110,10 +113,29 @@ func NewTunnelController(apiClient *panel.ClientV2, serverId int, nodeConfig *co
 		relayDriver:          relayDrv,
 		xrayInstances:        make(map[int]*core.Instance),
 	}
+	relayDrv.SetOnPoolActive(func(_ int) {
+		tc.triggerImmediateStatusReport()
+	})
+	return tc
 }
 
 func generateTunnelTag(serverId int) string {
 	return "tunnel-" + strconv.Itoa(serverId)
+}
+
+func (c *TunnelController) triggerImmediateStatusReport() {
+	if c.closed.Load() {
+		return
+	}
+	now := time.Now().UnixNano()
+	prev := c.lastQuickReportUnixNs.Load()
+	if now-prev < int64(2*time.Second) {
+		return
+	}
+	if !c.lastQuickReportUnixNs.CompareAndSwap(prev, now) {
+		return
+	}
+	_ = c.statusReport()
 }
 
 // Start starts the tunnel controller
@@ -199,6 +221,7 @@ func (c *TunnelController) Uninstall() error {
 
 // Close stops the tunnel controller
 func (c *TunnelController) Close() error {
+	c.closed.Store(true)
 	// Stop periodic tasks
 	if c.configMonitorPeriodic != nil {
 		c.configMonitorPeriodic.Close()
@@ -207,12 +230,18 @@ func (c *TunnelController) Close() error {
 		c.statusReportPeriodic.Close()
 	}
 
-	// Stop all registered drivers
+	// Stop all registered drivers (deduplicated since multiple methods share the same driver)
 	driversMu.RLock()
+	uniqueDrivers := make(map[TunnelDriver]struct{})
 	for _, drv := range drivers {
-		drv.StopAll()
+		if drv != nil {
+			uniqueDrivers[drv] = struct{}{}
+		}
 	}
 	driversMu.RUnlock()
+	for drv := range uniqueDrivers {
+		drv.StopAll()
+	}
 
 	// Stop all forwarders
 	c.stopAllForwarders()

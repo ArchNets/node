@@ -79,6 +79,7 @@ type Config struct {
 	Forwarders         []routing.ForwarderRule
 	Logger             *log.Entry
 	OnProbeSample      func(tunnelID int, sample *telemetry.BandwidthSample)
+	OnPoolActive       func(tunnelID int)
 }
 
 type pooledStream struct {
@@ -474,8 +475,8 @@ drained:
 	}()
 	select {
 	case <-waitCh:
-	case <-time.After(3 * time.Second):
-		e.logger.Warn("[Relay] Engine Close WaitGroup timed out after 3s; proceeding with teardown")
+	case <-time.After(1 * time.Second):
+		e.logger.Warn("[Relay] Engine Close WaitGroup timed out after 1s; proceeding with teardown")
 	}
 
 	return nil
@@ -1249,6 +1250,9 @@ func (e *Engine) pushIdleStream(stream net.Conn) {
 				"carrierPort": e.cfg.CarrierPort,
 				"remote":      stream.RemoteAddr().String(),
 			}).Info("[Relay] Entry reverse carrier pool active: authenticated reverse socket received")
+			if e.cfg.OnPoolActive != nil {
+				go e.cfg.OnPoolActive(e.cfg.TunnelID)
+			}
 		}
 	default:
 		select {
@@ -1692,10 +1696,10 @@ func (e *Engine) exitPoolLoop() {
 			if e.cfg.TunnelID < 1000 {
 				if fails := failStreak.Load(); fails > 0 {
 					shift := fails - 1
-					if shift > 4 {
-						shift = 4
+					if shift > 3 {
+						shift = 3
 					}
-					backoff := (250 * time.Millisecond) << uint(shift) // 250ms..4s
+					backoff := (250 * time.Millisecond) << uint(shift) // 250ms..2s
 					if time.Since(time.Unix(0, lastFailUnixNano.Load())) < backoff {
 						needed = 0
 					}
@@ -1986,6 +1990,9 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 			"carrierPort": e.cfg.CarrierPort,
 			"sni":         e.cfg.SNI,
 		}).Info("[Relay] Exit reverse carrier connected and warm connections ready in pool")
+		if e.cfg.OnPoolActive != nil {
+			go e.cfg.OnPoolActive(e.cfg.TunnelID)
+		}
 	}
 
 	_ = stream.SetDeadline(time.Time{})
@@ -2029,6 +2036,9 @@ func (e *Engine) telemetryLoop() {
 	latencyTicker := time.NewTicker(30 * time.Second)
 	defer latencyTicker.Stop()
 
+	initLatencyTimer := time.NewTimer(1500 * time.Millisecond)
+	defer initLatencyTimer.Stop()
+
 	probeInterval := time.Duration(e.cfg.ProbeIntervalMin) * time.Minute
 	if probeInterval < time.Minute {
 		probeInterval = 30 * time.Minute
@@ -2042,6 +2052,10 @@ func (e *Engine) telemetryLoop() {
 			return
 		case <-fiveSecTicker.C:
 			e.Stats.UpdateRollingThroughput()
+		case <-initLatencyTimer.C:
+			if e.cfg.Role == "entry" && e.Stats.PoolIdleConnections.Load() > 0 && e.Stats.LatencyMs.Load() == 0 {
+				_, _ = telemetry.MeasureLatency(e.ClaimReverseStream, e.Stats)
+			}
 		case <-latencyTicker.C:
 			if e.cfg.Role == "entry" && e.Stats.PoolIdleConnections.Load() > 0 {
 				_, _ = telemetry.MeasureLatency(e.ClaimReverseStream, e.Stats)

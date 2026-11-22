@@ -50,6 +50,9 @@ func (v *XrayCore) GetUserManager(tag string) (proxy.UserManager, error) {
 // What changed: Added no-op handling for SOCKS and HTTP node types in DelUsers.
 // Why: SOCKS and HTTP inbounds in Xray do NOT support a dynamic user manager. Credentials are static accounts applied at inbound build time. User changes are handled by rebuilding the inbound (RemoveInbound + AddInbound), not by the user manager.
 func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, nodeInfo *panel.NodeInfo) error {
+	if vc == nil || vc.dispatcher == nil {
+		return nil
+	}
 	if nodeInfo != nil {
 		switch nodeInfo.Type {
 		case "socks", "http":
@@ -99,6 +102,9 @@ func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, nodeInfo *panel
 }
 
 func (vc *XrayCore) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
+	if vc == nil || vc.dispatcher == nil {
+		return nil, nil
+	}
 	trafficSlice := make([]panel.UserTraffic, 0)
 	vc.users.mapLock.RLock()
 	defer vc.users.mapLock.RUnlock()

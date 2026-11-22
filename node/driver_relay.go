@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/archnets/node/api/panel"
 	"github.com/archnets/node/core/relay"
@@ -21,6 +22,7 @@ type RelayDriver struct {
 	unsentDownload map[int]int64
 	pendingSamples map[int]*panel.BandwidthSamplePayload
 	samplesMu      sync.Mutex
+	onPoolActiveFn atomic.Pointer[func(int)]
 	logger         *log.Entry
 }
 
@@ -70,6 +72,20 @@ func (d *RelayDriver) RefundStats(statuses []panel.TunnelStatus) {
 		}
 	}
 	d.samplesMu.Unlock()
+}
+
+func (d *RelayDriver) SetOnPoolActive(fn func(tunnelID int)) {
+	if fn == nil {
+		d.onPoolActiveFn.Store(nil)
+		return
+	}
+	d.onPoolActiveFn.Store(&fn)
+}
+
+func (d *RelayDriver) handlePoolActive(tunnelID int) {
+	if fnPtr := d.onPoolActiveFn.Load(); fnPtr != nil && *fnPtr != nil {
+		(*fnPtr)(tunnelID)
+	}
 }
 
 func (d *RelayDriver) QueueProbeSample(tunnelID int, sample *telemetry.BandwidthSample) {
@@ -369,6 +385,7 @@ func (d *RelayDriver) Start(t panel.TunnelInfo) error {
 		Forwarders:         forwarderRules,
 		Logger:             d.logger,
 		OnProbeSample:      d.QueueProbeSample,
+		OnPoolActive:       d.handlePoolActive,
 	}
 
 	// If existing engine is running and carrier settings are identical, update forwarders in-place without restarting
@@ -503,15 +520,26 @@ func (d *RelayDriver) Stop(tunnelId int) error {
 
 func (d *RelayDriver) StopAll() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	engines := make(map[int]*relay.Engine, len(d.engines))
 	for id, eng := range d.engines {
 		if eng != nil {
 			d.harvestUnsentLocked(id, eng)
-			_ = eng.Close()
-			d.logger.WithField("tunnelId", id).Info("RelayDriver: stopped engine instance")
+			engines[id] = eng
 		}
 	}
 	d.engines = make(map[int]*relay.Engine)
+	d.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for id, eng := range engines {
+		wg.Add(1)
+		go func(tid int, e *relay.Engine) {
+			defer wg.Done()
+			_ = e.Close()
+			d.logger.WithField("tunnelId", tid).Info("RelayDriver: stopped engine instance")
+		}(id, eng)
+	}
+	wg.Wait()
 }
 
 func (d *RelayDriver) CollectStats(t panel.TunnelInfo, pingLatency int, pingOnline bool) (panel.TunnelStatus, bool) {

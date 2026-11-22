@@ -2,6 +2,7 @@ package task
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -12,38 +13,50 @@ type Task struct {
 	// Execute is the task function
 	Execute func() error
 
-	access  sync.Mutex
-	timer   *time.Timer
-	running bool
+	access   sync.Mutex
+	timer    *time.Timer
+	running  bool
+	inFlight atomic.Bool
 }
 
-func (t *Task) hasClosed() bool {
+func (t *Task) isRunning() bool {
 	t.access.Lock()
 	defer t.access.Unlock()
+	return t.running
+}
 
-	return !t.running
+func (t *Task) scheduleNext() {
+	t.access.Lock()
+	defer t.access.Unlock()
+	if !t.running {
+		return
+	}
+	t.timer = time.AfterFunc(t.Interval, func() {
+		_ = t.checkedExecute(true)
+	})
 }
 
 func (t *Task) checkedExecute(first bool) error {
-	if t.hasClosed() {
+	if !t.isRunning() {
 		return nil
 	}
 
-	t.access.Lock()
-	defer t.access.Unlock()
 	if first {
-		if err := t.Execute(); err != nil {
+		if !t.inFlight.CompareAndSwap(false, true) {
+			t.scheduleNext()
+			return nil
+		}
+		err := t.Execute()
+		t.inFlight.Store(false)
+		if err != nil {
+			t.access.Lock()
 			t.running = false
+			t.access.Unlock()
 			return err
 		}
 	}
-	if !t.running {
-		return nil
-	}
-	t.timer = time.AfterFunc(t.Interval, func() {
-		t.checkedExecute(true)
-	})
 
+	t.scheduleNext()
 	return nil
 }
 
@@ -65,7 +78,7 @@ func (t *Task) Start(first bool) error {
 	return nil
 }
 
-// Close implements common.Closable.
+// Close implements common.Closable without blocking on an in-flight Execute() call.
 func (t *Task) Close() {
 	t.access.Lock()
 	defer t.access.Unlock()

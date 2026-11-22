@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/archnets/node/api/panel"
@@ -83,27 +84,36 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Error("failed to get node configuration")
 		return
 	}
-	err = nodes.Start()
-	if err != nil {
-		log.WithField("err", err).Error("failed to start nodes")
-		return
-	}
-	log.Infof("started %d nodes", serverconfig.Data.Total)
 
 	// Clean up legacy standalone tunnel process if lingering from older scripts
 	cleanupLegacyTunnelProcess()
 
-	// Initialize and start unified native tunnel controller directly in the main server daemon
+	// Start protocol nodes and unified tunnel controller concurrently once Xray core listeners are bound.
 	tunnelCtrl := node.NewTunnelController(p, c.ApiConfig.ServerId, c)
-	if err := tunnelCtrl.Start(); err != nil {
-		log.WithField("err", err).Warn("Tunnel controller failed to start, will retry on next poll")
+	var startWG sync.WaitGroup
+	var nodesStartErr error
+	startWG.Add(2)
+	go func() {
+		defer startWG.Done()
+		nodesStartErr = nodes.Start()
+	}()
+	go func() {
+		defer startWG.Done()
+		if tErr := tunnelCtrl.Start(); tErr != nil {
+			log.WithField("err", tErr).Warn("Tunnel controller failed to start, will retry on next poll")
+		}
+	}()
+	startWG.Wait()
+	if nodesStartErr != nil {
+		log.WithField("err", nodesStartErr).Error("failed to start nodes")
+		_ = tunnelCtrl.Close()
+		return
 	}
-	defer tunnelCtrl.Close()
+	log.Infof("started %d nodes", serverconfig.Data.Total)
 
 	// Initialize and start remote terminal controller for panel SSH sessions
 	terminalCtrl := terminal.NewController(c.ApiConfig.ApiHost, c.ApiConfig.ServerId, c.ApiConfig.SecretKey)
 	terminalCtrl.Start()
-	defer terminalCtrl.Close()
 	if watch {
 		if _, err := os.Stat(config); err == nil {
 			// On file change, just signal reload; do not run reload concurrently here
@@ -130,11 +140,26 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	for {
 		select {
 		case <-osSignals:
-			nodes.Close()
-			_ = xraycore.Close()
+			var stopWG sync.WaitGroup
 			if tunnelCtrl != nil {
-				tunnelCtrl.Close()
+				stopWG.Add(1)
+				go func(tc *node.TunnelController) {
+					defer stopWG.Done()
+					_ = tc.Close()
+				}(tunnelCtrl)
 			}
+			stopWG.Add(1)
+			go func() {
+				defer stopWG.Done()
+				nodes.Close()
+			}()
+			stopWG.Add(1)
+			go func() {
+				defer stopWG.Done()
+				terminalCtrl.Close()
+			}()
+			stopWG.Wait()
+			_ = xraycore.Close()
 			return
 		case <-reloadCh:
 			log.Info("received reload signal, reloading configuration...")
@@ -153,7 +178,20 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore, tunnelCtrl 
 		oldReloadCh = (*xcore).ReloadCh
 	}
 
-	(*nodes).Close()
+	var stopWG sync.WaitGroup
+	if *tunnelCtrl != nil {
+		stopWG.Add(1)
+		go func(tc *node.TunnelController) {
+			defer stopWG.Done()
+			_ = tc.Close()
+		}(*tunnelCtrl)
+	}
+	stopWG.Add(1)
+	go func() {
+		defer stopWG.Done()
+		(*nodes).Close()
+	}()
+	stopWG.Wait()
 	if err := (*xcore).Close(); err != nil {
 		return err
 	}
@@ -179,21 +217,29 @@ func reload(config string, nodes **node.Node, xcore **core.XrayCore, tunnelCtrl 
 	if err != nil {
 		return err
 	}
-	if err := newNodes.Start(); err != nil {
-		return err
+
+	newTunnelCtrl := node.NewTunnelController(p, newConf.ApiConfig.ServerId, newConf)
+	var startWG sync.WaitGroup
+	var nodesStartErr error
+	startWG.Add(2)
+	go func() {
+		defer startWG.Done()
+		nodesStartErr = newNodes.Start()
+	}()
+	go func() {
+		defer startWG.Done()
+		if tErr := newTunnelCtrl.Start(); tErr != nil {
+			log.WithField("err", tErr).Warn("Failed to restart tunnel controller on reload")
+		}
+	}()
+	startWG.Wait()
+	if nodesStartErr != nil {
+		_ = newTunnelCtrl.Close()
+		return nodesStartErr
 	}
 
 	*nodes = newNodes
 	*xcore = newCore
-
-	// Reload tunnel controller
-	if *tunnelCtrl != nil {
-		(*tunnelCtrl).Close()
-	}
-	newTunnelCtrl := node.NewTunnelController(p, newConf.ApiConfig.ServerId, newConf)
-	if err := newTunnelCtrl.Start(); err != nil {
-		log.WithField("err", err).Warn("Failed to restart tunnel controller on reload")
-	}
 	*tunnelCtrl = newTunnelCtrl
 
 	log.Infof("%d nodes reloaded successfully", serverconfig.Data.Total)

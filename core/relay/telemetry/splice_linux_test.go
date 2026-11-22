@@ -100,15 +100,17 @@ func TestSplicePipePoolNoFDLeakAfterGC(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 	afterFDs := countSelfFDs(t)
+	pooledFDs := 2 * len(splicePipePool)
 
 	if len(splicePipePool) > maxSplicePipePool {
 		t.Fatalf("splicePipePool exceeded cap: %d > %d", len(splicePipePool), maxSplicePipePool)
 	}
-	// Allow small slack for pool growth up to concurrency, but never 400+ leaked pipes
-	if delta := afterFDs - baseFDs; delta > 120 {
-		t.Fatalf("pipe FD leak detected: base=%d after=%d delta=%d", baseFDs, afterFDs, delta)
+	// Subtract FDs legitimately held in the bounded pool; leaked FDs outside the pool must stay near zero.
+	leaked := (afterFDs - baseFDs) - pooledFDs
+	if leaked > 16 {
+		t.Fatalf("pipe FD leak detected: base=%d after=%d pooledFDs=%d leaked=%d", baseFDs, afterFDs, pooledFDs, leaked)
 	}
-	t.Logf("✓ Verified zero splice pipe FD leak across 400 transfers + GC (baseFDs=%d, afterFDs=%d, pooled=%d)", baseFDs, afterFDs, len(splicePipePool))
+	t.Logf("✓ Verified zero splice pipe FD leak across 400 transfers + GC (baseFDs=%d, afterFDs=%d, pooled=%d, leaked=%d)", baseFDs, afterFDs, len(splicePipePool), leaked)
 }
 
 func TestSplicePipePoolBrokenErrorClosesPipe(t *testing.T) {
