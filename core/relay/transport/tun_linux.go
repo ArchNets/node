@@ -65,7 +65,7 @@ func OpenL3TUNWithSubnet(tunnelID int, role, password string, mtu int, customIfa
 	if err != nil {
 		return nil, err
 	}
-	if mtu <= 0 || mtu > 1420 {
+	if mtu <= 0 || mtu > 1440 {
 		mtu = defaultL3MTU
 	}
 	mss := mtu - 40
@@ -205,10 +205,17 @@ func (d *L3TUNDevice) configureKernelInterface() error {
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", d.name), []byte("2\n"), 0644)
 
 	// Ensure local firewalls (e.g. UFW on Kharej with -P INPUT DROP) accept traffic on this TUN interface
+	// Sweep matching rules first so ungraceful restarts never accumulate duplicate iptables entries.
 	if os.Geteuid() == 0 {
-		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", d.name, "-j", "ACCEPT").Run()
-		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-i", d.name, "-j", "ACCEPT").Run()
-		_ = exec.Command("iptables", "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-o", d.name, "-j", "ACCEPT").Run()
+		filterRules := [][]string{
+			{"INPUT", "-i", d.name, "-j", "ACCEPT"},
+			{"FORWARD", "-i", d.name, "-j", "ACCEPT"},
+			{"FORWARD", "-o", d.name, "-j", "ACCEPT"},
+		}
+		for _, r := range filterRules {
+			sweepIptablesRule("filter", r)
+			_ = exec.Command("iptables", append([]string{"-w", "2", "-t", "filter", "-I", r[0], "1"}, r[1:]...)...).Run()
+		}
 	}
 
 	// Benchmark sandboxes (antbs...) need instant zero-lag setup without hundreds of synchronous iptables calls

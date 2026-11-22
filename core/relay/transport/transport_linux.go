@@ -14,9 +14,29 @@ import (
 )
 
 var (
-	kernelTuneOnce sync.Once
-	configuredMTU  atomic.Int32
+	kernelTuneOnce   sync.Once
+	configuredMTU    atomic.Int32
+	socketBufOnce    sync.Once
+	socketBufCapByte = 8 * 1024 * 1024
 )
+
+func getAdaptiveSocketBufCap() int {
+	socketBufOnce.Do(func() {
+		var si unix.Sysinfo_t
+		if err := unix.Sysinfo(&si); err == nil && si.Totalram > 0 {
+			totalBytes := uint64(si.Totalram) * uint64(si.Unit)
+			switch {
+			case totalBytes <= 2600*1024*1024:
+				socketBufCapByte = 4 * 1024 * 1024 // <= 2.5 GiB RAM: cap at 4 MiB per socket
+			case totalBytes <= 4800*1024*1024:
+				socketBufCapByte = 8 * 1024 * 1024 // <= 4.5 GiB RAM: cap at 8 MiB per socket
+			default:
+				socketBufCapByte = 16 * 1024 * 1024 // > 4.5 GiB RAM: cap at 16 MiB per socket
+			}
+		}
+	})
+	return socketBufCapByte
+}
 
 // attachSocketBPFProtocolFilter attaches an in-kernel Classic BPF filter to a raw PacketConn.
 // The filter drops all packets whose IPv4 protocol byte (offset 9) does not match proto directly
@@ -156,12 +176,13 @@ func setPlatformTCPTune(tc *net.TCPConn) {
 			_ = unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
 			// Enable TCP_QUICKACK to accelerate slow-start window growth over high-RTT links
 			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
-			// Apply large socket buffer sizes to remove the 4MB BDP ceiling on high-RTT links
-			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, 32*1024*1024); err != nil {
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, 32*1024*1024)
+			// Apply RAM-adaptive socket buffer caps to eliminate the 4MB BDP ceiling without risking skb OOM on low-RAM nodes
+			bufCap := getAdaptiveSocketBufCap()
+			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, bufCap); err != nil {
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, bufCap)
 			}
-			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUFFORCE, 32*1024*1024); err != nil {
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, 32*1024*1024)
+			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUFFORCE, bufCap); err != nil {
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, bufCap)
 			}
 			// Apply TCP_MAXSEG (MSS clamping = MTU - 40) when a custom sub-1500 MTU is configured
 			if mtu >= 576 && mtu < 1500 {

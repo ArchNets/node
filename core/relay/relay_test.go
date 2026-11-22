@@ -2640,3 +2640,92 @@ func TestFlowGateReversePoolRecoveryAfterStalledReap(t *testing.T) {
 	}
 	t.Logf("✓ Reverse Pool Recovery Verified: idle connections recovered to %d after stalled download streams were reaped", entry.Stats.PoolIdleConnections.Load())
 }
+
+func TestBidirectionalHalfCloseCompletesDownload(t *testing.T) {
+	carrierPort := getFreeTCPPort(t)
+	fwdPort := getFreeTCPPort(t)
+	targetPort := getFreeTCPPort(t)
+
+	targetLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetLn.Close()
+
+	expectedResp := bytes.Repeat([]byte("HALFDUPLEX_OK_"), 4096)
+	go func() {
+		for {
+			c, aErr := targetLn.Accept()
+			if aErr != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				// Read until client half-closes (FIN)
+				req, _ := io.ReadAll(conn)
+				if string(req) == "REQ" {
+					time.Sleep(100 * time.Millisecond)
+					_, _ = conn.Write(expectedResp)
+				}
+			}(c)
+		}
+	}()
+
+	entry := NewEngine(Config{
+		TunnelID:           955,
+		Role:               "entry",
+		Transport:          "l3-tcp",
+		CarrierPort:        carrierPort,
+		ListenIP:           "127.0.0.1",
+		Password:           "half-close-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+		Forwarders: []routing.ForwarderRule{
+			{ID: 1, Protocol: "tcp", ListenIP: "127.0.0.1", ListenPort: fwdPort, TargetPort: targetPort},
+		},
+	})
+	if err := entry.Start(); err != nil {
+		t.Fatalf("entry start: %v", err)
+	}
+	defer entry.Close()
+
+	exit := NewEngine(Config{
+		TunnelID:           955,
+		Role:               "exit",
+		Transport:          "l3-tcp",
+		CarrierPort:        carrierPort,
+		EntryServerIP:      "127.0.0.1",
+		TargetIP:           "127.0.0.1",
+		Password:           "half-close-secret",
+		UseHalfDuplex:      false,
+		UseFisher:          false,
+		MinHeldConnections: 4,
+	})
+	if err := exit.Start(); err != nil {
+		t.Fatalf("exit start: %v", err)
+	}
+	defer exit.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for entry.Stats.PoolIdleConnections.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	client, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", fwdPort), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, _ = client.Write([]byte("REQ"))
+	_ = client.(*net.TCPConn).CloseWrite()
+
+	_ = client.SetReadDeadline(time.Now().Add(4 * time.Second))
+	got, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("ReadAll after CloseWrite failed: %v", err)
+	}
+	if !bytes.Equal(got, expectedResp) {
+		t.Fatalf("response truncated on half-close: got %d bytes, want %d bytes", len(got), len(expectedResp))
+	}
+}

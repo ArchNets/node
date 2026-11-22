@@ -11,27 +11,43 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const splicePipeCapacity = 1 << 20 // 1 MiB pipe capacity for zero-copy kernel transfers
+const (
+	splicePipeCapacity = 256 * 1024 // 256 KiB pipe capacity for zero-copy kernel transfers
+	maxSplicePipePool  = 256        // Bounded pool caps open pipe FDs (512 max) and kernel slab usage (~64 MiB max)
+)
 
 type splicePipe struct {
-	pr int
-	pw int
+	pr        int
+	pw        int
+	closeOnce sync.Once
 }
 
-var splicePipePool = sync.Pool{
-	New: func() any {
-		var fds [2]int
-		if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
-			return nil
+func (p *splicePipe) close() {
+	if p == nil {
+		return
+	}
+	p.closeOnce.Do(func() {
+		if p.pr >= 0 {
+			_ = unix.Close(p.pr)
+			p.pr = -1
 		}
-		_, _ = unix.FcntlInt(uintptr(fds[0]), unix.F_SETPIPE_SZ, splicePipeCapacity)
-		return &splicePipe{pr: fds[0], pw: fds[1]}
-	},
+		if p.pw >= 0 {
+			_ = unix.Close(p.pw)
+			p.pw = -1
+		}
+	})
 }
+
+// Bounded channel pool: unlike sync.Pool, GC never silently evicts items without closing their OS pipe FDs.
+var splicePipePool = make(chan *splicePipe, maxSplicePipePool)
 
 func getSplicePipe() *splicePipe {
-	if p, ok := splicePipePool.Get().(*splicePipe); ok && p != nil {
-		return p
+	select {
+	case p := <-splicePipePool:
+		if p != nil {
+			return p
+		}
+	default:
 	}
 	var fds [2]int
 	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
@@ -41,19 +57,35 @@ func getSplicePipe() *splicePipe {
 	return &splicePipe{pr: fds[0], pw: fds[1]}
 }
 
-func putSplicePipe(p *splicePipe) {
+func putSplicePipe(p *splicePipe, broken bool) {
 	if p == nil {
 		return
 	}
-	// Drain any lingering bytes in pipe before returning to pool
+	if broken {
+		p.close()
+		return
+	}
+	// Drain any lingering bytes in pipe and verify EAGAIN before returning to pool
 	var discard [4096]byte
 	for {
 		n, err := unix.Read(p.pr, discard[:])
-		if n <= 0 || err != nil {
+		if n > 0 {
+			continue
+		}
+		if err == unix.EINTR {
+			continue
+		}
+		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 			break
 		}
+		p.close()
+		return
 	}
-	splicePipePool.Put(p)
+	select {
+	case splicePipePool <- p:
+	default:
+		p.close()
+	}
 }
 
 // spliceRelay moves bytes directly between two TCP sockets using Linux kernel splice(2).
@@ -72,12 +104,16 @@ func spliceRelay(dst, src *net.TCPConn, onChunk func(n int)) (handled bool, err 
 	if pipe == nil {
 		return false, nil
 	}
-	defer putSplicePipe(pipe)
+	broken := false
+	defer func() {
+		putSplicePipe(pipe, broken)
+	}()
 	pr, pw := pipe.pr, pipe.pw
 
 	for {
 		inPipe, err := spliceDrain(srcRaw, pw)
 		if err != nil {
+			broken = true
 			if !handled {
 				return false, nil
 			}
@@ -97,9 +133,11 @@ func spliceRelay(dst, src *net.TCPConn, onChunk func(n int)) (handled bool, err 
 				}
 			}
 			if err != nil {
+				broken = true
 				return true, err
 			}
 			if n == 0 {
+				broken = true
 				return true, io.ErrUnexpectedEOF
 			}
 		}

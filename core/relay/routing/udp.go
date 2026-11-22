@@ -326,7 +326,14 @@ func StartUDPListenerLoop(
 			case <-ctx.Done():
 				sessionsMu.Lock()
 				for k, s := range sessions {
-					_ = s.Stream.Close()
+					s.WriteMu.Lock()
+					if s.Stream != nil {
+						_ = s.Stream.Close()
+					}
+					if s.StreamTwin != nil {
+						_ = s.StreamTwin.Close()
+					}
+					s.WriteMu.Unlock()
 					delete(sessions, k)
 				}
 				sessionsMu.Unlock()
@@ -336,7 +343,14 @@ func StartUDPListenerLoop(
 				sessionsMu.Lock()
 				for k, s := range sessions {
 					if now.Unix()-s.lastActive.Load() > int64(UDPSessionIdleTime/time.Second) {
-						_ = s.Stream.Close()
+						s.WriteMu.Lock()
+						if s.Stream != nil {
+							_ = s.Stream.Close()
+						}
+						if s.StreamTwin != nil {
+							_ = s.StreamTwin.Close()
+						}
+						s.WriteMu.Unlock()
 						delete(sessions, k)
 					}
 				}
@@ -478,10 +492,14 @@ func StartUDPListenerLoop(
 						defer stats.ActiveConnections.Add(-1)
 					}
 					defer func() {
-						_ = s.Stream.Close()
+						s.WriteMu.Lock()
+						if s.Stream != nil {
+							_ = s.Stream.Close()
+						}
 						if s.StreamTwin != nil {
 							_ = s.StreamTwin.Close()
 						}
+						s.WriteMu.Unlock()
 						sessionsMu.Lock()
 						if sessions[k] == s {
 							delete(sessions, k)
@@ -489,10 +507,19 @@ func StartUDPListenerLoop(
 						sessionsMu.Unlock()
 					}()
 
+					var pumpWG sync.WaitGroup
 					if s.StreamTwin != nil {
-						go pumpStream(s.StreamTwin)
+						twin := s.StreamTwin
+						pumpWG.Add(1)
+						go func() {
+							defer pumpWG.Done()
+							pumpStream(twin)
+							_ = twin.Close()
+						}()
 					}
 					pumpStream(s.Stream)
+					_ = s.Stream.Close()
+					pumpWG.Wait()
 				}(key, sess)
 			}
 
@@ -521,30 +548,49 @@ func StartUDPListenerLoop(
 
 			sess.WriteMu.Lock()
 			sess.lastActive.Store(time.Now().Unix())
-			writeTimeout := 1 * time.Second
-			if gamingMode {
-				writeTimeout = 150 * time.Millisecond
+			writeTimeout := 2 * time.Second
+			var wErr error
+			wroteAny := false
+
+			if sess.Stream != nil {
+				_ = sess.Stream.SetWriteDeadline(time.Now().Add(writeTimeout))
+				_, wErr = sess.Stream.Write(frame)
+				_ = sess.Stream.SetWriteDeadline(time.Time{})
+				if wErr != nil {
+					_ = sess.Stream.Close()
+					sess.Stream = nil
+				} else {
+					wroteAny = true
+				}
 			}
-			_ = sess.Stream.SetWriteDeadline(time.Now().Add(writeTimeout))
-			_, wErr := sess.Stream.Write(frame)
-			_ = sess.Stream.SetWriteDeadline(time.Time{})
 
 			if sess.StreamTwin != nil {
 				_ = sess.StreamTwin.SetWriteDeadline(time.Now().Add(writeTimeout))
-				_, _ = sess.StreamTwin.Write(frame)
+				_, twinErr := sess.StreamTwin.Write(frame)
 				_ = sess.StreamTwin.SetWriteDeadline(time.Time{})
+				if twinErr != nil {
+					_ = sess.StreamTwin.Close()
+					sess.StreamTwin = nil
+				} else {
+					wroteAny = true
+				}
 			}
+
+			if sess.Stream == nil && sess.StreamTwin != nil {
+				sess.Stream = sess.StreamTwin
+				sess.StreamTwin = nil
+			}
+			allDead := sess.Stream == nil && sess.StreamTwin == nil
 			sess.WriteMu.Unlock()
 			putUDPFrameBuffer(frame)
 
-			if wErr != nil {
-				_ = sess.Stream.Close()
+			if allDead {
 				sessionsMu.Lock()
 				if sessions[key] == sess {
 					delete(sessions, key)
 				}
 				sessionsMu.Unlock()
-			} else if stats != nil {
+			} else if wroteAny && stats != nil {
 				stats.AddUpload(int64(n))
 			}
 		}
@@ -673,9 +719,12 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 					gs.mu.Unlock()
 
 					for _, st := range streamList {
-						_ = st.SetWriteDeadline(time.Now().Add(150 * time.Millisecond))
-						_, _ = st.Write(frame)
+						_ = st.SetWriteDeadline(time.Now().Add(2 * time.Second))
+						_, wErr := st.Write(frame)
 						_ = st.SetWriteDeadline(time.Time{})
+						if wErr != nil {
+							_ = st.Close()
+						}
 					}
 					putUDPFrameBuffer(frame)
 

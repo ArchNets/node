@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -85,6 +86,11 @@ type pooledStream struct {
 	createdAt time.Time
 }
 
+type idleStreamEntry struct {
+	createdAt time.Time
+	maxAge    time.Duration
+}
+
 // Engine is the L4 reverse tunnel & zero-copy relay engine in pure Go.
 type Engine struct {
 	cfg           Config
@@ -119,6 +125,7 @@ type Engine struct {
 	alive         atomic.Bool
 	lastDialLog   atomic.Int64
 	carrierFwd    atomic.Int64
+	l3DuplexGen   atomic.Uint64
 	forwarderRules atomic.Pointer[[]routing.ForwarderRule]
 	logger        *log.Entry
 }
@@ -310,7 +317,7 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("unknown relay engine role: %q", e.cfg.Role)
 	}
 
-	if e.l3TunDev != nil && e.cfg.Role == "entry" && !e.isPacketTransport() && e.cfg.TunnelID < 1000 {
+	if e.l3TunDev != nil && e.cfg.Role == "entry" && !e.isPacketTransport() && !e.isL3DirectTUNMode() && e.cfg.TunnelID < 1000 {
 		e.wg.Add(1)
 		go e.l3StreamInitiatorLoop()
 	}
@@ -968,9 +975,13 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 		e.activeStreams.Delete(conn)
 	}()
 
+	gen := e.l3DuplexGen.Add(1)
 	var writeMu sync.Mutex
 	frameBuf := make([]byte, 65538)
 	tunDev.SetSender(func(wire []byte) error {
+		if e.l3DuplexGen.Load() != gen {
+			return net.ErrClosed
+		}
 		if len(wire) > 65535 {
 			return errors.New("l3-stream: packet exceeds max frame size")
 		}
@@ -982,6 +993,10 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 		_, err := conn.Write(frameBuf[:2+len(wire)])
 		_ = conn.SetWriteDeadline(time.Time{})
+		if err != nil {
+			// Close immediately on partial/timed-out frame write so stream framing never desyncs
+			_ = conn.Close()
+		}
 		return err
 	})
 
@@ -999,9 +1014,13 @@ func (e *Engine) runL3StreamDuplex(conn net.Conn) {
 			case <-ticker.C:
 				writeMu.Lock()
 				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				_, _ = conn.Write(pingFrame[:])
+				_, hErr := conn.Write(pingFrame[:])
 				_ = conn.SetWriteDeadline(time.Time{})
 				writeMu.Unlock()
+				if hErr != nil {
+					_ = conn.Close()
+					return
+				}
 			}
 		}
 	}()
@@ -1260,7 +1279,7 @@ func (e *Engine) ClaimReverseStream(timeout time.Duration) (net.Conn, error) {
 			return nil, fmt.Errorf("timeout waiting for reverse pool connection")
 		case item := <-e.idlePool:
 			e.Stats.PoolIdleConnections.Add(-1)
-			if time.Since(item.createdAt) > 5*time.Minute || !transport.IsStreamAlive(item.conn) {
+			if time.Since(item.createdAt) > 30*time.Minute || !transport.IsStreamAlive(item.conn) {
 				_ = item.conn.Close()
 				continue
 			}
@@ -1576,6 +1595,9 @@ func (e *Engine) exitPoolLoop() {
 	defer ticker.Stop()
 
 	var dialingCount atomic.Int64
+	var failStreak atomic.Int64
+	var lastFailUnixNano atomic.Int64
+	lastAgeSweep := time.Now()
 
 	spawnDial := func() {
 		dialingCount.Add(1)
@@ -1583,9 +1605,12 @@ func (e *Engine) exitPoolLoop() {
 			defer dialingCount.Add(-1)
 			stream, err := e.dialCarrierStream()
 			if err != nil {
+				failStreak.Add(1)
+				lastFailUnixNano.Store(time.Now().UnixNano())
 				e.logDialFailure(err)
 				return
 			}
+			failStreak.Store(0)
 			select {
 			case <-e.ctx.Done():
 				_ = stream.Close()
@@ -1613,22 +1638,33 @@ func (e *Engine) exitPoolLoop() {
 		case <-ticker.C:
 		}
 
-		// Active stream liveness sweep & 30-minute anti-throttling rotation:
-		// 1. Actively check if any idle reverse connection has died (closing it triggers redial immediately).
-		// 2. Rotate connections older than 30 minutes so Iranian DPI firewalls never observe an
-		// indefinitely long-lived flow and apply traffic-shaping or rate-limiting.
+		// Active stream liveness sweep & staggered anti-throttling rotation:
+		// 1. Actively close dead idle reverse connections immediately so replacement dials start promptly.
+		// 2. Rotate aged connections gradually (15-25 min jitter, max 2 per 2s sweep) so the whole pool
+		//    never expires simultaneously and triggers a thundering-herd SYN burst.
 		if !e.isDirect() {
 			now := time.Now()
+			sweepAge := now.Sub(lastAgeSweep) >= 2*time.Second
+			if sweepAge {
+				lastAgeSweep = now
+			}
+			agedClosed := 0
 			e.idleStreams.Range(func(key, val any) bool {
 				conn, ok := key.(net.Conn)
-				created, cOk := val.(time.Time)
-				if ok {
-					isDead := !transport.IsStreamAlive(conn)
-					isAged := cOk && now.Sub(created) > 5*time.Minute
-					if isDead || isAged {
-						_ = conn.Close()
-						e.idleStreams.Delete(key)
+				if !ok {
+					return true
+				}
+				isDead := !transport.IsStreamAlive(conn)
+				isAged := false
+				if !isDead && sweepAge && agedClosed < 2 {
+					if meta, mOk := val.(idleStreamEntry); mOk && now.Sub(meta.createdAt) > meta.maxAge {
+						isAged = true
+						agedClosed++
 					}
+				}
+				if isDead || isAged {
+					_ = conn.Close()
+					e.idleStreams.Delete(key)
 				}
 				return true
 			})
@@ -1653,6 +1689,25 @@ func (e *Engine) exitPoolLoop() {
 		}
 		needed := minHeld - current
 		if needed > 0 {
+			if e.cfg.TunnelID < 1000 {
+				if fails := failStreak.Load(); fails > 0 {
+					shift := fails - 1
+					if shift > 4 {
+						shift = 4
+					}
+					backoff := (250 * time.Millisecond) << uint(shift) // 250ms..4s
+					if time.Since(time.Unix(0, lastFailUnixNano.Load())) < backoff {
+						needed = 0
+					}
+				}
+				const maxConcurrentDials = int64(6)
+				inFlight := dialingCount.Load()
+				if inFlight >= maxConcurrentDials {
+					needed = 0
+				} else if needed > maxConcurrentDials-inFlight {
+					needed = maxConcurrentDials - inFlight
+				}
+			}
 			for i := int64(0); i < needed; i++ {
 				spawnDial()
 			}
@@ -1665,7 +1720,7 @@ func (e *Engine) dialCarrierStream() (net.Conn, error) {
 		privTarget := net.JoinHostPort(e.l3TunDev.PeerIP(), strconv.Itoa(e.l3PrivatePort()))
 		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
 		rawDial := func() (net.Conn, error) {
-			return transport.DialTCPContextWithLocal(e.ctx, tunLocalIP, privTarget, 4*time.Second)
+			return transport.DialTCPContextWithLocal(e.ctx, tunLocalIP, privTarget, 7*time.Second)
 		}
 		return transport.DialTCPCarrier(rawDial, e.cfg.Password)
 	}
@@ -1825,7 +1880,7 @@ func (e *Engine) dialSingleCarrier() (net.Conn, error) {
 		dialTCP := func(ctx context.Context, idx int) (net.Conn, error) {
 			ip := candidates[idx%len(candidates)]
 			addr := net.JoinHostPort(ip, strconv.Itoa(e.cfg.CarrierPort))
-			return transport.DialTCPContextWithLocal(ctx, e.cfg.DialSourceIP, addr, 4*time.Second)
+			return transport.DialTCPContextWithLocal(ctx, e.cfg.DialSourceIP, addr, 7*time.Second)
 		}
 		if e.cfg.UseFisher && e.cfg.FisherConnections > 1 {
 			fisher := transport.NewFisherDialer(e.cfg.FisherConnections)
@@ -1918,8 +1973,9 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 	defer e.wg.Done()
 
 	now := time.Now()
+	maxAge := 15*time.Minute + time.Duration(rand.IntN(600))*time.Second
 	e.activeStreams.Store(stream, struct{}{})
-	e.idleStreams.Store(stream, now)
+	e.idleStreams.Store(stream, idleStreamEntry{createdAt: now, maxAge: maxAge})
 	defer e.activeStreams.Delete(stream)
 	defer e.idleStreams.Delete(stream)
 

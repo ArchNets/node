@@ -48,8 +48,8 @@ func TuneTCPConn(c net.Conn) {
 		_ = tc.SetNoDelay(true)
 		_ = tc.SetKeepAlive(true)
 		_ = tc.SetKeepAlivePeriod(10 * time.Second)
-		_ = tc.SetReadBuffer(32 * 1024 * 1024)
-		_ = tc.SetWriteBuffer(32 * 1024 * 1024)
+		_ = tc.SetReadBuffer(8 * 1024 * 1024)
+		_ = tc.SetWriteBuffer(8 * 1024 * 1024)
 		setPlatformTCPTune(tc)
 	}
 }

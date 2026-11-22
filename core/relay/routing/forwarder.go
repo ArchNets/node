@@ -117,15 +117,11 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 		}
 	}()
 	isGated := (rule != nil && rule.FlowMode != "" && rule.FlowMode != "bidirectional") || gate != nil
-	if !isGated {
-		// Bidirectional: preserve original behavior and force-close both ends on first completion
-		<-done
-		_ = stream.Close()
-		_ = clientConn.Close()
-		<-done
-		return
+	lingerTimeout := 5 * time.Second
+	if isGated {
+		lingerTimeout = 10 * time.Second
 	}
-	// Gated: allow half-close with bounded 10s linger
+	// Allow half-close (e.g. final HTTP/TLS flight after upload EOF) with bounded linger
 	err1 := <-done
 	if err1 != nil {
 		_ = stream.Close()
@@ -135,7 +131,7 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(lingerTimeout):
 	}
 	_ = stream.Close()
 	_ = clientConn.Close()
@@ -223,15 +219,11 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		}
 	}()
 	isGated := (rule != nil && rule.FlowMode != "" && rule.FlowMode != "bidirectional") || gate != nil
-	if !isGated {
-		// Bidirectional: preserve original behavior and force-close both ends on first completion
-		<-done
-		_ = stream.Close()
-		_ = targetConn.Close()
-		<-done
-		return
+	lingerTimeout := 5 * time.Second
+	if isGated {
+		lingerTimeout = 10 * time.Second
 	}
-	// Gated: allow half-close (e.g. final HTTP 200 after upload EOF) with bounded 10s linger
+	// Allow half-close (e.g. final HTTP 200 after upload EOF) with bounded linger
 	err1 := <-done
 	if err1 != nil {
 		_ = stream.Close()
@@ -241,7 +233,7 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 	}
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(lingerTimeout):
 	}
 	_ = stream.Close()
 	_ = targetConn.Close()

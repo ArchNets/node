@@ -82,7 +82,7 @@ func DialWSCarrier(dialCtx CarrierDialer, useTLS bool, sni, password, wsPath str
 		hostHeader = rawConn.RemoteAddr().String()
 	}
 	TuneTCPConn(rawConn)
-	_ = rawConn.SetDeadline(time.Now().Add(6 * time.Second))
+	_ = rawConn.SetDeadline(time.Now().Add(8 * time.Second))
 
 	var conn net.Conn = rawConn
 	if useTLS {
