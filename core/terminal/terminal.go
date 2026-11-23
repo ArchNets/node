@@ -185,11 +185,18 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 		"force_color_prompt=yes",
 	)
 
+	var wsMu sync.Mutex
+	writeWS := func(msgType int, data []byte) error {
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return ws.WriteMessage(msgType, data)
+	}
+
 	// Allocate PTY
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		log.WithField("err", err).Error("[Terminal] Failed to allocate PTY")
-		_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nFailed to start shell: %v\r\n", err)))
+		_ = writeWS(websocket.TextMessage, []byte(fmt.Sprintf("\r\nFailed to start shell: %v\r\n", err)))
 		return
 	}
 	defer func() {
@@ -207,7 +214,7 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 		for {
 			n, err := ptmx.Read(buf)
 			if n > 0 {
-				if writeErr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); writeErr != nil {
+				if writeErr := writeWS(websocket.BinaryMessage, buf[:n]); writeErr != nil {
 					return
 				}
 			}
@@ -227,7 +234,7 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 		if msgType == websocket.TextMessage {
 			// Check if heartbeat ping/pong message
 			if string(msg) == `{"type":"ping"}` || string(msg) == "ping" {
-				_ = ws.WriteMessage(websocket.TextMessage, []byte("pong"))
+				_ = writeWS(websocket.TextMessage, []byte("pong"))
 				continue
 			}
 
@@ -235,7 +242,7 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 			if len(msg) > 0 && msg[0] == '{' {
 				var fsReq FsRequest
 				if err := json.Unmarshal(msg, &fsReq); err == nil && fsReq.Action != "" && fsReq.ID != "" {
-					go c.handleFsRequest(ws, &fsReq)
+					go c.handleFsRequest(writeWS, &fsReq)
 					continue
 				}
 			}
@@ -272,11 +279,11 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 	}
 }
 
-func (c *Controller) handleFsRequest(ws *websocket.Conn, req *FsRequest) {
+func (c *Controller) handleFsRequest(writeWS func(int, []byte) error, req *FsRequest) {
 	resp := c.runFsAction(req)
 	data, err := json.Marshal(resp)
 	if err == nil {
-		_ = ws.WriteMessage(websocket.TextMessage, data)
+		_ = writeWS(websocket.TextMessage, data)
 	}
 }
 
