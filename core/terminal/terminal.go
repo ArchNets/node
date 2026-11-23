@@ -1,12 +1,17 @@
 package terminal
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,27 +51,30 @@ type TerminalResizeMessage struct {
 
 // Controller manages remote interactive terminal sessions between backend and node
 type Controller struct {
-	apiHost   string
-	serverID  int
-	secretKey string
-	stopCh    chan struct{}
-	mu        sync.Mutex
-	active    bool
+	apiHost    string
+	serverID   int
+	secretKey  string
+	httpClient *http.Client
+	stopCh     chan struct{}
+	mu         sync.Mutex
+	active     bool
 }
 
 // NewController creates a terminal reverse agent controller
 func NewController(apiHost string, serverID int, secretKey string) *Controller {
 	return &Controller{
-		apiHost:   apiHost,
-		serverID:  serverID,
-		secretKey: secretKey,
-		stopCh:    make(chan struct{}),
+		apiHost:    apiHost,
+		serverID:   serverID,
+		secretKey:  secretKey,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		stopCh:     make(chan struct{}),
 	}
 }
 
-// Start begins the terminal agent polling/worker loop
+// Start begins both WebSocket reverse-terminal polling and CDN-safe HTTPS task polling
 func (c *Controller) Start() {
 	go c.listenForTerminalRequests()
+	go c.listenForHTTPTasks()
 }
 
 // Close stops the terminal controller
@@ -257,6 +265,14 @@ func (c *Controller) handleSession(ws *websocket.Conn) {
 }
 
 func (c *Controller) handleFsRequest(ws *websocket.Conn, req *FsRequest) {
+	resp := c.runFsAction(req)
+	data, err := json.Marshal(resp)
+	if err == nil {
+		_ = ws.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+func (c *Controller) runFsAction(req *FsRequest) FsResponse {
 	resp := FsResponse{
 		ID:      req.ID,
 		Success: true,
@@ -305,8 +321,162 @@ func (c *Controller) handleFsRequest(ws *websocket.Conn, req *FsRequest) {
 		resp.Error = fmt.Sprintf("unsupported action %s", req.Action)
 	}
 
-	data, err := json.Marshal(resp)
-	if err == nil {
-		_ = ws.WriteMessage(websocket.TextMessage, data)
+	return resp
+}
+
+type httpNodeTask struct {
+	ID         string     `json:"id"`
+	Action     string     `json:"action"` // "xray_probe" | "shell" | "fs"
+	Command    string     `json:"command,omitempty"`
+	TimeoutSec int        `json:"timeout_sec,omitempty"`
+	Fs         *FsRequest `json:"fs,omitempty"`
+	ConfigJSON string     `json:"config_json,omitempty"`
+	TestURL    string     `json:"test_url,omitempty"`
+}
+
+type httpTaskResultPayload struct {
+	ID        string      `json:"id"`
+	Success   bool        `json:"success"`
+	Error     string      `json:"error,omitempty"`
+	Output    string      `json:"output,omitempty"`
+	ExitCode  int         `json:"exit_code,omitempty"`
+	Fs        *FsResponse `json:"fs,omitempty"`
+	HTTPCode  int         `json:"http_code,omitempty"`
+	ConnectMs int64       `json:"connect_ms,omitempty"`
+	TTFBMs    int64       `json:"ttfb_ms,omitempty"`
+	TotalMs   int64       `json:"total_ms,omitempty"`
+}
+
+func (c *Controller) listenForHTTPTasks() {
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.pollHTTPTasks()
+		}
 	}
+}
+
+func (c *Controller) pollHTTPTasks() {
+	base := strings.TrimRight(c.apiHost, "/")
+	pollURL := fmt.Sprintf("%s/v1/server/terminal/poll?server_id=%d&secret_key=%s",
+		base, c.serverID, url.QueryEscape(c.secretKey))
+
+	req, err := http.NewRequest(http.MethodGet, pollURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", "ArchNet-Node-Terminal/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return
+	}
+
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			Tasks []httpNodeTask `json:"tasks"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2*1024*1024)).Decode(&env); err != nil {
+		return
+	}
+	for _, t := range env.Data.Tasks {
+		taskCopy := t
+		go c.executeHTTPTask(taskCopy)
+	}
+}
+
+func (c *Controller) executeHTTPTask(t httpNodeTask) {
+	timeout := time.Duration(t.TimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 25 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	res := httpTaskResultPayload{ID: t.ID}
+
+	switch t.Action {
+	case "xray_probe":
+		outcome := RunXrayProbe(ctx, t.ConfigJSON, t.TestURL)
+		res.Success = outcome.Success
+		res.HTTPCode = outcome.HTTPCode
+		res.ConnectMs = outcome.ConnectMs
+		res.TTFBMs = outcome.TTFBMs
+		res.TotalMs = outcome.TotalMs
+		res.Error = outcome.Error
+
+	case "shell":
+		shell := "/bin/bash"
+		if _, err := os.Stat(shell); err != nil {
+			shell = "/bin/sh"
+		}
+		cmd := exec.CommandContext(ctx, shell, "-c", t.Command)
+		out, err := cmd.CombinedOutput()
+		res.Output = strings.TrimSpace(string(out))
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				res.ExitCode = exitErr.ExitCode()
+			} else {
+				res.ExitCode = 1
+				res.Error = err.Error()
+			}
+			res.Success = false
+		} else {
+			res.ExitCode = 0
+			res.Success = true
+		}
+
+	case "fs":
+		if t.Fs == nil {
+			res.Error = "missing fs payload"
+		} else {
+			fsRes := c.runFsAction(t.Fs)
+			res.Fs = &fsRes
+			res.Success = fsRes.Success
+			res.Error = fsRes.Error
+		}
+
+	default:
+		res.Error = fmt.Sprintf("unsupported task action %q", t.Action)
+	}
+
+	c.postHTTPTaskResult(res)
+}
+
+func (c *Controller) postHTTPTaskResult(res httpTaskResultPayload) {
+	base := strings.TrimRight(c.apiHost, "/")
+	replyURL := fmt.Sprintf("%s/v1/server/terminal/reply?server_id=%d&secret_key=%s",
+		base, c.serverID, url.QueryEscape(c.secretKey))
+
+	body, err := json.Marshal(res)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, replyURL, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "ArchNet-Node-Terminal/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
