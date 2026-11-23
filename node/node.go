@@ -297,6 +297,18 @@ func closeParallel[T any](items []T, label string, close func(T) error) {
 	wg.Wait()
 }
 
+func (n *Node) RunServiceProbeNow(serviceKey string) (int, error) {
+	if n == nil {
+		return 0, fmt.Errorf("node not initialized")
+	}
+	for _, c := range n.xrayControllers {
+		if c != nil && c.isPrimaryReporter {
+			return c.RunServiceProbe(serviceKey)
+		}
+	}
+	return 0, nil
+}
+
 func (n *Node) Close() {
 	// Close Xray controllers
 	closeParallel(n.xrayControllers, "Xray", func(c *Controller) error { return c.Close() })

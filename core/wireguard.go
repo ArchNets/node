@@ -207,6 +207,7 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 	defer w.users.mu.Unlock()
 
 	var newPeers []wgtypes.PeerConfig
+	_, poolNet, _ := net.ParseCIDR(getPoolSubnet(w.Address))
 
 	// Structure for parsing the JSON service_id
 	type ServiceIdentity struct {
@@ -283,6 +284,11 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 			ReplaceAllowedIPs:           true,
 			PersistentKeepaliveInterval: &keepalive,
 		})
+		if w.running.Load() && poolNet != nil {
+			if parsedIP := net.ParseIP(assignedIP); parsedIP != nil && !poolNet.Contains(parsedIP) {
+				_ = execCommand(fmt.Sprintf("ip route replace %s/32 dev %s", assignedIP, w.InterfaceName))
+			}
+		}
 	}
 
 	// Update WireGuard configuration incrementally with ONLY the new/changed peers.
@@ -845,9 +851,9 @@ func (w *WireGuardCore) setupNAT() error {
 		}
 
 		// Add INPUT rule for TProxy marked packets (required when default INPUT policy is DROP/UFW)
-		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, subnet)
 		if err := execCommand(inputCheck); err != nil {
-			inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+			inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, subnet)
 			if err := execCommand(inputAdd); err != nil {
 				return fmt.Errorf("add WireGuard TProxy INPUT rule: %w", err)
 			}
@@ -917,6 +923,7 @@ func (w *WireGuardCore) teardownNAT() {
 	}
 
 	if w.TProxyPort > 0 {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, subnet))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet))
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 		// Remove PREROUTING jump
@@ -930,33 +937,38 @@ func (w *WireGuardCore) teardownNAT() {
 }
 
 // getPoolSubnet returns the enclosing subnet covering the full allocation range for the given interface address.
-// e.g. "10.0.0.1/24" -> "10.0.0.0/16" so that users allocated in 10.0.x.x are properly routed and masqueraded.
+// e.g. "10.0.0.1/24" or "10.0.0.1/16" -> "10.0.0.0/13" (10.0.0.0 - 10.7.255.255, ~260k subs)
+// so that subscriptions > 32,512 (10.1.x.x+) are properly routed and masqueraded without overlapping
+// OpenVPN (10.9.0.0/16) or IPsec (10.10.0.0/16).
 func getPoolSubnet(address string) string {
 	ip, ipnet, err := net.ParseCIDR(address)
 	if err != nil {
 		ip = net.ParseIP(address)
 	}
 	if ip == nil {
-		return "10.0.0.0/16"
+		return "10.0.0.0/13"
 	}
 	ip4 := ip.To4()
 	if ip4 == nil {
 		if ipnet != nil {
 			return ipnet.String()
 		}
-		return "10.0.0.0/16"
+		return "10.0.0.0/13"
 	}
 
 	if ipnet != nil {
 		ones, bits := ipnet.Mask.Size()
-		// If already wider than /16 (e.g. /8), respect the configured CIDR
-		if bits == 32 && ones <= 16 {
+		// If already wider than /16 (e.g. /8, /13), respect the configured CIDR
+		if bits == 32 && ones < 16 {
 			return ipnet.String()
 		}
 	}
 
-	// Expand /24 or narrow subnets to /16 covering 10.{B}.0.0/16
+	// Expand 10.0.x.x (/24 or /16) to 10.0.0.0/13 covering 10.0-10.7; keep /16 for 10.8+
 	if ip4[0] == 10 {
+		if ip4[1] < 8 {
+			return "10.0.0.0/13"
+		}
 		return fmt.Sprintf("10.%d.0.0/16", ip4[1])
 	} else if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
 		return fmt.Sprintf("172.%d.0.0/16", ip4[1])
@@ -967,7 +979,7 @@ func getPoolSubnet(address string) string {
 	if ipnet != nil {
 		return ipnet.String()
 	}
-	return "10.0.0.0/16"
+	return "10.0.0.0/13"
 }
 
 

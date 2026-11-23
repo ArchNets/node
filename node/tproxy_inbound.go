@@ -3,8 +3,10 @@ package node
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	vCore "github.com/archnets/node/core"
+	log "github.com/sirupsen/logrus"
 	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
@@ -28,7 +30,22 @@ func addTProxyInbound(xrayCore *vCore.XrayCore, tag string, tproxyPort int) (int
 	} else if tproxyPort < 1024 || tproxyPort > 65535 {
 		return 0, fmt.Errorf("invalid tproxy port %d for %s (expected 1024-65535)", tproxyPort, tag)
 	} else if !portIsFree(tproxyPort) {
-		return 0, fmt.Errorf("tproxy port %d for %s is already in use", tproxyPort, tag)
+		// During rapid restarts, the exiting process may still be releasing its socket.
+		for i := 0; i < 5; i++ {
+			time.Sleep(200 * time.Millisecond)
+			if portIsFree(tproxyPort) {
+				break
+			}
+		}
+		if !portIsFree(tproxyPort) {
+			fallbackPort := nextTProxyPort()
+			log.WithFields(log.Fields{
+				"tag":           tag,
+				"requestedPort": tproxyPort,
+				"fallbackPort":  fallbackPort,
+			}).Warn("Configured TPROXY port already in use; falling back to dynamically allocated port")
+			tproxyPort = fallbackPort
+		}
 	}
 	inboundJSON := fmt.Sprintf(`{
 		"tag": "%s",

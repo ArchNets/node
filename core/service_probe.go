@@ -27,13 +27,26 @@ func (c *XrayCore) GetConfiguredOutboundTags() []string {
 	if c == nil {
 		return tags
 	}
-	c.wgMutex.Lock()
-	defer c.wgMutex.Unlock()
-	for tag := range c.wgOutbounds {
-		if tag != "" && tag != "direct" && tag != "block" {
-			tags = append(tags, tag)
+	seen := map[string]bool{"direct": true, "block": true, "": true}
+	addTag := func(tag string) {
+		tag = strings.TrimSpace(tag)
+		if seen[tag] {
+			return
 		}
+		if c.ohm != nil && c.ohm.GetHandler(tag) == nil {
+			return
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
 	}
+	for _, tag := range c.outboundNames {
+		addTag(tag)
+	}
+	c.wgMutex.Lock()
+	for tag := range c.wgOutbounds {
+		addTag(tag)
+	}
+	c.wgMutex.Unlock()
 	return tags
 }
 

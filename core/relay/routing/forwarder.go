@@ -54,7 +54,7 @@ func HandleEntryTCPClient(clientConn net.Conn, targetPort uint16, claimStreamFn 
 	log.WithFields(log.Fields{
 		"targetPort": targetPort,
 		"client":     clientConn.RemoteAddr().String(),
-	}).Info("[Relay] Splicing client connection to Exit target port")
+	}).Debug("[Relay] Splicing client connection to Exit target port")
 
 	_ = stream.SetWriteDeadline(time.Now().Add(3 * time.Second))
 	if err := WriteRoutingHeader(stream, RouteProtoTCP, targetPort); err != nil {
@@ -162,7 +162,7 @@ func HandleExitTCPForward(stream net.Conn, targetIP string, targetPort uint16, s
 
 	log.WithFields(log.Fields{
 		"targetAddr": targetAddr,
-	}).Info("[Relay] Exit successfully connected to local target service")
+	}).Debug("[Relay] Exit successfully connected to local target service")
 
 	if stats != nil {
 		stats.ActiveConnections.Add(1)

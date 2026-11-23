@@ -578,6 +578,18 @@ install_logrotate() {
 EOF
         chmod 644 /etc/logrotate.d/archnet-node
     fi
+    if [[ -d /etc/systemd ]] && command -v systemctl >/dev/null 2>&1; then
+        mkdir -p /etc/systemd/journald.conf.d
+        cat > /etc/systemd/journald.conf.d/99-archnets-limits.conf <<'EOF'
+[Journal]
+SystemMaxUse=200M
+SystemKeepFree=2G
+SystemMaxFileSize=50M
+RuntimeMaxUse=100M
+MaxFileSec=3day
+EOF
+        systemctl restart systemd-journald >/dev/null 2>&1 || true
+    fi
 }
 
 install_openrc_service() {

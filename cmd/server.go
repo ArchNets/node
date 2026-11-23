@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
@@ -111,8 +113,19 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 	log.Infof("started %d nodes", serverconfig.Data.Total)
 
+	var nodesMu sync.RWMutex
+
 	// Initialize and start remote terminal controller for panel SSH sessions
 	terminalCtrl := terminal.NewController(c.ApiConfig.ApiHost, c.ApiConfig.ServerId, c.ApiConfig.SecretKey)
+	terminalCtrl.SetServiceProbeHandler(func(_ context.Context, serviceKey string) (int, error) {
+		nodesMu.RLock()
+		curNode := nodes
+		nodesMu.RUnlock()
+		if curNode == nil {
+			return 0, fmt.Errorf("nodes not running")
+		}
+		return curNode.RunServiceProbeNow(serviceKey)
+	})
 	terminalCtrl.Start()
 	if watch {
 		if _, err := os.Stat(config); err == nil {
@@ -163,7 +176,10 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			return
 		case <-reloadCh:
 			log.Info("received reload signal, reloading configuration...")
-			if err := reload(config, &nodes, &xraycore, &tunnelCtrl); err != nil {
+			nodesMu.Lock()
+			err := reload(config, &nodes, &xraycore, &tunnelCtrl)
+			nodesMu.Unlock()
+			if err != nil {
 				log.WithField("err", err).Error("reload failed")
 			}
 		}

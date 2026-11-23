@@ -224,7 +224,7 @@ func (l *Limiter) CheckLimitWithDestination(taguuid string, ip string, destinati
 			"aliveIp":     aliveIp,
 			"ip":          ip,
 			"taguuid":     taguuid,
-		}).Info("CheckLimit Debug")
+		}).Debug("CheckLimit Debug")
 
 		// If any device is online
 		if v, ok := l.UserOnlineIP.LoadOrStore(taguuid, ipMap); ok {

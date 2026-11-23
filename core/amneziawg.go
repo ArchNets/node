@@ -254,6 +254,8 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 	// Writing a config file /tmp/awg_peers.conf and using `awg setconf` or `awg addconf` might be safer/easier
 	// `awg set <iface> peer <key> allowed-ips <ips>`
 
+	_, poolNet, _ := net.ParseCIDR(getPoolSubnet(w.Address))
+
 	for _, user := range users {
 		// ... parsing logic ...
 		if user.ServiceId == "" {
@@ -302,6 +304,10 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 		cmd := fmt.Sprintf("awg set %s peer %s allowed-ips %s/32 persistent-keepalive 25", w.InterfaceName, peerPublicKey.String(), assignedIP)
 		if err := execCommand(cmd); err != nil {
 			log.WithError(err).Errorf("Failed to add peer %s", user.Uuid)
+		} else if w.running.Load() && poolNet != nil {
+			if parsedIP := net.ParseIP(assignedIP); parsedIP != nil && !poolNet.Contains(parsedIP) {
+				_ = execCommand(fmt.Sprintf("ip route replace %s/32 dev %s", assignedIP, w.InterfaceName))
+			}
 		}
 	}
 
@@ -913,9 +919,9 @@ func (w *AmneziaWGCore) setupNAT() error {
 		}
 
 		// Add INPUT rule for TProxy marked packets (required when default INPUT policy is DROP/UFW)
-		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+		inputCheck := fmt.Sprintf("iptables -w 5 -C INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, subnet)
 		if err := execCommand(inputCheck); err != nil {
-		 inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet)
+		 inputAdd := fmt.Sprintf("iptables -w 5 -I INPUT 1 -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, subnet)
 		 if err := execCommand(inputAdd); err != nil {
 		  return fmt.Errorf("add AmneziaWG TProxy INPUT rule: %w", err)
 		 }
@@ -982,6 +988,7 @@ func (w *AmneziaWGCore) teardownNAT() {
 	}
 
 	if w.TProxyPort > 0 {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, subnet))
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -i %s -s %s -m mark --mark 1 -j ACCEPT", w.InterfaceName, tproxySubnet))
 		chainName := fmt.Sprintf("XRAY_%s", w.InterfaceName)
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -j %s", w.InterfaceName, chainName))

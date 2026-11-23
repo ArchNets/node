@@ -51,13 +51,21 @@ type TerminalResizeMessage struct {
 
 // Controller manages remote interactive terminal sessions between backend and node
 type Controller struct {
-	apiHost    string
-	serverID   int
-	secretKey  string
-	httpClient *http.Client
-	stopCh     chan struct{}
-	mu         sync.Mutex
-	active     bool
+	apiHost             string
+	serverID            int
+	secretKey           string
+	httpClient          *http.Client
+	stopCh              chan struct{}
+	mu                  sync.Mutex
+	active              bool
+	serviceProbeHandler func(ctx context.Context, serviceKey string) (int, error)
+}
+
+// SetServiceProbeHandler registers a callback executed when backend dispatches a service_probe task over HTTPS.
+func (c *Controller) SetServiceProbeHandler(fn func(ctx context.Context, serviceKey string) (int, error)) {
+	c.mu.Lock()
+	c.serviceProbeHandler = fn
+	c.mu.Unlock()
 }
 
 // NewController creates a terminal reverse agent controller
@@ -448,6 +456,22 @@ func (c *Controller) executeHTTPTask(t httpNodeTask) {
 			res.Fs = &fsRes
 			res.Success = fsRes.Success
 			res.Error = fsRes.Error
+		}
+
+	case "service_probe":
+		c.mu.Lock()
+		handler := c.serviceProbeHandler
+		c.mu.Unlock()
+		if handler == nil {
+			res.Error = "service probe handler not registered"
+		} else {
+			count, pErr := handler(ctx, t.Command)
+			if pErr != nil {
+				res.Error = pErr.Error()
+			} else {
+				res.Success = true
+				res.Output = fmt.Sprintf("probed=%d", count)
+			}
 		}
 
 	default:

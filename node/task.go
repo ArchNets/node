@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/archnets/node/api/panel"
@@ -257,19 +258,27 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 }
 
 func (c *Controller) serviceProbeTask() error {
+	_, err := c.RunServiceProbe("")
+	return err
+}
+
+// RunServiceProbe runs service probes across all configured outbounds immediately.
+// If serviceKey is non-empty, only that service key is probed.
+func (c *Controller) RunServiceProbe(serviceKey string) (int, error) {
 	if !c.isPrimaryReporter || c.server == nil {
-		return nil
+		return 0, nil
 	}
 
 	targets, err := c.apiClient.GetServicesToProbe()
 	if err != nil {
 		log.WithFields(log.Fields{"node": c.tag, "err": err}).Warn("GetServicesToProbe failed")
-		return nil
+		return 0, err
 	}
 	if len(targets) == 0 {
-		return nil
+		return 0, nil
 	}
 
+	filterKey := strings.TrimSpace(serviceKey)
 	outbounds := c.server.GetConfiguredOutboundTags()
 	var probes []panel.NodeServiceProbeItem
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -277,6 +286,9 @@ func (c *Controller) serviceProbeTask() error {
 
 	for _, ob := range outbounds {
 		for _, tgt := range targets {
+			if filterKey != "" && !strings.EqualFold(tgt.Key, filterKey) {
+				continue
+			}
 			res := c.server.ProbeServiceOutbound(ctx, ob, tgt.Key, tgt.TestUrl)
 			probes = append(probes, panel.NodeServiceProbeItem{
 				OutboundTag: res.OutboundTag,
@@ -292,10 +304,10 @@ func (c *Controller) serviceProbeTask() error {
 	if len(probes) > 0 {
 		if err := c.apiClient.ReportServiceProbes(c.info.Id, probes); err != nil {
 			log.WithFields(log.Fields{"node": c.tag, "err": err}).Warn("ReportServiceProbes failed")
-		} else {
-			log.WithField("node", c.tag).Infof("Reported %d service probe results across %d outbounds", len(probes), len(outbounds))
+			return 0, err
 		}
+		log.WithField("node", c.tag).Infof("Reported %d service probe results across %d outbounds", len(probes), len(outbounds))
 	}
-	return nil
+	return len(probes), nil
 }
 
