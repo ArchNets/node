@@ -1181,27 +1181,62 @@ func (w *AmneziaWGCore) assignIP(id int) string {
 	if id <= 0 {
 		return ""
 	}
-	baseIP, _, err := net.ParseCIDR(w.Address)
+	first := strings.TrimSpace(strings.Split(w.Address, ",")[0])
+	baseIP, ipnet, err := net.ParseCIDR(first)
 	if err != nil {
+		baseIP = net.ParseIP(first)
+	}
+	if baseIP == nil {
 		baseIP = net.ParseIP("10.0.0.1")
 	}
 	baseIP = baseIP.To4()
 	if baseIP == nil {
 		return ""
 	}
-	index := int64(id) - 1
-	hostsPerSubnet := int64(127)
-	dIndex := index % hostsPerSubnet
-	upperIndex := index / hostsPerSubnet
-	cOffset := upperIndex % 256
-	bOffset := (upperIndex / 256) % 256
-	byteD := (dIndex * 2) + 2
-	valC := int(baseIP[2]) + int(cOffset)
-	extraB := valC / 256
-	byteC := valC % 256
-	valB := int(baseIP[1]) + int(bOffset) + extraB
-	byteB := valB % 256
-	return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], byteB, byteC, byteD)
+
+	prefix := 16
+	if ipnet != nil && ipnet.Mask != nil {
+		if ones, bits := ipnet.Mask.Size(); bits == 32 && ones > 0 {
+			prefix = ones
+		}
+	}
+
+	subId := int64(id)
+	// Legacy 10.0.x.x expansion: 10.0.0.0/13 covering 10.0 - 10.7 (260,096 subscribers)
+	if baseIP[0] == 10 && baseIP[1] == 0 {
+		const hostCount = 8 * 256 * 127
+		slot := (subId - 1) % hostCount
+		dIndex := slot % 127
+		upper := slot / 127
+		cOffset := upper % 256
+		bOffset := upper / 256
+		byteD := int(dIndex*2) + 2
+		return fmt.Sprintf("10.%d.%d.%d", bOffset, cOffset, byteD)
+	}
+
+	// For /24 or smaller: only byte 3 varies
+	if prefix >= 24 {
+		slot := (subId - 1) % 127
+		byteD := int(slot*2) + 2
+		return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], baseIP[1], baseIP[2], byteD)
+	}
+
+	// For /16 .. /23: bound bOffset within prefix host space
+	bShift := 16 - prefix
+	if bShift < 0 {
+		bShift = 0
+	}
+	bBlocks := int64(1 << bShift)
+	hostCount := bBlocks * 256 * 127
+
+	slot := (subId - 1) % hostCount
+	dIndex := slot % 127
+	upper := slot / 127
+	cOffset := upper % 256
+	bOffset := (upper / 256) % bBlocks
+	byteD := int(dIndex*2) + 2
+
+	return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], int(baseIP[1])+int(bOffset), cOffset, byteD)
 }
 
 func (w *AmneziaWGCore) setupNAT() error {

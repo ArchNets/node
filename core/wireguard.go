@@ -555,18 +555,22 @@ func (w *WireGuardCore) updatePeers() error {
 	return nil
 }
 
-// assignIP assigns an IP address to a user based on their ID (SubscriptionId)
-// Matches Backend logic: 10.{byteB}.{byteC}.{byteD}
+// assignIP assigns an IP address to a user based on their ID (SubscriptionId).
+// Matches Backend's CalculateWireGuardIP logic:
+// - 10.0.x.x expands to 10.0.0.0/13 (~260,000 hosts across 10.0-10.7) for backward-compatibility.
+// - Specific subnets (e.g. 10.8.0.1/16, 172.16.0.1/16, 192.168.10.1/24) stay strictly inside their CIDR.
 // Constraints: Even IPs only (2, 4, ..., 254), giving 127 usable hosts per /24 block.
 func (w *WireGuardCore) assignIP(id int) string {
 	if id <= 0 {
 		return ""
 	}
 
-	// Parse the base IP from the configuration
-	baseIP, _, err := net.ParseCIDR(w.Address)
+	first := strings.TrimSpace(strings.Split(w.Address, ",")[0])
+	baseIP, ipnet, err := net.ParseCIDR(first)
 	if err != nil {
-		// Fallback to safe default if address is invalid (should be caught earlier)
+		baseIP = net.ParseIP(first)
+	}
+	if baseIP == nil {
 		baseIP = net.ParseIP("10.0.0.1")
 	}
 	baseIP = baseIP.To4()
@@ -574,39 +578,49 @@ func (w *WireGuardCore) assignIP(id int) string {
 		return ""
 	}
 
-	// Algorithm matches Backend's calculateWireGuardIP
-	// 0-based index
-	index := int64(id) - 1
+	prefix := 16
+	if ipnet != nil && ipnet.Mask != nil {
+		if ones, bits := ipnet.Mask.Size(); bits == 32 && ones > 0 {
+			prefix = ones
+		}
+	}
 
-	// Constants
-	hostsPerSubnet := int64(127) // 2 to 254, even numbers only
+	subId := int64(id)
+	// Legacy 10.0.x.x expansion: 10.0.0.0/13 covering 10.0 - 10.7 (260,096 subscribers)
+	if baseIP[0] == 10 && baseIP[1] == 0 {
+		const hostCount = 8 * 256 * 127
+		slot := (subId - 1) % hostCount
+		dIndex := slot % 127
+		upper := slot / 127
+		cOffset := upper % 256
+		bOffset := upper / 256
+		byteD := int(dIndex*2) + 2
+		return fmt.Sprintf("10.%d.%d.%d", bOffset, cOffset, byteD)
+	}
 
-	// Calculate offset indices
-	dIndex := index % hostsPerSubnet
-	upperIndex := index / hostsPerSubnet
+	// For /24 or smaller: only byte 3 varies
+	if prefix >= 24 {
+		slot := (subId - 1) % 127
+		byteD := int(slot*2) + 2
+		return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], baseIP[1], baseIP[2], byteD)
+	}
 
-	cOffset := upperIndex % 256
-	bOffset := (upperIndex / 256) % 256
+	// For /16 .. /23: bound bOffset within prefix host space
+	bShift := 16 - prefix
+	if bShift < 0 {
+		bShift = 0
+	}
+	bBlocks := int64(1 << bShift)
+	hostCount := bBlocks * 256 * 127
 
-	// Calculate octet values relative to base IP
-	// We add the offset to the base IP components
+	slot := (subId - 1) % hostCount
+	dIndex := slot % 127
+	upper := slot / 127
+	cOffset := upper % 256
+	bOffset := (upper / 256) % bBlocks
+	byteD := int(dIndex*2) + 2
 
-	// Byte D (4th octet): 2, 4, ..., 254
-	// This logic reset the last octet, ignoring the base IP's last octet
-	// This is intentional to ensure even numbering relative to x.x.x.0
-	byteD := (dIndex * 2) + 2
-
-	// Byte C (3rd octet): Base[2] + offset
-	valC := int(baseIP[2]) + int(cOffset)
-	extraB := valC / 256
-	byteC := valC % 256
-
-	// Byte B (2nd octet): Base[1] + offset + overflow from C
-	valB := int(baseIP[1]) + int(bOffset) + extraB
-	// We do not handle overflow from B to A here as /8 is the max reasonable size
-	byteB := valB % 256
-
-	return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], byteB, byteC, byteD)
+	return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], int(baseIP[1])+int(bOffset), cOffset, byteD)
 }
 
 // collectStats collects traffic statistics from WireGuard
@@ -955,9 +969,10 @@ func (w *WireGuardCore) teardownNAT() {
 // so that subscriptions > 32,512 (10.1.x.x+) are properly routed and masqueraded without overlapping
 // OpenVPN (10.9.0.0/16) or IPsec (10.10.0.0/16).
 func getPoolSubnet(address string) string {
-	ip, ipnet, err := net.ParseCIDR(address)
+	first := strings.TrimSpace(strings.Split(address, ",")[0])
+	ip, ipnet, err := net.ParseCIDR(first)
 	if err != nil {
-		ip = net.ParseIP(address)
+		ip = net.ParseIP(first)
 	}
 	if ip == nil {
 		return "10.0.0.0/13"
@@ -970,20 +985,29 @@ func getPoolSubnet(address string) string {
 		return "10.0.0.0/13"
 	}
 
-	if ipnet != nil {
+	// If already wider than /13 (e.g. /8, /12), respect the configured CIDR
+	if ipnet != nil && ipnet.Mask != nil {
 		ones, bits := ipnet.Mask.Size()
-		// If already wider than /16 (e.g. /8, /13), respect the configured CIDR
-		if bits == 32 && ones < 16 {
+		if bits == 32 && ones < 13 {
 			return ipnet.String()
 		}
 	}
 
-	// Expand 10.0.x.x (/24 or /16) to 10.0.0.0/13 covering 10.0-10.7; keep explicit /16 for 10.1+
-	// so separate interfaces on the same host (e.g. 10.8.0.1/16, 10.11.0.1/16) do not steal 10.0.0.0/13.
-	if ip4[0] == 10 {
-		if ip4[1] == 0 {
-			return "10.0.0.0/13"
+	// Expand 10.0.x.x (/24 or /16) to 10.0.0.0/13 covering 10.0-10.7
+	if ip4[0] == 10 && ip4[1] == 0 {
+		return "10.0.0.0/13"
+	}
+
+	// Respect explicit CIDR mask for any other subnet (e.g. 10.8.0.0/16, 172.16.0.0/16, 192.168.10.0/24)
+	if ipnet != nil && ipnet.Mask != nil {
+		ones, bits := ipnet.Mask.Size()
+		if bits == 32 && ones >= 8 && ones <= 30 {
+			netIP := ip4.Mask(ipnet.Mask)
+			return fmt.Sprintf("%s/%d", netIP.String(), ones)
 		}
+	}
+
+	if ip4[0] == 10 {
 		return fmt.Sprintf("10.%d.0.0/16", ip4[1])
 	} else if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
 		return fmt.Sprintf("172.%d.0.0/16", ip4[1])

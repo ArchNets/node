@@ -57,6 +57,11 @@ func TestWireGuardAssignIPAndPoolSubnet(t *testing.T) {
 			want: "10.1.0.2",
 		},
 		{
+			name: "ID 33455 (Subnet 10.0.0.1/24 expands to 10.0.0.0/13)",
+			id:   33455,
+			want: "10.1.7.108",
+		},
+		{
 			name: "ID 0 (Invalid)",
 			id:   0,
 			want: "",
@@ -77,6 +82,22 @@ func TestWireGuardAssignIPAndPoolSubnet(t *testing.T) {
 		})
 	}
 
+	// Test bounded non-leaking subnets for distinct interfaces
+	coreWG8 := &WireGuardCore{Address: "10.8.0.1/16"}
+	if got := coreWG8.assignIP(33455); got != "10.8.7.108" {
+		t.Fatalf("expected 10.8.0.1/16 to stay strictly in 10.8.x.x, got %q", got)
+	}
+
+	core172 := &WireGuardCore{Address: "172.16.0.1/16"}
+	if got := core172.assignIP(33455); got != "172.16.7.108" {
+		t.Fatalf("expected 172.16.0.1/16 to stay strictly in 172.16.x.x, got %q", got)
+	}
+
+	core192 := &WireGuardCore{Address: "192.168.10.1/24"}
+	if got := core192.assignIP(33455); got != "192.168.10.108" {
+		t.Fatalf("expected 192.168.10.1/24 to stay strictly in 192.168.10.x, got %q", got)
+	}
+
 	subnetTests := []struct {
 		address string
 		want    string
@@ -84,11 +105,13 @@ func TestWireGuardAssignIPAndPoolSubnet(t *testing.T) {
 		{"10.0.0.1/24", "10.0.0.0/13"},
 		{"10.1.0.1/16", "10.1.0.0/16"},
 		{"10.8.0.1/16", "10.8.0.0/16"},
-		{"10.10.0.1/24", "10.10.0.0/16"},
+		{"10.10.0.1/24", "10.10.0.0/24"},
 		{"10.0.0.1/16", "10.0.0.0/13"},
 		{"10.0.0.1/8", "10.0.0.0/8"},
-		{"192.168.1.1/24", "192.168.0.0/16"},
-		{"172.20.0.1/24", "172.20.0.0/16"},
+		{"192.168.1.1/24", "192.168.1.0/24"},
+		{"172.20.0.1/24", "172.20.0.0/24"},
+		{"172.16.0.1/16", "172.16.0.0/16"},
+		{"100.64.0.1/16", "100.64.0.0/16"},
 	}
 
 	for _, tt := range subnetTests {
