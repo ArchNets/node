@@ -24,7 +24,11 @@ readonly SERVICE_NAME="archnets"
 readonly MGMT_SCRIPT_URL="https://raw.githubusercontent.com/archnets/node/master/scripts/node.sh"
 readonly AWG_MODULE_REPO="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
 readonly AWG_TOOLS_REPO="https://github.com/amnezia-vpn/amneziawg-tools.git"
-readonly AWG_PPA="ppa:amnezia/ppa"
+readonly AWG_TOOLS_TAG="v3.1.20260812"
+readonly AWG_PPA_KEY_ID="75C9DD72C799870E310542E24166F2C257290828"
+readonly AWG_PPA_KEYRING="/etc/apt/trusted.gpg.d/amnezia-ppa.gpg"
+readonly AWG_PPA_LIST="/etc/apt/sources.list.d/amnezia-ppa.list"
+readonly AWG_SWAP_FILE="/tmp/archnet-awg.swap"
 
 CUR_DIR="$(pwd)"
 
@@ -68,6 +72,9 @@ VERSION_ARG=""
 API_HOST_ARG=""
 SERVER_ID_ARG=""
 SECRET_KEY_ARG=""
+UPDATE_MODE=false
+WITH_AWG=false
+INSTALL_AWG_ONLY=false
 
 usage() {
     cat <<EOF
@@ -77,9 +84,12 @@ Options:
   --api-host URL     Panel API address (e.g. https://example.com/)
   --server-id ID     Server unique identifier
   --secret-key KEY   Secret key used to verify request legitimacy
+  -u, --update       Fast update mode (skip base OS packages & strongSwan)
+  --with-awg         Also install AmneziaWG kernel module & tools during install
+  --install-awg      Install/repair AmneziaWG kernel module & tools only
   -h, --help         Show this help
 
-When all three options are provided, the config file is generated
+When all three API options are provided, the config file is generated
 non-interactively.
 EOF
 }
@@ -87,11 +97,14 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --api-host)   API_HOST_ARG="${2:-}";   shift 2 ;;
-            --server-id)  SERVER_ID_ARG="${2:-}";  shift 2 ;;
-            --secret-key) SECRET_KEY_ARG="${2:-}"; shift 2 ;;
-            -h|--help)    usage; exit 0 ;;
-            --*)          die "Unknown parameter: $1 (see --help)" ;;
+            --api-host)    API_HOST_ARG="${2:-}";   shift 2 ;;
+            --server-id)   SERVER_ID_ARG="${2:-}";  shift 2 ;;
+            --secret-key)  SECRET_KEY_ARG="${2:-}"; shift 2 ;;
+            -u|--update)   UPDATE_MODE=true;        shift ;;
+            --with-awg)    WITH_AWG=true;           shift ;;
+            --install-awg) INSTALL_AWG_ONLY=true;   shift ;;
+            -h|--help)     usage; exit 0 ;;
+            --*)           die "Unknown parameter: $1 (see --help)" ;;
             *)
                 # First positional argument is treated as the version
                 [[ -z "$VERSION_ARG" ]] && VERSION_ARG="$1"
@@ -292,17 +305,12 @@ install_base() {
             update-ca-certificates >/dev/null 2>&1 || true
             ;;
         debian|ubuntu)
-            local extra=()
-            [[ "$RELEASE" == "ubuntu" ]] && extra+=(software-properties-common)
             need_install_apt wget curl unzip tar cron socat ca-certificates pv \
-                "${extra[@]}" wireguard-tools \
-                strongswan strongswan-swanctl xl2tpd git make build-essential openvpn
-            # Kernel headers: try exact kernel match, fall back to generic meta-package
-            apt_install "linux-headers-$(uname -r)" >/dev/null 2>&1 ||
-                apt_install linux-headers-generic >/dev/null 2>&1 ||
-                warn "Kernel headers unavailable for $(uname -r); AWG module build may fail"
+                wireguard-tools strongswan strongswan-swanctl xl2tpd openvpn
             update-ca-certificates >/dev/null 2>&1 || true
-            install_amneziawg
+            if [[ "$WITH_AWG" == true ]]; then
+                install_amneziawg || warn "Continuing without AmneziaWG kernel module (embedded userspace fallback will be used)"
+            fi
             ;;
         arch)
             info "Updating package database..."
@@ -317,44 +325,197 @@ install_base() {
 }
 
 # ------------------------------------------------------------------------------
-#  AmneziaWG
+#  AmneziaWG (Optional kernel module acceleration)
 #
-#  Strategy:
-#    1. If the module is already loaded and the userland tools exist -> done.
-#    2. On Ubuntu, try the DKMS packages from the Amnezia PPA, but only when
-#       the PPA actually publishes packages for this release (otherwise adding
-#       it permanently breaks `apt-get update`).
-#    3. Fall back to building both the kernel module and the userland tools
-#       from source. Needed for Debian, unsupported Ubuntu releases, and
-#       custom kernels (XanMod, Liquorix, ...) that DKMS can't build against.
+#  Note: archnets-node includes an embedded userspace amneziawg-go engine, so
+#  AmneziaWG works out-of-the-box without kernel compilation. Installing the
+#  kernel module is optional for maximum throughput on capable VPSs.
+#
+#  Strategy (when --with-awg / --install-awg is requested):
+#    1. Skip cleanly in containers (OpenVZ/LXC/Docker) where kmods cannot load.
+#    2. If kernel module already loads, install prebuilt `awg` tools if missing.
+#    3. Pre-check kernel headers before attempting any DKMS/source build.
+#    4. Create temporary 1GB swap on low-RAM servers (<1.5GB) to prevent OOM.
+#    5. On Ubuntu, add PPA via HTTPS key import (avoiding port 11371 hang) and
+#       targeted apt update on the PPA source file only.
+#    6. Fall back to building kernel module from source (with low-RAM job cap).
 # ------------------------------------------------------------------------------
+TEMP_SWAP_ACTIVE=0
+
+create_temp_swap() {
+    local mem_kb swap_kb total_mb
+    mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    swap_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    total_mb=$(( (mem_kb + swap_kb) / 1024 ))
+    if [[ $total_mb -lt 1500 && ! -f "$AWG_SWAP_FILE" ]]; then
+        info "Low memory detected ($((mem_kb / 1024))MB RAM). Creating temporary 1GB swap for build..."
+        if fallocate -l 1G "$AWG_SWAP_FILE" 2>/dev/null || \
+           dd if=/dev/zero of="$AWG_SWAP_FILE" bs=1M count=1024 >/dev/null 2>&1; then
+            chmod 600 "$AWG_SWAP_FILE"
+            if mkswap "$AWG_SWAP_FILE" >/dev/null 2>&1 && swapon "$AWG_SWAP_FILE" >/dev/null 2>&1; then
+                TEMP_SWAP_ACTIVE=1
+            else
+                rm -f "$AWG_SWAP_FILE"
+            fi
+        fi
+    fi
+}
+
+remove_temp_swap() {
+    if [[ "${TEMP_SWAP_ACTIVE:-0}" -eq 1 ]] || [[ -f "$AWG_SWAP_FILE" ]]; then
+        swapoff "$AWG_SWAP_FILE" >/dev/null 2>&1 || true
+        rm -f "$AWG_SWAP_FILE"
+        TEMP_SWAP_ACTIVE=0
+    fi
+}
+
+awg_build_jobs() {
+    local mem_mb
+    mem_mb=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 1024)
+    if [[ $mem_mb -lt 1024 ]]; then
+        echo 1
+    elif [[ $mem_mb -lt 2048 ]]; then
+        echo 2
+    else
+        nproc 2>/dev/null || echo 1
+    fi
+}
+
+is_container_env() {
+    [[ -f /.dockerenv ]] && return 0
+    [[ -d /proc/vz && ! -d /proc/bc ]] && return 0
+    if [[ -r /proc/1/environ ]] && tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qE '^container=(lxc|docker|podman|openvz)$'; then
+        return 0
+    fi
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        local virt
+        virt=$(systemd-detect-virt -c 2>/dev/null || true)
+        [[ -n "$virt" && "$virt" != "none" ]] && return 0
+    fi
+    return 1
+}
+
 awg_ready() {
-    lsmod | grep -q '^amneziawg' && command -v awg >/dev/null 2>&1
+    (lsmod | grep -q '^amneziawg' || modprobe amneziawg 2>/dev/null) && command -v awg >/dev/null 2>&1
+}
+
+install_awg_tools() {
+    command -v awg >/dev/null 2>&1 && return 0
+
+    local machine asset=""
+    machine="$(uname -m)"
+    if [[ "$machine" == "x86_64" || "$machine" == "amd64" ]]; then
+        if [[ "$RELEASE" == "alpine" ]]; then
+            asset="alpine-3.19-amneziawg-tools.zip"
+        else
+            asset="ubuntu-22.04-amneziawg-tools.zip"
+        fi
+    fi
+
+    if [[ -n "$asset" ]]; then
+        local url="https://github.com/amnezia-vpn/amneziawg-tools/releases/download/${AWG_TOOLS_TAG}/${asset}"
+        local tmp_zip="/tmp/awg-tools.zip"
+        local tmp_dir="/tmp/awg-tools-extract"
+        rm -rf "$tmp_zip" "$tmp_dir"
+        info "Downloading prebuilt amneziawg-tools (${asset})..."
+        if curl -fSL --connect-timeout 8 --max-time 25 -o "$tmp_zip" "$url" || \
+           curl -fSL --connect-timeout 8 --max-time 25 -o "$tmp_zip" "https://ghproxy.net/${url}"; then
+            mkdir -p "$tmp_dir"
+            if unzip -o -q "$tmp_zip" -d "$tmp_dir"; then
+                local awg_bin awg_quick_bin
+                awg_bin=$(find "$tmp_dir" -type f -name "awg" | head -n1)
+                awg_quick_bin=$(find "$tmp_dir" -type f -name "awg-quick" | head -n1)
+                if [[ -n "$awg_bin" ]]; then
+                    install -m 755 "$awg_bin" /usr/local/bin/awg
+                    [[ -n "$awg_quick_bin" ]] && install -m 755 "$awg_quick_bin" /usr/local/bin/awg-quick
+                    rm -rf "$tmp_zip" "$tmp_dir"
+                    if awg --version >/dev/null 2>&1; then
+                        ok "Prebuilt amneziawg-tools installed"
+                        return 0
+                    fi
+                    rm -f /usr/local/bin/awg /usr/local/bin/awg-quick
+                fi
+            fi
+        fi
+        rm -rf "$tmp_zip" "$tmp_dir"
+    fi
+
+    # Fallback: compile amneziawg-tools from source
+    info "Building amneziawg-tools from source..."
+    if [[ "$RELEASE" == "debian" || "$RELEASE" == "ubuntu" ]]; then
+        need_install_apt git make gcc libc6-dev
+    fi
+    local tools_dir="/tmp/amneziawg-tools"
+    rm -rf "$tools_dir"
+    if git_clone_with_fallback "$AWG_TOOLS_REPO" "$tools_dir" && \
+       make -C "$tools_dir/src" -j"$(awg_build_jobs)" >/dev/null 2>&1 && \
+       make -C "$tools_dir/src" install >/dev/null 2>&1; then
+        rm -rf "$tools_dir"
+        ok "amneziawg-tools built and installed from source"
+        return 0
+    fi
+    rm -rf "$tools_dir"
+    warn "Failed to install amneziawg-tools"
+    return 1
+}
+
+ensure_kernel_headers() {
+    [[ -d "/lib/modules/$(uname -r)/build" ]] && return 0
+    if [[ "$RELEASE" == "debian" || "$RELEASE" == "ubuntu" ]]; then
+        info "Installing kernel headers for $(uname -r)..."
+        wait_for_dpkg_lock
+        apt-get update -y >/dev/null 2>&1 || true
+        apt_install "linux-headers-$(uname -r)" >/dev/null 2>&1 || \
+            apt_install linux-headers-generic >/dev/null 2>&1 || true
+    fi
+    [[ -d "/lib/modules/$(uname -r)/build" ]]
 }
 
 ppa_supports_release() {
     [[ -n "$OS_CODENAME" ]] || return 1
-    curl -fsI --max-time 15 \
+    curl -fsI --connect-timeout 6 --max-time 15 \
         "https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/${OS_CODENAME}/Release" \
         >/dev/null 2>&1
 }
 
 remove_amnezia_ppa() {
-    add-apt-repository -y --remove "$AWG_PPA" >/dev/null 2>&1 || true
-    rm -f /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.list \
+    rm -f "$AWG_PPA_LIST" "$AWG_PPA_KEYRING" \
+          /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.list \
           /etc/apt/sources.list.d/amnezia-ubuntu-ppa*.sources 2>/dev/null || true
 }
 
 install_awg_dkms() {
     info "Trying AmneziaWG DKMS packages from PPA..."
-    add-apt-repository -y "$AWG_PPA" >/dev/null 2>&1 || true
-    if ! apt-get update -y >/dev/null 2>&1; then
-        warn "apt-get update failed after adding the Amnezia PPA"
+    need_install_apt dkms gnupg curl
+
+    # Fetch PPA signing key over HTTPS (port 443) so HKP port 11371 firewalls never hang
+    rm -f "$AWG_PPA_KEYRING"
+    if ! curl -fsSL --connect-timeout 6 --max-time 15 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${AWG_PPA_KEY_ID}" \
+        | gpg --dearmor -o "$AWG_PPA_KEYRING" 2>/dev/null; then
+        warn "Failed to fetch Amnezia PPA signing key over HTTPS"
+        return 1
     fi
 
-    apt_install amneziawg-tools >/dev/null 2>&1 || true
+    echo "deb [signed-by=${AWG_PPA_KEYRING}] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${OS_CODENAME} main" > "$AWG_PPA_LIST"
+
+    # Targeted apt update on the PPA source list only (fast, avoids refreshing unrelated mirrors)
+    wait_for_dpkg_lock
+    if ! apt-get update -o Dir::Etc::sourcelist="sources.list.d/amnezia-ppa.list" \
+        -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" -y >/dev/null 2>&1; then
+        warn "apt-get update failed for Amnezia PPA"
+        remove_amnezia_ppa
+        return 1
+    fi
+
+    install_awg_tools || apt_install amneziawg-tools >/dev/null 2>&1 || true
+
+    create_temp_swap
+    trap remove_temp_swap EXIT
     apt_install amneziawg-dkms 2>&1 | tee /tmp/awg-dkms-install.log
     local dkms_exit=${PIPESTATUS[0]}
+    remove_temp_swap
+    trap - EXIT
 
     modprobe amneziawg 2>/dev/null || true
     if [[ $dkms_exit -eq 0 ]] && awg_ready; then
@@ -362,18 +523,17 @@ install_awg_dkms() {
     fi
 
     warn "DKMS install failed for kernel $(uname -r) (see /tmp/awg-dkms-install.log)"
-    # Clean up broken DKMS state and the now-useless PPA so apt keeps working
+    # Clean up broken DKMS state and PPA so apt stays healthy
     dpkg --remove --force-remove-reinstreq amneziawg amneziawg-dkms 2>/dev/null || true
     apt-get -f install -y >/dev/null 2>&1 || true
     remove_amnezia_ppa
-    apt-get update -y >/dev/null 2>&1 || true
     return 1
 }
 
 install_awg_source() {
-    info "Building AmneziaWG from source for kernel $(uname -r)..."
+    info "Building AmneziaWG kernel module from source for kernel $(uname -r)..."
 
-    apt_install git build-essential "linux-headers-$(uname -r)" >/dev/null 2>&1 || true
+    need_install_apt git build-essential
 
     # Kernels built with Clang/LLVM (common for XanMod/Liquorix) need LLVM=1
     local make_flags=""
@@ -385,7 +545,6 @@ install_awg_source() {
         make_flags="LLVM=1"
     fi
 
-    # --- kernel module ---
     local build_dir="/tmp/amneziawg-linux-kernel-module"
     rm -rf "$build_dir"
     if ! git_clone_with_fallback "$AWG_MODULE_REPO" "$build_dir"; then
@@ -393,11 +552,22 @@ install_awg_source() {
         return 1
     fi
 
-    if ! make -C "$build_dir/src" -j"$(nproc)" KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags; then
+    create_temp_swap
+    trap remove_temp_swap EXIT
+    local jobs
+    jobs="$(awg_build_jobs)"
+    if ! make -C "$build_dir/src" -j"$jobs" KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags; then
+        remove_temp_swap
+        trap - EXIT
+        rm -rf "$build_dir"
         err "AmneziaWG source build failed. Check ${build_dir}/src/ for details."
         return 1
     fi
     make -C "$build_dir/src" install KERNELDIR="/lib/modules/$(uname -r)/build" $make_flags 2>/dev/null || true
+    remove_temp_swap
+    trap - EXIT
+    rm -rf "$build_dir"
+
     depmod -a
     modprobe amneziawg 2>/dev/null || true
 
@@ -408,30 +578,32 @@ install_awg_source() {
     # Persist across reboots
     echo "amneziawg" > /etc/modules-load.d/amneziawg.conf
 
-    # --- userland tools (awg / awg-quick), if not already present ---
-    if ! command -v awg >/dev/null 2>&1; then
-        local tools_dir="/tmp/amneziawg-tools"
-        rm -rf "$tools_dir"
-        if git_clone_with_fallback "$AWG_TOOLS_REPO" "$tools_dir" &&
-           make -C "$tools_dir/src" -j"$(nproc)" >/dev/null 2>&1 &&
-           make -C "$tools_dir/src" install >/dev/null 2>&1; then
-            ok "amneziawg-tools built and installed from source"
-        else
-            warn "Failed to build amneziawg-tools; 'awg' CLI may be missing"
-        fi
-    fi
-
-    rm -rf "$build_dir" /tmp/amneziawg-tools
+    install_awg_tools || warn "Failed to install 'awg' CLI"
     return 0
 }
 
 install_amneziawg() {
-    info "Installing AmneziaWG..."
+    info "Installing AmneziaWG kernel module & tools..."
 
     modprobe amneziawg 2>/dev/null || true
-    if awg_ready; then
-        ok "AmneziaWG already installed and loaded"
+    if lsmod | grep -q '^amneziawg'; then
+        install_awg_tools || true
+        if awg_ready; then
+            ok "AmneziaWG already installed and loaded"
+            return 0
+        fi
+    fi
+
+    if is_container_env; then
+        warn "Container environment detected; kernel modules cannot be compiled or loaded."
+        info "archnets-node will use its built-in userspace amneziawg-go engine automatically."
         return 0
+    fi
+
+    if ! ensure_kernel_headers; then
+        warn "Kernel headers for $(uname -r) are unavailable; cannot build AmneziaWG kernel module."
+        info "archnets-node will use its built-in userspace amneziawg-go engine automatically."
+        return 1
     fi
 
     if [[ "$RELEASE" == "ubuntu" ]] && ppa_supports_release; then
@@ -448,7 +620,7 @@ install_amneziawg() {
         return 0
     fi
 
-    err "AmneziaWG installation failed; AWG-based protocols will be unavailable"
+    warn "AmneziaWG kernel module installation failed; archnets-node will fall back to embedded userspace amneziawg-go"
     return 1
 }
 
@@ -748,6 +920,20 @@ main() {
     step "Checking environment"
     detect_os
     detect_arch
+
+    if [[ "$INSTALL_AWG_ONLY" == true ]]; then
+        step "Installing AmneziaWG kernel module"
+        install_amneziawg
+        exit $?
+    fi
+
+    if [[ "$UPDATE_MODE" == true ]]; then
+        step "Updating archnets node"
+        install_node
+        echo ""
+        ok "${BOLD}Update finished${PLAIN}"
+        return 0
+    fi
 
     step "Installing base packages"
     install_base

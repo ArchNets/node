@@ -3,6 +3,8 @@
 package core
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -19,6 +21,13 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+type awgUserspace interface {
+	ipcSet(conf string) error
+	ipcGet() (string, error)
+	up() error
+	close()
+}
 
 // AmneziaConfig holds obfuscation and mimicry parameters for AmneziaWG 3.1
 type AmneziaConfig struct {
@@ -98,6 +107,7 @@ type AmneziaWGCore struct {
 	traffic        map[int]*UserTraffic // key: uid
 	lastPeerStats  map[string]*peerStats
 	statsCollector *amneziaStatsCollectorTask
+	userspace      awgUserspace
 	TProxyPort          int
 	TProxySubnet        string
 	TProxyBypassUDP     bool
@@ -317,17 +327,41 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) error {
 			end = len(batch)
 		}
 		chunk := batch[start:end]
-		args := make([]string, 0, 2+len(chunk)*6)
-		args = append(args, "set", w.InterfaceName)
-		for _, p := range chunk {
-			args = append(args, "peer", p.pubKey, "allowed-ips", p.assignedIP+"/32", "persistent-keepalive", "25")
-		}
-		if err := execCommandDirect("awg", args...); err != nil {
-			log.WithError(err).Errorf("Failed to add AmneziaWG peer batch (%d peers)", len(chunk))
-			if firstErr == nil {
-				firstErr = err
+		if w.userspace != nil {
+			var sb strings.Builder
+			for _, p := range chunk {
+				pk, err := wgtypes.ParseKey(p.pubKey)
+				if err != nil {
+					continue
+				}
+				sb.WriteString("public_key=")
+				sb.WriteString(hex.EncodeToString(pk[:]))
+				sb.WriteString("\nallowed_ip=")
+				sb.WriteString(p.assignedIP)
+				sb.WriteString("/32\npersistent_keepalive_interval=25\n")
 			}
-			continue
+			if sb.Len() > 0 {
+				if err := w.userspace.ipcSet(sb.String()); err != nil {
+					log.WithError(err).Errorf("Failed to add AmneziaWG peer batch via userspace UAPI (%d peers)", len(chunk))
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+			}
+		} else {
+			args := make([]string, 0, 2+len(chunk)*6)
+			args = append(args, "set", w.InterfaceName)
+			for _, p := range chunk {
+				args = append(args, "peer", p.pubKey, "allowed-ips", p.assignedIP+"/32", "persistent-keepalive", "25")
+			}
+			if err := execCommandDirect("awg", args...); err != nil {
+				log.WithError(err).Errorf("Failed to add AmneziaWG peer batch (%d peers)", len(chunk))
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
 		}
 		if w.running.Load() && poolNet != nil {
 			for _, p := range chunk {
@@ -409,12 +443,28 @@ func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 			end = len(removeKeys)
 		}
 		chunk := removeKeys[start:end]
-		args := make([]string, 0, 2+len(chunk)*3)
-		args = append(args, "set", w.InterfaceName)
-		for _, k := range chunk {
-			args = append(args, "peer", k, "remove")
+		if w.userspace != nil {
+			var sb strings.Builder
+			for _, k := range chunk {
+				pk, err := wgtypes.ParseKey(k)
+				if err != nil {
+					continue
+				}
+				sb.WriteString("public_key=")
+				sb.WriteString(hex.EncodeToString(pk[:]))
+				sb.WriteString("\nremove=true\n")
+			}
+			if sb.Len() > 0 {
+				_ = w.userspace.ipcSet(sb.String())
+			}
+		} else {
+			args := make([]string, 0, 2+len(chunk)*3)
+			args = append(args, "set", w.InterfaceName)
+			for _, k := range chunk {
+				args = append(args, "peer", k, "remove")
+			}
+			_ = execCommandDirect("awg", args...)
 		}
-		_ = execCommandDirect("awg", args...)
 	}
 
 	log.WithFields(log.Fields{
@@ -423,125 +473,290 @@ func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 	}).Info("AmneziaWG users removed")
 }
 
-// configureInterface configures params using awg command
-func (w *AmneziaWGCore) configureInterface() error {
-	// 1. Set basic config (listen-port and private-key)
-	cmd := fmt.Sprintf("echo %s | awg set %s listen-port %d private-key /dev/stdin", w.PrivateKey.String(), w.InterfaceName, w.Port)
-	if err := execShellCommand(cmd); err != nil {
-		return fmt.Errorf("failed to set basic config: %w", err)
-	}
-
-	// 2. Prepare HeaderProtectionKey file if configured
-	var hpkFile string
-	if w.HeaderProtectionKey != "" {
-		tmp, err := os.CreateTemp("", fmt.Sprintf("awg_hpk_%s_*", w.InterfaceName))
-		if err != nil {
-			return fmt.Errorf("failed to create temporary header protection key file: %w", err)
+// uapiKeyToHex decodes a base64 WireGuard/AmneziaWG key (or accepts 64-char hex) and returns lowercase hex.
+func uapiKeyToHex(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if len(s) == 64 {
+		if b, err := hex.DecodeString(s); err == nil && len(b) == 32 {
+			return strings.ToLower(s), nil
 		}
-		hpkFile = tmp.Name()
-		_ = os.Chmod(hpkFile, 0600)
-		if _, err := tmp.WriteString(strings.TrimSpace(w.HeaderProtectionKey) + "\n"); err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(hpkFile)
-			return fmt.Errorf("failed to write header protection key: %w", err)
-		}
-		_ = tmp.Close()
-		defer os.Remove(hpkFile)
 	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(b) != 32 {
+		return "", fmt.Errorf("invalid 32-byte key")
+	}
+	return hex.EncodeToString(b), nil
+}
 
-	// 3. Set Amnezia 3.1 parameters directly via exec (avoids shell redirection issues with CPS tags)
-	var args []string
-	args = append(args, w.InterfaceName)
+func (w *AmneziaWGCore) buildUAPIDeviceConfig() (string, error) {
+	var sb strings.Builder
+	sb.WriteString("private_key=")
+	sb.WriteString(hex.EncodeToString(w.PrivateKey[:]))
+	sb.WriteByte('\n')
+	sb.WriteString("listen_port=")
+	sb.WriteString(strconv.Itoa(w.Port))
+	sb.WriteByte('\n')
 
 	if w.Jc > 0 {
-		args = append(args, "jc", strconv.Itoa(w.Jc))
+		sb.WriteString("jc=")
+		sb.WriteString(strconv.Itoa(w.Jc))
+		sb.WriteByte('\n')
 	}
 	if w.Jmin > 0 {
-		args = append(args, "jmin", strconv.Itoa(w.Jmin))
+		sb.WriteString("jmin=")
+		sb.WriteString(strconv.Itoa(w.Jmin))
+		sb.WriteByte('\n')
 	}
 	if w.Jmax > 0 {
-		args = append(args, "jmax", strconv.Itoa(w.Jmax))
+		sb.WriteString("jmax=")
+		sb.WriteString(strconv.Itoa(w.Jmax))
+		sb.WriteByte('\n')
 	}
 	if w.S1 > 0 {
-		args = append(args, "s1", strconv.Itoa(w.S1))
+		sb.WriteString("s1=")
+		sb.WriteString(strconv.Itoa(w.S1))
+		sb.WriteByte('\n')
 	}
 	if w.S2 > 0 {
-		args = append(args, "s2", strconv.Itoa(w.S2))
+		sb.WriteString("s2=")
+		sb.WriteString(strconv.Itoa(w.S2))
+		sb.WriteByte('\n')
 	}
 	if w.S3 > 0 {
-		args = append(args, "s3", strconv.Itoa(w.S3))
+		sb.WriteString("s3=")
+		sb.WriteString(strconv.Itoa(w.S3))
+		sb.WriteByte('\n')
 	}
 	if w.S4 > 0 {
-		args = append(args, "s4", strconv.Itoa(w.S4))
+		sb.WriteString("s4=")
+		sb.WriteString(strconv.Itoa(w.S4))
+		sb.WriteByte('\n')
 	}
 	if w.H1 != "" {
-		args = append(args, "h1", w.H1)
+		sb.WriteString("h1=")
+		sb.WriteString(w.H1)
+		sb.WriteByte('\n')
 	}
 	if w.H2 != "" {
-		args = append(args, "h2", w.H2)
+		sb.WriteString("h2=")
+		sb.WriteString(w.H2)
+		sb.WriteByte('\n')
 	}
 	if w.H3 != "" {
-		args = append(args, "h3", w.H3)
+		sb.WriteString("h3=")
+		sb.WriteString(w.H3)
+		sb.WriteByte('\n')
 	}
 	if w.H4 != "" {
-		args = append(args, "h4", w.H4)
+		sb.WriteString("h4=")
+		sb.WriteString(w.H4)
+		sb.WriteByte('\n')
 	}
 	if w.I1 != "" {
-		args = append(args, "i1", w.I1)
+		sb.WriteString("i1=")
+		sb.WriteString(w.I1)
+		sb.WriteByte('\n')
 	}
 	if w.I2 != "" {
-		args = append(args, "i2", w.I2)
+		sb.WriteString("i2=")
+		sb.WriteString(w.I2)
+		sb.WriteByte('\n')
 	}
 	if w.I3 != "" {
-		args = append(args, "i3", w.I3)
+		sb.WriteString("i3=")
+		sb.WriteString(w.I3)
+		sb.WriteByte('\n')
 	}
 	if w.I4 != "" {
-		args = append(args, "i4", w.I4)
+		sb.WriteString("i4=")
+		sb.WriteString(w.I4)
+		sb.WriteByte('\n')
 	}
 	if w.I5 != "" {
-		args = append(args, "i5", w.I5)
+		sb.WriteString("i5=")
+		sb.WriteString(w.I5)
+		sb.WriteByte('\n')
 	}
-	if hpkFile != "" {
-		args = append(args, "header-protection-key", hpkFile)
+	if w.HeaderProtectionKey != "" {
+		hexHPK, err := uapiKeyToHex(w.HeaderProtectionKey)
+		if err != nil {
+			return "", fmt.Errorf("invalid header protection key: %w", err)
+		}
+		sb.WriteString("header_protection_key=")
+		sb.WriteString(hexHPK)
+		sb.WriteByte('\n')
 	}
 	if w.ContentPaddingAddition != "" {
-		args = append(args, "content-padding-addition", w.ContentPaddingAddition)
+		sb.WriteString("content_padding_addition=")
+		sb.WriteString(w.ContentPaddingAddition)
+		sb.WriteByte('\n')
 	}
 	if w.RekeyAfterTime != "" {
-		args = append(args, "rekey-after-time", w.RekeyAfterTime)
+		sb.WriteString("rekey_after_time=")
+		sb.WriteString(w.RekeyAfterTime)
+		sb.WriteByte('\n')
 	}
 	if w.RekeyTimeout != "" {
-		args = append(args, "rekey-timeout", w.RekeyTimeout)
+		sb.WriteString("rekey_timeout=")
+		sb.WriteString(w.RekeyTimeout)
+		sb.WriteByte('\n')
 	}
 	if w.RejectAfterTime != "" {
-		args = append(args, "reject-after-time", w.RejectAfterTime)
+		sb.WriteString("reject_after_time=")
+		sb.WriteString(w.RejectAfterTime)
+		sb.WriteByte('\n')
 	}
 	if w.KeepaliveTimeout != "" {
-		args = append(args, "keepalive-timeout", w.KeepaliveTimeout)
+		sb.WriteString("keepalive_timeout=")
+		sb.WriteString(w.KeepaliveTimeout)
+		sb.WriteByte('\n')
 	}
 	if w.MaxHandshakeAttempts != "" {
-		args = append(args, "max-handshake-attempts", w.MaxHandshakeAttempts)
+		sb.WriteString("max_handshake_attempts=")
+		sb.WriteString(w.MaxHandshakeAttempts)
+		sb.WriteByte('\n')
 	}
 	if w.RandomTrailers {
-		args = append(args, "random-trailers", "on")
+		sb.WriteString("random_trailers=true\n")
 	}
 	if w.DisableCookies {
-		args = append(args, "disable-cookies", "on")
+		sb.WriteString("disable_cookies=true\n")
 	}
+	return sb.String(), nil
+}
 
-	if len(args) > 1 {
-		if err := execCommandDirect("awg", append([]string{"set"}, args...)...); err != nil {
-			return fmt.Errorf("failed to set amnezia params: %w", err)
+// configureInterface configures params using awg command or in-process UAPI
+func (w *AmneziaWGCore) configureInterface() error {
+	if w.userspace != nil {
+		uapiConf, err := w.buildUAPIDeviceConfig()
+		if err != nil {
+			return err
+		}
+		if err := w.userspace.ipcSet(uapiConf); err != nil {
+			return fmt.Errorf("failed to configure userspace amneziawg-go device: %w", err)
+		}
+		if err := w.userspace.up(); err != nil {
+			return fmt.Errorf("failed to bring up userspace amneziawg-go device: %w", err)
+		}
+	} else {
+		// 1. Set basic config (listen-port and private-key)
+		cmd := fmt.Sprintf("echo %s | awg set %s listen-port %d private-key /dev/stdin", w.PrivateKey.String(), w.InterfaceName, w.Port)
+		if err := execShellCommand(cmd); err != nil {
+			return fmt.Errorf("failed to set basic config: %w", err)
+		}
+
+		// 2. Prepare HeaderProtectionKey file if configured
+		var hpkFile string
+		if w.HeaderProtectionKey != "" {
+			tmp, err := os.CreateTemp("", fmt.Sprintf("awg_hpk_%s_*", w.InterfaceName))
+			if err != nil {
+				return fmt.Errorf("failed to create temporary header protection key file: %w", err)
+			}
+			hpkFile = tmp.Name()
+			_ = os.Chmod(hpkFile, 0600)
+			if _, err := tmp.WriteString(strings.TrimSpace(w.HeaderProtectionKey) + "\n"); err != nil {
+				_ = tmp.Close()
+				_ = os.Remove(hpkFile)
+				return fmt.Errorf("failed to write header protection key: %w", err)
+			}
+			_ = tmp.Close()
+			defer os.Remove(hpkFile)
+		}
+
+		// 3. Set Amnezia 3.1 parameters directly via exec (avoids shell redirection issues with CPS tags)
+		var args []string
+		args = append(args, w.InterfaceName)
+
+		if w.Jc > 0 {
+			args = append(args, "jc", strconv.Itoa(w.Jc))
+		}
+		if w.Jmin > 0 {
+			args = append(args, "jmin", strconv.Itoa(w.Jmin))
+		}
+		if w.Jmax > 0 {
+			args = append(args, "jmax", strconv.Itoa(w.Jmax))
+		}
+		if w.S1 > 0 {
+			args = append(args, "s1", strconv.Itoa(w.S1))
+		}
+		if w.S2 > 0 {
+			args = append(args, "s2", strconv.Itoa(w.S2))
+		}
+		if w.S3 > 0 {
+			args = append(args, "s3", strconv.Itoa(w.S3))
+		}
+		if w.S4 > 0 {
+			args = append(args, "s4", strconv.Itoa(w.S4))
+		}
+		if w.H1 != "" {
+			args = append(args, "h1", w.H1)
+		}
+		if w.H2 != "" {
+			args = append(args, "h2", w.H2)
+		}
+		if w.H3 != "" {
+			args = append(args, "h3", w.H3)
+		}
+		if w.H4 != "" {
+			args = append(args, "h4", w.H4)
+		}
+		if w.I1 != "" {
+			args = append(args, "i1", w.I1)
+		}
+		if w.I2 != "" {
+			args = append(args, "i2", w.I2)
+		}
+		if w.I3 != "" {
+			args = append(args, "i3", w.I3)
+		}
+		if w.I4 != "" {
+			args = append(args, "i4", w.I4)
+		}
+		if w.I5 != "" {
+			args = append(args, "i5", w.I5)
+		}
+		if hpkFile != "" {
+			args = append(args, "header-protection-key", hpkFile)
+		}
+		if w.ContentPaddingAddition != "" {
+			args = append(args, "content-padding-addition", w.ContentPaddingAddition)
+		}
+		if w.RekeyAfterTime != "" {
+			args = append(args, "rekey-after-time", w.RekeyAfterTime)
+		}
+		if w.RekeyTimeout != "" {
+			args = append(args, "rekey-timeout", w.RekeyTimeout)
+		}
+		if w.RejectAfterTime != "" {
+			args = append(args, "reject-after-time", w.RejectAfterTime)
+		}
+		if w.KeepaliveTimeout != "" {
+			args = append(args, "keepalive-timeout", w.KeepaliveTimeout)
+		}
+		if w.MaxHandshakeAttempts != "" {
+			args = append(args, "max-handshake-attempts", w.MaxHandshakeAttempts)
+		}
+		if w.RandomTrailers {
+			args = append(args, "random-trailers", "on")
+		}
+		if w.DisableCookies {
+			args = append(args, "disable-cookies", "on")
+		}
+
+		if len(args) > 1 {
+			if err := execCommandDirect("awg", append([]string{"set"}, args...)...); err != nil {
+				return fmt.Errorf("failed to set amnezia params: %w", err)
+			}
 		}
 	}
 
-	// 3. Set IP
-	cmd = fmt.Sprintf("ip addr add %s dev %s", w.Address, w.InterfaceName)
+	// 4. Set IP
+	cmd := fmt.Sprintf("ip addr add %s dev %s", w.Address, w.InterfaceName)
 	if err := execCommand(cmd); err != nil {
 		return fmt.Errorf("failed to assign IP: %w", err)
 	}
 
-	// 4. Up
+	// 5. Up
 	cmd = fmt.Sprintf("ip link set %s up", w.InterfaceName)
 	if err := execCommand(cmd); err != nil {
 		return fmt.Errorf("failed to up interface: %w", err)
@@ -557,11 +772,33 @@ func (w *AmneziaWGCore) configureInterface() error {
 func (w *AmneziaWGCore) createInterface() error {
 	_ = execCommand(fmt.Sprintf("ip link delete %s", w.InterfaceName))
 
-	// Check if amneziawg module is loaded?
-	// Just try to create
+	// Prefer kernel module when available and `awg` CLI is present;
+	// otherwise seamlessly fall back to the embedded userspace amneziawg-go engine.
+	_ = execCommand("modprobe amneziawg")
 	cmd := fmt.Sprintf("ip link add %s type amneziawg", w.InterfaceName)
-	if err := execCommand(cmd); err != nil {
-		return fmt.Errorf("failed to create interface (is amneziawg module installed?): %w", err)
+	if err := execCommand(cmd); err == nil {
+		if _, lookErr := exec.LookPath("awg"); lookErr == nil {
+			w.userspace = nil
+		} else {
+			log.WithField("interface", w.InterfaceName).
+				Warn("AmneziaWG kernel module loaded, but 'awg' CLI not found; falling back to embedded userspace engine")
+			_ = execCommand(fmt.Sprintf("ip link delete %s", w.InterfaceName))
+			u, uErr := createAWGUserspace(w.InterfaceName, w.MTU)
+			if uErr != nil {
+				return fmt.Errorf("failed to start embedded amneziawg-go userspace fallback: %w", uErr)
+			}
+			w.userspace = u
+		}
+	} else {
+		log.WithFields(log.Fields{
+			"interface": w.InterfaceName,
+			"kernelErr": err.Error(),
+		}).Info("AmneziaWG kernel module unavailable, starting embedded userspace amneziawg-go engine")
+		u, uErr := createAWGUserspace(w.InterfaceName, w.MTU)
+		if uErr != nil {
+			return fmt.Errorf("failed to create interface via kernel (%v) and userspace amneziawg-go (%v)", err, uErr)
+		}
+		w.userspace = u
 	}
 
 	if err := execCommand("sysctl -w net.ipv4.ip_forward=1"); err != nil {
@@ -570,6 +807,7 @@ func (w *AmneziaWGCore) createInterface() error {
 
 	cmd = fmt.Sprintf("ip link set %s mtu %d", w.InterfaceName, w.MTU)
 	if err := execCommand(cmd); err != nil {
+		_ = w.deleteInterface()
 		return fmt.Errorf("failed to set MTU: %w", err)
 	}
 
@@ -577,6 +815,10 @@ func (w *AmneziaWGCore) createInterface() error {
 }
 
 func (w *AmneziaWGCore) deleteInterface() error {
+	if w.userspace != nil {
+		w.userspace.close()
+		w.userspace = nil
+	}
 	cmd := fmt.Sprintf("ip link delete %s", w.InterfaceName)
 	return execCommand(cmd)
 }
@@ -635,16 +877,130 @@ func (t *amneziaStatsCollectorTask) run() {
 	}
 }
 
-func (w *AmneziaWGCore) collectStats() {
-	// Parse `awg show <iface> dump`
-	// Output format: publicKey, preSharedKey, endpoint, allowedIPs, latestHandshake, transferRx, transferTx, persistentKeepalive
+// uapiGetToDump converts UAPI `IpcGet()` key=value lines into `awg show <iface> dump` tab-separated lines.
+func uapiGetToDump(uapiOut string) string {
+	type peerBlock struct {
+		pubKey    string
+		endpoint  string
+		allowed   []string
+		handshake string
+		rx        string
+		tx        string
+		keepalive string
+	}
+
+	var cur *peerBlock
+	var sb strings.Builder
+	flush := func() {
+		if cur == nil || cur.pubKey == "" {
+			return
+		}
+		ep := cur.endpoint
+		if ep == "" {
+			ep = "(none)"
+		}
+		allowed := "(none)"
+		if len(cur.allowed) > 0 {
+			allowed = strings.Join(cur.allowed, ",")
+		}
+		hs := cur.handshake
+		if hs == "" {
+			hs = "0"
+		}
+		rx := cur.rx
+		if rx == "" {
+			rx = "0"
+		}
+		tx := cur.tx
+		if tx == "" {
+			tx = "0"
+		}
+		ka := cur.keepalive
+		if ka == "" {
+			ka = "0"
+		}
+		sb.WriteString(cur.pubKey)
+		sb.WriteString("\t(none)\t")
+		sb.WriteString(ep)
+		sb.WriteByte('\t')
+		sb.WriteString(allowed)
+		sb.WriteByte('\t')
+		sb.WriteString(hs)
+		sb.WriteByte('\t')
+		sb.WriteString(rx)
+		sb.WriteByte('\t')
+		sb.WriteString(tx)
+		sb.WriteByte('\t')
+		sb.WriteString(ka)
+		sb.WriteByte('\n')
+	}
+
+	for _, line := range strings.Split(uapiOut, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if k == "public_key" {
+			flush()
+			cur = &peerBlock{}
+			if b, err := hex.DecodeString(v); err == nil && len(b) == 32 {
+				if key, err := wgtypes.NewKey(b); err == nil {
+					cur.pubKey = key.String()
+				}
+			}
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		switch k {
+		case "endpoint":
+			cur.endpoint = v
+		case "allowed_ip":
+			cur.allowed = append(cur.allowed, v)
+		case "last_handshake_time_sec":
+			cur.handshake = v
+		case "rx_bytes":
+			cur.rx = v
+		case "tx_bytes":
+			cur.tx = v
+		case "persistent_keepalive_interval":
+			cur.keepalive = v
+		}
+	}
+	flush()
+	return sb.String()
+}
+
+func (w *AmneziaWGCore) getDumpOutput() (string, error) {
+	if w.userspace != nil {
+		raw, err := w.userspace.ipcGet()
+		if err != nil {
+			return "", err
+		}
+		return uapiGetToDump(raw), nil
+	}
 	cmd := exec.Command("awg", "show", w.InterfaceName, "dump")
 	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func (w *AmneziaWGCore) collectStats() {
+	// Parse `awg show <iface> dump` (or equivalent UAPI output in userspace mode)
+	// Output format: publicKey, preSharedKey, endpoint, allowedIPs, latestHandshake, transferRx, transferTx, persistentKeepalive
+	output, err := w.getDumpOutput()
 	if err != nil {
 		return
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	w.trafficMu.Lock()
 	var newlyActive bool
 
@@ -806,8 +1162,7 @@ func parseAWGDumpOnlinePeers(
 
 // GetOnlineUsers returns list of currently connected users
 func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
-	cmd := exec.Command("awg", "show", w.InterfaceName, "dump")
-	output, err := cmd.CombinedOutput()
+	output, err := w.getDumpOutput()
 	if err != nil {
 		return nil
 	}
@@ -815,7 +1170,7 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 	w.trafficMu.RLock()
 	defer w.trafficMu.RUnlock()
 
-	return parseAWGDumpOnlinePeers(string(output), w.lastPeerStats, &w.keyToPeer, time.Now())
+	return parseAWGDumpOnlinePeers(output, w.lastPeerStats, &w.keyToPeer, time.Now())
 }
 
 func (w *AmneziaWGCore) SetLimiter(l *limiter.Limiter) {

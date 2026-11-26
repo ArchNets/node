@@ -1,7 +1,9 @@
 package core
 
 import (
+	"encoding/hex"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -179,5 +181,112 @@ func TestFilterOnlineWGPeers_And_ParseAWGDump(t *testing.T) {
 	}
 	if awgOnline[0].UID != 101 || awgOnline[0].IP != "5.52.57.98" {
 		t.Fatalf("unexpected AWG online peer: %+v", awgOnline[0])
+	}
+}
+
+func TestAmneziaWGUAPIConfigAndDump(t *testing.T) {
+	priv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hpk, err := wgtypes.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	awgCore, err := NewAmneziaWGCore("awg-test", 51820, "10.0.0.1/24", "awg0", 1280, "1.1.1.1", priv.String(), AmneziaConfig{
+		Jc:                     4,
+		Jmin:                   10,
+		Jmax:                   50,
+		S1:                     15,
+		S2:                     25,
+		S3:                     12,
+		S4:                     16,
+		H1:                     "100-200",
+		H2:                     "300-400",
+		H3:                     "500-600",
+		H4:                     "700-800",
+		I1:                     "<b 0x1122>",
+		HeaderProtectionKey:    hpk.String(),
+		ContentPaddingAddition: "10-20",
+		RekeyAfterTime:         "120",
+		RandomTrailers:         true,
+		DisableCookies:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := awgCore.buildUAPIDeviceConfig()
+	if err != nil {
+		t.Fatalf("buildUAPIDeviceConfig failed: %v", err)
+	}
+
+	expectedFragments := []string{
+		"private_key=" + hex.EncodeToString(priv[:]),
+		"listen_port=51820",
+		"jc=4",
+		"jmin=10",
+		"jmax=50",
+		"s1=15",
+		"s2=25",
+		"s3=12",
+		"s4=16",
+		"h1=100-200",
+		"h2=300-400",
+		"h3=500-600",
+		"h4=700-800",
+		"i1=<b 0x1122>",
+		"header_protection_key=" + hex.EncodeToString(hpk[:]),
+		"content_padding_addition=10-20",
+		"rekey_after_time=120",
+		"random_trailers=true",
+		"disable_cookies=true",
+	}
+	for _, frag := range expectedFragments {
+		if !strings.Contains(cfg, frag) {
+			t.Errorf("expected UAPI config to contain %q, got:\n%s", frag, cfg)
+		}
+	}
+
+	if _, err := uapiKeyToHex("not-a-valid-key"); err == nil {
+		t.Fatal("expected error for invalid header protection key")
+	}
+
+	// Verify uapiGetToDump converts hex public keys & counters to `awg show dump` format
+	peerPriv, _ := wgtypes.GeneratePrivateKey()
+	peerPub := peerPriv.PublicKey()
+	now := time.Unix(1795695000, 0)
+	uapiOut := strings.Join([]string{
+		"private_key=" + hex.EncodeToString(priv[:]),
+		"listen_port=51820",
+		"public_key=" + hex.EncodeToString(peerPub[:]),
+		"preshared_key=0000000000000000000000000000000000000000000000000000000000000000",
+		"protocol_version=1",
+		"endpoint=5.52.57.98:51820",
+		"last_handshake_time_sec=1795694985",
+		"last_handshake_time_nsec=0",
+		"tx_bytes=100000",
+		"rx_bytes=50000",
+		"persistent_keepalive_interval=25",
+		"allowed_ip=10.0.0.2/32",
+		"errno=0",
+	}, "\n")
+
+	dump := uapiGetToDump(uapiOut)
+	var keyToPeer sync.Map
+	keyToPeer.Store(peerPub.String(), &WireGuardPeer{PublicKey: peerPub, UID: 202, IP: "10.0.0.2"})
+	lastStats := map[string]*peerStats{
+		peerPub.String(): {
+			ReceiveBytes:  50000,
+			TransmitBytes: 100000,
+			LastHandshake: now.Add(-15 * time.Second),
+			LastDataTime:  now.Add(-10 * time.Second),
+		},
+	}
+
+	online := parseAWGDumpOnlinePeers(dump, lastStats, &keyToPeer, now)
+	if len(online) != 1 || online[0].UID != 202 || online[0].IP != "5.52.57.98" {
+		t.Fatalf("expected online peer UID=202 IP=5.52.57.98, got %+v (dump:\n%s)", online, dump)
 	}
 }

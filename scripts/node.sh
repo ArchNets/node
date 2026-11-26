@@ -117,12 +117,19 @@ update() {
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/archnets/node/master/scripts/install.sh) $version
+    bash <(curl -Ls https://raw.githubusercontent.com/archnets/node/master/scripts/install.sh) --update $version
     if [[ $? == 0 ]]; then
         echo -e "${green}Update complete. archnets has been restarted automatically. Use 'node log' to view logs.${plain}"
         exit
     fi
 
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+install_awg() {
+    bash <(curl -Ls https://raw.githubusercontent.com/archnets/node/master/scripts/install.sh) --install-awg
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
@@ -534,6 +541,7 @@ show_usage() {
     echo "node update         - Update archnets"
     echo "node update x.x.x   - Install specific archnets version"
     echo "node install        - Install archnets"
+    echo "node install-awg    - Install/repair AmneziaWG kernel module"
     echo "node uninstall      - Uninstall archnets"
     echo "node version        - Show archnets version"
     echo "------------------------------------------"
@@ -562,11 +570,12 @@ show_menu() {
   ${green}12.${plain} Upgrade maintenance script
   ${green}13.${plain} Generate archnets config file
   ${green}14.${plain} Open all VPS network ports
+  ${green}15.${plain} Install / Repair AmneziaWG kernel module
 ————————————————
-  ${green}15.${plain} Exit
+  ${green}16.${plain} Exit
  "
     show_status
-    echo && read -rp "Please choose [0-15]: " num
+    echo && read -rp "Please choose [0-16]: " num
 
     case "${num}" in
         0) config ;;
@@ -584,8 +593,9 @@ show_menu() {
         12) update_shell ;;
         13) generate_config_file ;;
         14) open_ports ;;
-        15) exit ;;
-        *) echo -e "${red}Please enter a valid number [0-15]${plain}" ;;
+        15) install_awg ;;
+        16) exit ;;
+        *) echo -e "${red}Please enter a valid number [0-16]${plain}" ;;
     esac
 }
 
@@ -602,6 +612,7 @@ if [[ $# > 0 ]]; then
         "config") config $* ;;
         "generate") generate_config_file ;;
         "install") check_uninstall 0 && install 0 ;;
+        "install-awg") install_awg 0 ;;
         "uninstall") check_install 0 && uninstall 0 ;;
         "version") check_install 0 && show_archnets_version 0 ;;
         "update_shell") update_shell ;;
