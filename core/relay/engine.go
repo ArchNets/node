@@ -95,6 +95,11 @@ type idleStreamEntry struct {
 // Engine is the L4 reverse tunnel & zero-copy relay engine in pure Go.
 const carrierShardCount = 4
 
+type udpForwarderEntry struct {
+	conn   *net.UDPConn
+	cancel context.CancelFunc
+}
+
 type Engine struct {
 	cfg           Config
 	Stats         *telemetry.Stats
@@ -115,7 +120,7 @@ type Engine struct {
 	acceptedMuxSess  sync.Map // *transport.MuxSession -> struct{}{}
 	acceptedQuicConn sync.Map // *quic.Conn -> struct{}{}
 	tcpForwarderMap  sync.Map // int (listenPort) -> net.Listener
-	udpForwarderMap  sync.Map // int (listenPort) -> *net.UDPConn
+	udpForwarderMap  sync.Map // int (listenPort) -> *udpForwarderEntry
 	l3TunDev         *transport.L3TUNDevice
 	l3RawConn        net.PacketConn
 	l3PeerAddr       atomic.Pointer[net.UDPAddr]
@@ -447,7 +452,14 @@ func (e *Engine) Close() error {
 		return true
 	})
 	e.udpForwarderMap.Range(func(key, val any) bool {
-		if uln, ok := val.(*net.UDPConn); ok {
+		if entry, ok := val.(*udpForwarderEntry); ok && entry != nil {
+			if entry.cancel != nil {
+				entry.cancel()
+			}
+			if entry.conn != nil {
+				_ = entry.conn.Close()
+			}
+		} else if uln, ok := val.(*net.UDPConn); ok && uln != nil {
 			_ = uln.Close()
 		}
 		e.udpForwarderMap.Delete(key)
@@ -700,9 +712,10 @@ func (e *Engine) startL3RawPump() error {
 		for {
 			n, from, rErr := rawConn.ReadFrom(buf)
 			if rErr != nil {
-				if !e.alive.Load() {
+				if !e.alive.Load() || errors.Is(rErr, net.ErrClosed) {
 					return
 				}
+				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 			if n <= 1 {
@@ -903,10 +916,14 @@ func (e *Engine) quicAcceptLoop(ln *quic.Listener) {
 	for {
 		qConn, err := ln.Accept(e.ctx)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) || !e.alive.Load() {
+				return
+			}
 			select {
 			case <-e.ctx.Done():
 				return
 			default:
+				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 		}
@@ -1099,10 +1116,14 @@ func (e *Engine) entryAcceptLoop(ln net.Listener) {
 	for {
 		rawConn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) || !e.alive.Load() {
+				return
+			}
 			select {
 			case <-e.ctx.Done():
 				return
 			default:
+				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 		}
@@ -1497,10 +1518,14 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 		for {
 			clientConn, err := ln.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) || !e.alive.Load() {
+					return
+				}
 				select {
 				case <-e.ctx.Done():
 					return
 				default:
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 			}
@@ -1592,7 +1617,11 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 		return conflictErr
 	}
 
-	e.udpForwarderMap.Store(listenPort, udpConn)
+	fwdCtx, fwdCancel := context.WithCancel(e.ctx)
+	e.udpForwarderMap.Store(listenPort, &udpForwarderEntry{
+		conn:   udpConn,
+		cancel: fwdCancel,
+	})
 
 	if e.isL3DirectTUNMode() && e.l3TunDev != nil {
 		tunLocalIP := strings.Split(e.l3TunDev.LocalIP(), "/")[0]
@@ -1603,11 +1632,11 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 			"tunPeer":    tunPeerIP,
 			"gaming":     gamingMode,
 		}).Info("[Relay] Routing UDP forwarder directly over L3 TUN interface (zero reverse pool contention)")
-		routing.StartL3DirectUDPForwarder(e.ctx, udpConn, tunLocalIP, tunPeerIP, targetPort, e.Stats, gamingMode, rule)
+		routing.StartL3DirectUDPForwarder(fwdCtx, udpConn, tunLocalIP, tunPeerIP, targetPort, e.Stats, gamingMode, rule)
 		return nil
 	}
 
-	routing.StartUDPListenerLoop(e.ctx, udpConn, targetPort, e.claimTrackedReverseStream, e.Stats, gamingMode, rule)
+	routing.StartUDPListenerLoop(fwdCtx, udpConn, targetPort, e.claimTrackedReverseStream, e.Stats, gamingMode, rule)
 	return nil
 }
 
@@ -1621,7 +1650,16 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 	copy(fwdSlice, newRules)
 	e.forwarderRules.Store(&fwdSlice)
 
-	desiredTCP := make(map[int]int) // listenPort -> targetPort
+	// Reverse-mode Exit engines do not bind local forwarder listeners; they only need
+	// updated forwarderRules for target-port FlowGate/GamingMode lookups.
+	if e.cfg.Role != "entry" && !e.isDirect() {
+		return nil
+	}
+
+	desiredTCP := make(map[int]struct {
+		targetPort int
+		listenIP   string
+	})
 	desiredUDP := make(map[int]struct {
 		targetPort int
 		rule       routing.ForwarderRule
@@ -1645,9 +1683,18 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 				continue
 			}
 			if proto == "tcp" || proto == "tcp,udp" || proto == "both" || proto == "" {
-				desiredTCP[lPort] = tPort
+				desiredTCP[lPort] = struct {
+					targetPort int
+					listenIP   string
+				}{
+					targetPort: tPort,
+					listenIP:   rule.ListenIP,
+				}
 			}
 			if proto == "udp" || proto == "tcp,udp" || proto == "both" {
+				if !e.isDirect() && (e.isQuicTransport() || e.isPacketTransport()) && lPort == e.cfg.CarrierPort {
+					continue
+				}
 				desiredUDP[lPort] = struct {
 					targetPort int
 					rule       routing.ForwarderRule
@@ -1673,20 +1720,28 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 		}
 		return true
 	})
-	for lPort, tPort := range desiredTCP {
+	for lPort, cfg := range desiredTCP {
 		if _, exists := e.tcpForwarderMap.Load(lPort); !exists {
-			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": tPort}).Info("[Relay] Binding new TCP forwarder listener")
-			_ = e.startTCPForwarderListener("0.0.0.0", lPort, tPort)
+			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": cfg.targetPort}).Info("[Relay] Binding new TCP forwarder listener")
+			_ = e.startTCPForwarderListener(cfg.listenIP, lPort, cfg.targetPort)
 		}
 	}
 
 	// 2. Reconcile UDP listeners
 	e.udpForwarderMap.Range(func(key, val any) bool {
 		port := key.(int)
-		uConn := val.(*net.UDPConn)
 		if _, exists := desiredUDP[port]; !exists {
 			e.logger.WithField("port", port).Info("[Relay] Closing removed UDP forwarder listener")
-			_ = uConn.Close()
+			if entry, ok := val.(*udpForwarderEntry); ok && entry != nil {
+				if entry.cancel != nil {
+					entry.cancel()
+				}
+				if entry.conn != nil {
+					_ = entry.conn.Close()
+				}
+			} else if uConn, ok := val.(*net.UDPConn); ok && uConn != nil {
+				_ = uConn.Close()
+			}
 			e.udpForwarderMap.Delete(port)
 		}
 		return true

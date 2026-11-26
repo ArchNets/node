@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -140,6 +141,7 @@ func StartL3DirectUDPForwarder(
 
 	var sessions sync.Map // key: string, value: *directSess
 
+	loopCtx, loopCancel := context.WithCancel(ctx)
 	const l3DirectIdleTimeout = 10 * time.Minute
 	raddr := &net.UDPAddr{IP: net.ParseIP(tunPeerIP), Port: targetPort}
 	laddr := &net.UDPAddr{IP: net.ParseIP(tunLocalIP), Port: 0}
@@ -150,7 +152,7 @@ func StartL3DirectUDPForwarder(
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-loopCtx.Done():
 				sessions.Range(func(k, v any) bool {
 					_ = v.(*directSess).tunConn.Close()
 					sessions.Delete(k)
@@ -172,14 +174,19 @@ func StartL3DirectUDPForwarder(
 	}()
 
 	go func() {
+		defer loopCancel()
 		buf := make([]byte, 65536)
 		for {
 			n, clientAddr, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				select {
-				case <-ctx.Done():
+				case <-loopCtx.Done():
 					return
 				default:
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 			}
@@ -316,6 +323,7 @@ func StartUDPListenerLoop(
 	}
 	var sessionsMu sync.Mutex
 	sessions := make(map[string]*UDPSession)
+	loopCtx, loopCancel := context.WithCancel(ctx)
 
 	// Session idle reaper
 	go func() {
@@ -323,7 +331,7 @@ func StartUDPListenerLoop(
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-loopCtx.Done():
 				sessionsMu.Lock()
 				for k, s := range sessions {
 					s.WriteMu.Lock()
@@ -361,14 +369,19 @@ func StartUDPListenerLoop(
 
 	// Read loop
 	go func() {
+		defer loopCancel()
 		buf := make([]byte, 65536)
 		for {
 			n, clientAddr, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				select {
-				case <-ctx.Done():
+				case <-loopCtx.Done():
 					return
 				default:
+					time.Sleep(5 * time.Millisecond)
 					continue
 				}
 			}

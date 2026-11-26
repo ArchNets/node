@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -134,10 +135,14 @@ func (d *CarrierPortDemuxer) acceptLoop() {
 	for {
 		conn, err := d.ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			select {
 			case <-d.ctx.Done():
 				return
 			default:
+				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 		}

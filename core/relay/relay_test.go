@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1124,6 +1125,90 @@ func TestInPlaceUpdateForwarders(t *testing.T) {
 		_ = connOld.Close()
 		t.Fatal("expected old port 49101 to be closed after in-place update")
 	}
+}
+
+func TestInPlaceUpdateForwardersNoGoroutineLeak(t *testing.T) {
+	eng := NewEngine(Config{
+		Role:        "entry",
+		CarrierPort: 48992,
+		Transport:   "reverse-reality",
+		SNI:         "divar.ir",
+	})
+	if err := eng.Start(); err != nil {
+		t.Fatalf("failed to start engine: %v", err)
+	}
+	defer eng.Close()
+
+	// Allow engine startup goroutines to settle before capturing baseline
+	time.Sleep(50 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	rules := []routing.ForwarderRule{
+		{Protocol: "tcp,udp", ListenIP: "127.0.0.1", ListenPort: 49103, TargetPort: 49203},
+		{Protocol: "tcp,udp", ListenIP: "127.0.0.1", ListenPort: 49104, TargetPort: 49204},
+	}
+	if err := eng.UpdateForwarders(rules); err != nil {
+		t.Fatalf("UpdateForwarders add failed: %v", err)
+	}
+
+	// Remove all forwarders in-place
+	if err := eng.UpdateForwarders(nil); err != nil {
+		t.Fatalf("UpdateForwarders remove failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak after removing forwarders: baseline=%d current=%d", baseline, runtime.NumGoroutine())
+}
+
+func TestUpdateForwardersReverseExitDoesNotBindListeners(t *testing.T) {
+	eng := NewEngine(Config{
+		Role:          "exit",
+		Direction:     "reverse",
+		EntryServerIP: "127.0.0.1",
+		CarrierPort:   48993,
+		Transport:     "l3-tcp",
+	})
+	if err := eng.Start(); err != nil {
+		t.Fatalf("failed to start exit engine: %v", err)
+	}
+	defer eng.Close()
+
+	probeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp probe: %v", err)
+	}
+	freePort := probeLn.Addr().(*net.TCPAddr).Port
+	_ = probeLn.Close()
+
+	rules := []routing.ForwarderRule{
+		{Protocol: "tcp,udp", ListenPort: freePort, TargetPort: freePort, FlowMode: "upload_only"},
+	}
+	if err := eng.UpdateForwarders(rules); err != nil {
+		t.Fatalf("UpdateForwarders on exit failed: %v", err)
+	}
+
+	if got := len(eng.Config().Forwarders); got != 1 {
+		t.Fatalf("expected 1 stored forwarder rule on exit, got %d", got)
+	}
+
+	// Verify reverse-mode Exit did not bind TCP or UDP listeners for the forwarder port
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort)))
+	if err != nil {
+		t.Fatalf("expected TCP port %d to remain unbound on reverse exit: %v", freePort, err)
+	}
+	_ = ln.Close()
+
+	pc, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort)))
+	if err != nil {
+		t.Fatalf("expected UDP port %d to remain unbound on reverse exit: %v", freePort, err)
+	}
+	_ = pc.Close()
 }
 
 func TestMuxStreamAliveChecker(t *testing.T) {
