@@ -89,6 +89,7 @@ type ovpnSession struct {
 	CID          string
 	LastBytesIn  int64
 	LastBytesOut int64
+	LastDataTime time.Time
 }
 
 // NewOpenVPNCore creates (but does not start) an OpenVPN-backed core.
@@ -413,11 +414,16 @@ func (o *OpenVPNCore) GetTrafficAndReset() map[int]*UserTraffic {
 	return result
 }
 
+const ovpnOnlineActiveWindow = 90 * time.Second
+
 func (o *OpenVPNCore) GetOnlineUsers() []panel.OnlineUser {
 	var online []panel.OnlineUser
+	now := time.Now()
+	o.trafficMu.RLock()
+	defer o.trafficMu.RUnlock()
 	o.sessions.Range(func(_, v interface{}) bool {
 		sess := v.(*ovpnSession)
-		if sess.UID > 0 && sess.IP != "" {
+		if sess.UID > 0 && sess.IP != "" && !sess.LastDataTime.IsZero() && now.Sub(sess.LastDataTime) <= ovpnOnlineActiveWindow {
 			online = append(online, panel.OnlineUser{UID: sess.UID, IP: sess.IP})
 		}
 		return true
@@ -602,6 +608,10 @@ func (o *OpenVPNCore) handleByteCount(ev ovpnEvent) {
 
 	o.traffic[sess.UID].Upload += deltaUpload
 	o.traffic[sess.UID].Download += deltaDownload
+
+	if deltaUpload+deltaDownload > 8192 {
+		sess.LastDataTime = time.Now()
+	}
 
 	sess.LastBytesIn = ev.in
 	sess.LastBytesOut = ev.out

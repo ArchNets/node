@@ -660,8 +660,8 @@ func (w *WireGuardCore) collectStats() {
 			UpdateTunnelUserEndpoint(assignedIP, clientEndpointIP)
 		}
 
-		// Track when this peer last transferred actual payload data (> 1 KB in 10s window, ignoring keepalives/handshakes)
-		if downloadDelta+uploadDelta > 1024 {
+		// Track when this peer last transferred actual payload data (> 8 KB in 10s window, ignoring keepalives and url-test probes)
+		if downloadDelta+uploadDelta > 8192 {
 			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > wgOnlineActiveWindow {
 				newlyActive = true
 			}

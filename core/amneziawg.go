@@ -702,7 +702,7 @@ func (w *AmneziaWGCore) collectStats() {
 			uploadDelta = tx
 		}
 
-		if downloadDelta+uploadDelta > 1024 {
+		if downloadDelta+uploadDelta > 8192 {
 			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > wgOnlineActiveWindow {
 				newlyActive = true
 			}
