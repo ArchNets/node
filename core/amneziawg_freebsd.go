@@ -109,7 +109,8 @@ func (w *AmneziaWGCore) Stop() error {
 }
 
 // AddUsers adds users as peers to the AmneziaWG interface
-func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
+func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) error {
+	return nil
 }
 
 // DelUsers removes users from the AmneziaWG interface

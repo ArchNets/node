@@ -202,7 +202,7 @@ func (w *WireGuardCore) Stop() error {
 }
 
 // AddUsers adds users as peers to the WireGuard interface
-func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
+func (w *WireGuardCore) AddUsers(users []panel.UserInfo) error {
 	w.users.mu.Lock()
 	defer w.users.mu.Unlock()
 
@@ -225,8 +225,6 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		var identity ServiceIdentity
 		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err != nil {
 			// Fallback: Try treating it as a raw key string (legacy support/backward compatibility)
-			// log.Debugf("Failed to parse ServiceId as JSON for user %d, trying generic string", user.Id)
-			// This part is optional but helpful during migration. For strict mode, we can omit.
 		}
 
 		var pubKeyStr string
@@ -247,10 +245,6 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 			}
 			continue
 		}
-
-		// Note: peerPrivateKey is NOT needed logically anymore on the server side if we trust the public key.
-		// However, wgtypes.PeerConfig expects a PublicKey.
-		// The logic below uses peerPublicKey correctly.
 
 		// Use Id (SubscriptionId) for unique IP generation
 		assignedIP := w.assignIP(user.Id)
@@ -300,6 +294,7 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		}
 		if err := w.wgClient.ConfigureDevice(w.InterfaceName, config); err != nil {
 			log.WithError(err).Error("Failed to incrementally add WireGuard peers")
+			return fmt.Errorf("configure wireguard peers: %w", err)
 		}
 	}
 
@@ -307,6 +302,7 @@ func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
 		"tag":   w.Tag,
 		"count": len(users),
 	}).Info("WireGuard users added")
+	return nil
 }
 
 // DelUsers removes users from the WireGuard interface
@@ -315,6 +311,8 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 	defer w.users.mu.Unlock()
 
 	var removedPeers []wgtypes.PeerConfig
+	var removedPubKeys []string
+	var removedUIDs []int
 
 	for _, user := range users {
 		// Get assigned IP and public key for cleanup
@@ -323,7 +321,9 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 			if peer, ok := w.peers.Load(uuid); ok {
 				wgPeer := peer.(*WireGuardPeer)
 				assignedIP = wgPeer.IP
-				w.keyToPeer.Delete(wgPeer.PublicKey.String())
+				pubStr := wgPeer.PublicKey.String()
+				w.keyToPeer.Delete(pubStr)
+				removedPubKeys = append(removedPubKeys, pubStr)
 				removedPeers = append(removedPeers, wgtypes.PeerConfig{
 					PublicKey: wgPeer.PublicKey,
 					Remove:    true,
@@ -335,10 +335,22 @@ func (w *WireGuardCore) DelUsers(users []panel.UserInfo) {
 		w.peers.Delete(user.Uuid)
 		delete(w.users.uuidToID, user.Uuid)
 		delete(w.users.idToUUID, user.Id)
+		removedUIDs = append(removedUIDs, user.Id)
 		if assignedIP != "" {
 			delete(w.users.ipToUID, assignedIP)
-			UnregisterTunnelUser(assignedIP)
+			UnregisterTunnelUserIfTag(assignedIP, w.Tag)
 		}
+	}
+
+	if len(removedPubKeys) > 0 || len(removedUIDs) > 0 {
+		w.trafficMu.Lock()
+		for _, k := range removedPubKeys {
+			delete(w.lastPeerStats, k)
+		}
+		for _, uid := range removedUIDs {
+			delete(w.traffic, uid)
+		}
+		w.trafficMu.Unlock()
 	}
 
 	// Remove peers incrementally without wiping remaining connected peers
@@ -381,58 +393,63 @@ func normalizeWGEndpointIP(ip net.IP) string {
 	return strings.TrimPrefix(ip.String(), "::ffff:")
 }
 
+const wgOnlineActiveWindow = 90 * time.Second
+
+// filterOnlineWGPeers selects peers that have both a recent WireGuard handshake
+// and actual recent payload data (ignoring empty 32-byte keepalive/handshake probes
+// and never reviving disconnected peers via cumulative lifetime rx+tx counters).
+func filterOnlineWGPeers(
+	peers []wgtypes.Peer,
+	lastPeerStats map[string]*peerStats,
+	keyToPeer *sync.Map,
+	now time.Time,
+) []panel.OnlineUser {
+	var online []panel.OnlineUser
+	recentThreshold := now.Add(-wgOnlineActiveWindow)
+
+	for _, peer := range peers {
+		if peer.LastHandshakeTime.Before(recentThreshold) {
+			continue
+		}
+
+		peerKey := peer.PublicKey.String()
+		st, hasStats := lastPeerStats[peerKey]
+		if !hasStats || st.LastDataTime.Before(recentThreshold) {
+			continue
+		}
+
+		var clientIP string
+		if peer.Endpoint != nil && peer.Endpoint.IP != nil {
+			clientIP = normalizeWGEndpointIP(peer.Endpoint.IP)
+		}
+		if clientIP == "" {
+			continue
+		}
+
+		if val, ok := keyToPeer.Load(peerKey); ok {
+			wgPeer := val.(*WireGuardPeer)
+			online = append(online, panel.OnlineUser{
+				UID: wgPeer.UID,
+				IP:  clientIP,
+			})
+		}
+	}
+
+	return online
+}
+
 // GetOnlineUsers returns list of currently connected users
 func (w *WireGuardCore) GetOnlineUsers() []panel.OnlineUser {
-	var online []panel.OnlineUser
-
 	device, err := w.wgClient.Device(w.InterfaceName)
 	if err != nil {
 		log.WithError(err).Error("Failed to get WireGuard device info")
-		return online
+		return nil
 	}
-
-	// A peer is considered online if it had a recent handshake AND transferred real data
-	// within the last 3 minutes (filtering out empty 32-byte keepalive-only connections).
-	recentThreshold := time.Now().Add(-3 * time.Minute)
 
 	w.trafficMu.RLock()
 	defer w.trafficMu.RUnlock()
 
-	for _, peer := range device.Peers {
-		if peer.LastHandshakeTime.Before(recentThreshold) {
-			continue // Not recently active
-		}
-
-		peerKey := peer.PublicKey.String()
-		st, hasStats := w.lastPeerStats[peerKey]
-		// Require either recent real data (> 1KB in last 3m) or > 2KB total bytes on the peer
-		hasActiveData := (hasStats && st.LastDataTime.After(recentThreshold)) || (peer.ReceiveBytes+peer.TransmitBytes > 2048)
-		if !hasActiveData {
-			continue
-		}
-
-		// Find user by public key
-		w.peers.Range(func(key, value interface{}) bool {
-			wgPeer := value.(*WireGuardPeer)
-			if wgPeer.PublicKey == peer.PublicKey {
-				clientIP := ""
-				if peer.Endpoint != nil && peer.Endpoint.IP != nil {
-					clientIP = normalizeWGEndpointIP(peer.Endpoint.IP)
-				}
-				if clientIP == "" {
-					clientIP = wgPeer.IP
-				}
-				online = append(online, panel.OnlineUser{
-					UID: wgPeer.UID,
-					IP:  clientIP,
-				})
-				return false // Stop searching
-			}
-			return true
-		})
-	}
-
-	return online
+	return filterOnlineWGPeers(device.Peers, w.lastPeerStats, &w.keyToPeer, time.Now())
 }
 
 // SetLimiter sets the limiter reference for device/speed limiting
@@ -643,9 +660,9 @@ func (w *WireGuardCore) collectStats() {
 			UpdateTunnelUserEndpoint(assignedIP, clientEndpointIP)
 		}
 
-		// Track when this peer last transferred actual payload data (> 1 KB in 10s window, ignoring 32-byte keepalives)
+		// Track when this peer last transferred actual payload data (> 1 KB in 10s window, ignoring keepalives/handshakes)
 		if downloadDelta+uploadDelta > 1024 {
-			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > 3*time.Minute {
+			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > wgOnlineActiveWindow {
 				newlyActive = true
 			}
 			lastStats.LastDataTime = time.Now()
@@ -657,11 +674,8 @@ func (w *WireGuardCore) collectStats() {
 
 		// Check if peer just connected (handshake time changed)
 		if !peer.LastHandshakeTime.Equal(lastStats.LastHandshake) {
-			// If previous handshake was zero or very old, this is a new active session
-			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > 3*time.Minute {
-				if peer.ReceiveBytes+peer.TransmitBytes > 1024 {
-					newlyActive = true
-				}
+			// If previous handshake was zero or very old, log new active session
+			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > wgOnlineActiveWindow {
 				log.WithFields(log.Fields{
 					"uid":       uid,
 					"ip":        assignedIP,
@@ -964,9 +978,10 @@ func getPoolSubnet(address string) string {
 		}
 	}
 
-	// Expand 10.0.x.x (/24 or /16) to 10.0.0.0/13 covering 10.0-10.7; keep /16 for 10.8+
+	// Expand 10.0.x.x (/24 or /16) to 10.0.0.0/13 covering 10.0-10.7; keep explicit /16 for 10.1+
+	// so separate interfaces on the same host (e.g. 10.8.0.1/16, 10.11.0.1/16) do not steal 10.0.0.0/13.
 	if ip4[0] == 10 {
-		if ip4[1] < 8 {
+		if ip4[1] == 0 {
 			return "10.0.0.0/13"
 		}
 		return fmt.Sprintf("10.%d.0.0/16", ip4[1])

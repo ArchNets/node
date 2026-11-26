@@ -49,6 +49,19 @@ func UnregisterTunnelUser(ip string) {
 	tunnelIPMap.Delete(ip)
 }
 
+// UnregisterTunnelUserIfTag removes an internal tunnel IP mapping only if it belongs to tag.
+func UnregisterTunnelUserIfTag(ip string, tag string) {
+	if ip == "" {
+		return
+	}
+	if v, ok := tunnelIPMap.Load(ip); ok {
+		if tu, ok := v.(TunnelUser); ok && tag != "" && tu.Tag != tag {
+			return
+		}
+		tunnelIPMap.Delete(ip)
+	}
+}
+
 // LookupTunnelUser looks up user identity attributes for an internal tunnel IP.
 func LookupTunnelUser(ip string) (TunnelUser, bool) {
 	if ip == "" {

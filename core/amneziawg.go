@@ -244,35 +244,39 @@ func (w *AmneziaWGCore) Stop() error {
 	return nil
 }
 
-// AddUsers adds users via `awg set` command
-func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
+// AddUsers adds users via batched `awg set` commands
+func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) error {
 	w.users.mu.Lock()
 	defer w.users.mu.Unlock()
 
-	// ... similar user parsing logic as WireGuard ...
-	// Since we are using awg command, we likely need to build a large command line or write to a temp file
-	// Writing a config file /tmp/awg_peers.conf and using `awg setconf` or `awg addconf` might be safer/easier
-	// `awg set <iface> peer <key> allowed-ips <ips>`
-
 	_, poolNet, _ := net.ParseCIDR(getPoolSubnet(w.Address))
 
+	type ServiceIdentity struct {
+		WireGuard *struct {
+			PublicKey string `json:"public_key"`
+		} `json:"wireguard,omitempty"`
+	}
+
+	type pendingPeer struct {
+		pubKey     string
+		assignedIP string
+	}
+	var batch []pendingPeer
+
 	for _, user := range users {
-		// ... parsing logic ...
 		if user.ServiceId == "" {
 			continue
 		}
-		// ... json parse ...
-		pubKeyStr := user.ServiceId // simplified
 
-		// Parse struct from ServiceId if JSON
-		type ServiceIdentity struct {
-			WireGuard *struct {
-				PublicKey string `json:"public_key"`
-			} `json:"wireguard,omitempty"`
-		}
+		pubKeyStr := user.ServiceId
 		var identity ServiceIdentity
-		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err == nil && identity.WireGuard != nil {
-			pubKeyStr = identity.WireGuard.PublicKey
+		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err == nil {
+			if identity.WireGuard != nil && identity.WireGuard.PublicKey != "" {
+				pubKeyStr = identity.WireGuard.PublicKey
+			} else if identity.WireGuard == nil {
+				// Valid JSON without WireGuard identity (e.g. IKEv2-only); skip smoothly
+				continue
+			}
 		}
 
 		peerPublicKey, err := wgtypes.ParseKey(pubKeyStr)
@@ -286,7 +290,6 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 			continue
 		}
 
-		// Add to internal maps
 		peer := &WireGuardPeer{
 			PublicKey: peerPublicKey,
 			UID:       user.Id,
@@ -300,13 +303,37 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 		w.users.ipToUID[assignedIP] = user.Id
 		RegisterTunnelUser(assignedIP, user.Id, user.Uuid, w.Tag)
 
-		// Execute awg command with persistent-keepalive 25 to prevent NAT timeout
-		cmd := fmt.Sprintf("awg set %s peer %s allowed-ips %s/32 persistent-keepalive 25", w.InterfaceName, peerPublicKey.String(), assignedIP)
-		if err := execCommand(cmd); err != nil {
-			log.WithError(err).Errorf("Failed to add peer %s", user.Uuid)
-		} else if w.running.Load() && poolNet != nil {
-			if parsedIP := net.ParseIP(assignedIP); parsedIP != nil && !poolNet.Contains(parsedIP) {
-				_ = execCommand(fmt.Sprintf("ip route replace %s/32 dev %s", assignedIP, w.InterfaceName))
+		batch = append(batch, pendingPeer{
+			pubKey:     peerPublicKey.String(),
+			assignedIP: assignedIP,
+		})
+	}
+
+	const batchSize = 150
+	var firstErr error
+	for start := 0; start < len(batch); start += batchSize {
+		end := start + batchSize
+		if end > len(batch) {
+			end = len(batch)
+		}
+		chunk := batch[start:end]
+		args := make([]string, 0, 2+len(chunk)*6)
+		args = append(args, "set", w.InterfaceName)
+		for _, p := range chunk {
+			args = append(args, "peer", p.pubKey, "allowed-ips", p.assignedIP+"/32", "persistent-keepalive", "25")
+		}
+		if err := execCommandDirect("awg", args...); err != nil {
+			log.WithError(err).Errorf("Failed to add AmneziaWG peer batch (%d peers)", len(chunk))
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if w.running.Load() && poolNet != nil {
+			for _, p := range chunk {
+				if parsedIP := net.ParseIP(p.assignedIP); parsedIP != nil && !poolNet.Contains(parsedIP) {
+					_ = execCommand(fmt.Sprintf("ip route replace %s/32 dev %s", p.assignedIP, w.InterfaceName))
+				}
 			}
 		}
 	}
@@ -315,37 +342,34 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) {
 		"tag":   w.Tag,
 		"count": len(users),
 	}).Info("AmneziaWG users added")
+	return firstErr
 }
 
-// DelUsers removes users
+// DelUsers removes users via batched `awg set` commands
 func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 	w.users.mu.Lock()
 	defer w.users.mu.Unlock()
 
+	type ServiceIdentity struct {
+		WireGuard *struct {
+			PublicKey string `json:"public_key"`
+		} `json:"wireguard,omitempty"`
+	}
+
+	var removeKeys []string
+	var removedUIDs []int
+
 	for _, user := range users {
 		var pubKeyStr string
-		// Try to find the peer public key from our maps if possible, or parse from user
-		// But usually we need the public key to remove the peer
-
-		// Best effort: parse from user struct again
-		pubKeyStr = user.ServiceId
-		// ... (json parse logic) ...
-		type ServiceIdentity struct {
-			WireGuard *struct {
-				PublicKey string `json:"public_key"`
-			} `json:"wireguard,omitempty"`
-		}
-		var identity ServiceIdentity
-		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err == nil && identity.WireGuard != nil {
-			pubKeyStr = identity.WireGuard.PublicKey
-		}
-
 		if uuid, exists := w.users.idToUUID[user.Id]; exists {
 			if peer, ok := w.peers.Load(uuid); ok {
-				if wgPeer, ok := peer.(*WireGuardPeer); ok && wgPeer.IP != "" {
-					delete(w.users.ipToUID, wgPeer.IP)
-					UnregisterTunnelUser(wgPeer.IP)
-					w.keyToPeer.Delete(wgPeer.PublicKey.String())
+				if wgPeer, ok := peer.(*WireGuardPeer); ok {
+					pubKeyStr = wgPeer.PublicKey.String()
+					if wgPeer.IP != "" {
+						delete(w.users.ipToUID, wgPeer.IP)
+						UnregisterTunnelUserIfTag(wgPeer.IP, w.Tag)
+					}
+					w.keyToPeer.Delete(pubKeyStr)
 				}
 			}
 			w.peers.Delete(uuid)
@@ -353,11 +377,44 @@ func (w *AmneziaWGCore) DelUsers(users []panel.UserInfo) {
 			delete(w.users.idToUUID, user.Id)
 		}
 
-		// Execute awg command
-		// awg set <iface> peer <key> remove
-		cmd := fmt.Sprintf("awg set %s peer %s remove", w.InterfaceName, pubKeyStr)
-		// Ignore error as peer might not exist
-		_ = execCommand(cmd)
+		if pubKeyStr == "" && user.ServiceId != "" {
+			pubKeyStr = user.ServiceId
+			var identity ServiceIdentity
+			if err := json.Unmarshal([]byte(user.ServiceId), &identity); err == nil && identity.WireGuard != nil {
+				pubKeyStr = identity.WireGuard.PublicKey
+			}
+		}
+
+		if _, err := wgtypes.ParseKey(pubKeyStr); err == nil {
+			removeKeys = append(removeKeys, pubKeyStr)
+		}
+		removedUIDs = append(removedUIDs, user.Id)
+	}
+
+	if len(removeKeys) > 0 || len(removedUIDs) > 0 {
+		w.trafficMu.Lock()
+		for _, k := range removeKeys {
+			delete(w.lastPeerStats, k)
+		}
+		for _, uid := range removedUIDs {
+			delete(w.traffic, uid)
+		}
+		w.trafficMu.Unlock()
+	}
+
+	const batchSize = 200
+	for start := 0; start < len(removeKeys); start += batchSize {
+		end := start + batchSize
+		if end > len(removeKeys) {
+			end = len(removeKeys)
+		}
+		chunk := removeKeys[start:end]
+		args := make([]string, 0, 2+len(chunk)*3)
+		args = append(args, "set", w.InterfaceName)
+		for _, k := range chunk {
+			args = append(args, "peer", k, "remove")
+		}
+		_ = execCommandDirect("awg", args...)
 	}
 
 	log.WithFields(log.Fields{
@@ -646,7 +703,7 @@ func (w *AmneziaWGCore) collectStats() {
 		}
 
 		if downloadDelta+uploadDelta > 1024 {
-			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > 3*time.Minute {
+			if lastStats.LastDataTime.IsZero() || time.Since(lastStats.LastDataTime) > wgOnlineActiveWindow {
 				newlyActive = true
 			}
 			lastStats.LastDataTime = time.Now()
@@ -658,10 +715,7 @@ func (w *AmneziaWGCore) collectStats() {
 		lastHandshakeTime := time.Unix(handshake, 0)
 
 		if lastHandshakeTime.After(lastStats.LastHandshake) {
-			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > 3*time.Minute {
-				if rx+tx > 1024 {
-					newlyActive = true
-				}
+			if lastStats.LastHandshake.IsZero() || time.Since(lastStats.LastHandshake) > wgOnlineActiveWindow {
 				log.WithFields(log.Fields{
 					"uid":       uid,
 					"ip":        assignedIP,
@@ -696,22 +750,18 @@ func (w *AmneziaWGCore) GetTrafficAndReset() map[int]*UserTraffic {
 	return result
 }
 
-// GetOnlineUsers returns list of currently connected users
-func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
-	// Parse `awg show <iface> dump` again to find active peers
-	cmd := exec.Command("awg", "show", w.InterfaceName, "dump")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil
-	}
-
+// parseAWGDumpOnlinePeers extracts currently active peers from `awg show <iface> dump`
+// requiring both a recent handshake and real payload traffic within wgOnlineActiveWindow.
+func parseAWGDumpOnlinePeers(
+	output string,
+	lastPeerStats map[string]*peerStats,
+	keyToPeer *sync.Map,
+	now time.Time,
+) []panel.OnlineUser {
 	var online []panel.OnlineUser
-	recentThreshold := time.Now().Add(-3 * time.Minute)
+	recentThreshold := now.Add(-wgOnlineActiveWindow)
 
-	w.trafficMu.RLock()
-	defer w.trafficMu.RUnlock()
-
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		parts := strings.Fields(line)
 		if len(parts) < 8 {
@@ -720,20 +770,15 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 
 		pubKey := parts[0]
 		handshakeStr := parts[4]
-		rxStr := parts[5]
-		txStr := parts[6]
 		handshake, _ := strconv.ParseInt(handshakeStr, 10, 64)
-		rx, _ := strconv.ParseInt(rxStr, 10, 64)
-		tx, _ := strconv.ParseInt(txStr, 10, 64)
 		lastHandshakeTime := time.Unix(handshake, 0)
 
 		if lastHandshakeTime.Before(recentThreshold) {
 			continue
 		}
 
-		st, hasStats := w.lastPeerStats[pubKey]
-		hasActiveData := (hasStats && st.LastDataTime.After(recentThreshold)) || (rx+tx > 2048)
-		if !hasActiveData {
+		st, hasStats := lastPeerStats[pubKey]
+		if !hasStats || st.LastDataTime.Before(recentThreshold) {
 			continue
 		}
 
@@ -744,25 +789,33 @@ func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
 				clientIP = strings.TrimPrefix(host, "::ffff:")
 			}
 		}
+		if clientIP == "" {
+			continue
+		}
 
-		// Find user
-		w.peers.Range(func(key, value interface{}) bool {
-			peer := value.(*WireGuardPeer)
-			if peer.PublicKey.String() == pubKey {
-				userIP := clientIP
-				if userIP == "" {
-					userIP = peer.IP
-				}
-				online = append(online, panel.OnlineUser{
-					UID: peer.UID,
-					IP:  userIP,
-				})
-				return false
-			}
-			return true
-		})
+		if val, ok := keyToPeer.Load(pubKey); ok {
+			peer := val.(*WireGuardPeer)
+			online = append(online, panel.OnlineUser{
+				UID: peer.UID,
+				IP:  clientIP,
+			})
+		}
 	}
 	return online
+}
+
+// GetOnlineUsers returns list of currently connected users
+func (w *AmneziaWGCore) GetOnlineUsers() []panel.OnlineUser {
+	cmd := exec.Command("awg", "show", w.InterfaceName, "dump")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil
+	}
+
+	w.trafficMu.RLock()
+	defer w.trafficMu.RUnlock()
+
+	return parseAWGDumpOnlinePeers(string(output), w.lastPeerStats, &w.keyToPeer, time.Now())
 }
 
 func (w *AmneziaWGCore) SetLimiter(l *limiter.Limiter) {

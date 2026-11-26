@@ -159,7 +159,10 @@ func (c *AmneziaWGController) Start() error {
 	}
 
 	// Add initial users - MUST come after Start() so the interface exists!
-	c.wgCore.AddUsers(users)
+	if err := c.wgCore.AddUsers(users); err != nil {
+		log.WithError(err).WithField("tag", c.tag).Warn("AmneziaWG: initial AddUsers failed, will retry on next poll")
+		c.userList = nil
+	}
 
 	// Start background tasks
 	c.startTasks()
@@ -257,7 +260,10 @@ func (c *AmneziaWGController) userListMonitor() error {
 	}
 
 	if len(genAdd) > 0 {
-		c.wgCore.AddUsers(genAdd)
+		if err := c.wgCore.AddUsers(genAdd); err != nil {
+			log.WithError(err).WithField("tag", c.tag).Warn("AmneziaWG: AddUsers failed, keeping failed users pending for retry")
+			return nil
+		}
 		c.limiter.UpdateUser(c.tag, genAdd, nil)
 	}
 

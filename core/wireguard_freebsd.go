@@ -54,7 +54,8 @@ func (w *WireGuardCore) Stop() error {
 }
 
 // AddUsers adds users as peers to the WireGuard interface
-func (w *WireGuardCore) AddUsers(users []panel.UserInfo) {
+func (w *WireGuardCore) AddUsers(users []panel.UserInfo) error {
+	return nil
 }
 
 // DelUsers removes users from the WireGuard interface
