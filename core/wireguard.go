@@ -843,6 +843,12 @@ func (w *WireGuardCore) setupNAT() error {
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss)); err != nil {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
 	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", w.InterfaceName)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", w.InterfaceName))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", w.InterfaceName)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", w.InterfaceName))
+	}
 
 	// Drop ICMP Destination Unreachable if enabled (prevents game disconnects during radio fades)
 	// Must be inserted at head of chain (index 1) BEFORE the ACCEPT rules so they take effect
@@ -978,6 +984,8 @@ func (w *WireGuardCore) teardownNAT() {
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", w.InterfaceName))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", w.InterfaceName))
 
 	// Always clean up FORWARD and INPUT rules (added in both paths)
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -i %s -j ACCEPT", w.InterfaceName))

@@ -870,8 +870,13 @@ func (c *TunnelController) buildXrayReverseJSON(t panel.TunnelInfo, cfg *panel.X
 		// Portal node
 		// 1. Inbound for clients (Forwarders)
 		for _, f := range t.Forwarders {
+			listen := "0.0.0.0"
+			if strings.TrimSpace(f.ListenIP) != "" {
+				listen = strings.TrimSpace(f.ListenIP)
+			}
+			tag := fmt.Sprintf("dokodemo-%d-%d", f.Id, f.ListenPort)
 			inb := map[string]interface{}{
-				"listen":   "0.0.0.0",
+				"listen":   listen,
 				"port":     f.ListenPort,
 				"protocol": "dokodemo-door",
 				"settings": map[string]interface{}{
@@ -879,14 +884,14 @@ func (c *TunnelController) buildXrayReverseJSON(t panel.TunnelInfo, cfg *panel.X
 					"port":    f.TargetPort,
 					"network": f.Protocol,
 				},
-				"tag": fmt.Sprintf("dokodemo-%d", f.ListenPort),
+				"tag": tag,
 			}
 			obj["inbounds"] = append(obj["inbounds"].([]interface{}), inb)
-			
+
 			// Routing rule: forwarder -> portal
 			rule := map[string]interface{}{
 				"type":        "field",
-				"inboundTag":  []string{fmt.Sprintf("dokodemo-%d", f.ListenPort)},
+				"inboundTag":  []string{tag},
 				"outboundTag": "portal",
 			}
 			obj["routing"].(map[string]interface{})["rules"] = append(obj["routing"].(map[string]interface{})["rules"].([]interface{}), rule)
@@ -1049,7 +1054,7 @@ func (c *TunnelController) buildXrayJSON(t panel.TunnelInfo, cfg *panel.XrayTunn
 					"port":    f.TargetPort,
 					"network": f.Protocol,
 				},
-				"tag": fmt.Sprintf("dokodemo-%d", f.ListenPort),
+				"tag": fmt.Sprintf("dokodemo-%d-%d", f.Id, f.ListenPort),
 			}
 			obj["inbounds"] = append(obj["inbounds"].([]interface{}), inb)
 		}

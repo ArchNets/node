@@ -42,8 +42,16 @@ func putUDPFrameBuffer(b []byte) {
 }
 
 const (
-	UDPSessionIdleTime = 60 * time.Second
+	UDPSessionIdleTime       = 60 * time.Second
+	UDPGamingSessionIdleTime = 5 * time.Minute
 )
+
+func udpSessionIdleTimeout(gamingMode bool) time.Duration {
+	if gamingMode {
+		return UDPGamingSessionIdleTime
+	}
+	return UDPSessionIdleTime
+}
 
 type UDPSession struct {
 	Stream     net.Conn
@@ -325,6 +333,7 @@ func StartUDPListenerLoop(
 	sessions := make(map[string]*UDPSession)
 	loopCtx, loopCancel := context.WithCancel(ctx)
 
+	idleTimeout := udpSessionIdleTimeout(gamingMode)
 	// Session idle reaper
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
@@ -350,7 +359,7 @@ func StartUDPListenerLoop(
 				now := time.Now()
 				sessionsMu.Lock()
 				for k, s := range sessions {
-					if now.Unix()-s.lastActive.Load() > int64(UDPSessionIdleTime/time.Second) {
+					if now.Unix()-s.lastActive.Load() > int64(idleTimeout/time.Second) {
 						s.WriteMu.Lock()
 						if s.Stream != nil {
 							_ = s.Stream.Close()
@@ -719,7 +728,7 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 				}()
 				buf := make([]byte, 65536)
 				for {
-					_ = gs.udpConn.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+					_ = gs.udpConn.SetReadDeadline(time.Now().Add(UDPGamingSessionIdleTime))
 					n, rErr := gs.udpConn.Read(buf[6:])
 					if rErr != nil {
 						return
@@ -793,7 +802,7 @@ func handleExitGamingUDPForward(stream net.Conn, targetIP string, targetPort uin
 	var lenBuf [2]byte
 	payload := make([]byte, 65536)
 	for {
-		_ = stream.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+		_ = stream.SetReadDeadline(time.Now().Add(UDPGamingSessionIdleTime))
 		if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
 			return
 		}

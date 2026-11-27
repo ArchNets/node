@@ -119,8 +119,8 @@ type Engine struct {
 	muxShardRR       atomic.Uint64
 	acceptedMuxSess  sync.Map // *transport.MuxSession -> struct{}{}
 	acceptedQuicConn sync.Map // *quic.Conn -> struct{}{}
-	tcpForwarderMap  sync.Map // int (listenPort) -> net.Listener
-	udpForwarderMap  sync.Map // int (listenPort) -> *udpForwarderEntry
+	tcpForwarderMap  sync.Map // string (ip:port) -> net.Listener
+	udpForwarderMap  sync.Map // string (ip:port) -> *udpForwarderEntry
 	l3TunDev         *transport.L3TUNDevice
 	l3RawConn        net.PacketConn
 	l3PeerAddr       atomic.Pointer[net.UDPAddr]
@@ -1483,6 +1483,14 @@ func (e *Engine) claimTrackedReverseStream(timeout time.Duration) (net.Conn, err
 	return tc, nil
 }
 
+func forwarderListenKey(listenIP string, listenPort int) string {
+	ip := strings.TrimSpace(listenIP)
+	if ip == "" {
+		ip = "0.0.0.0"
+	}
+	return net.JoinHostPort(ip, strconv.Itoa(listenPort))
+}
+
 func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPort int) error {
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
@@ -1506,14 +1514,15 @@ func (e *Engine) startTCPForwarderListener(listenIP string, listenPort, targetPo
 		return conflictErr
 	}
 
-	e.tcpForwarderMap.Store(listenPort, ln)
+	mapKey := forwarderListenKey(listenIP, listenPort)
+	e.tcpForwarderMap.Store(mapKey, ln)
 
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
 		defer func() {
 			_ = ln.Close()
-			e.tcpForwarderMap.Delete(listenPort)
+			e.tcpForwarderMap.Delete(mapKey)
 		}()
 		for {
 			clientConn, err := ln.Accept()
@@ -1618,7 +1627,8 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 	}
 
 	fwdCtx, fwdCancel := context.WithCancel(e.ctx)
-	e.udpForwarderMap.Store(listenPort, &udpForwarderEntry{
+	mapKey := forwarderListenKey(listenIP, listenPort)
+	e.udpForwarderMap.Store(mapKey, &udpForwarderEntry{
 		conn:   udpConn,
 		cancel: fwdCancel,
 	})
@@ -1656,11 +1666,13 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 		return nil
 	}
 
-	desiredTCP := make(map[int]struct {
+	desiredTCP := make(map[string]struct {
+		listenPort int
 		targetPort int
 		listenIP   string
 	})
-	desiredUDP := make(map[int]struct {
+	desiredUDP := make(map[string]struct {
+		listenPort int
 		targetPort int
 		rule       routing.ForwarderRule
 		listenIP   string
@@ -1673,6 +1685,7 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 		for _, pair := range pairs {
 			lPort := pair[0]
 			tPort := pair[1]
+			key := forwarderListenKey(rule.ListenIP, lPort)
 			proto := strings.ToLower(rule.Protocol)
 			if isTCPCarrier && lPort == e.cfg.CarrierPort && (proto == "tcp" || proto == "tcp,udp" || proto == "both" || proto == "") {
 				carrierSharedFwd = int64(tPort)
@@ -1683,10 +1696,12 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 				continue
 			}
 			if proto == "tcp" || proto == "tcp,udp" || proto == "both" || proto == "" {
-				desiredTCP[lPort] = struct {
+				desiredTCP[key] = struct {
+					listenPort int
 					targetPort int
 					listenIP   string
 				}{
+					listenPort: lPort,
 					targetPort: tPort,
 					listenIP:   rule.ListenIP,
 				}
@@ -1695,11 +1710,13 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 				if !e.isDirect() && (e.isQuicTransport() || e.isPacketTransport()) && lPort == e.cfg.CarrierPort {
 					continue
 				}
-				desiredUDP[lPort] = struct {
+				desiredUDP[key] = struct {
+					listenPort int
 					targetPort int
 					rule       routing.ForwarderRule
 					listenIP   string
 				}{
+					listenPort: lPort,
 					targetPort: tPort,
 					rule:       rule,
 					listenIP:   rule.ListenIP,
@@ -1711,27 +1728,27 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 
 	// 1. Reconcile TCP listeners
 	e.tcpForwarderMap.Range(func(key, val any) bool {
-		port := key.(int)
+		listenKey, _ := key.(string)
 		ln := val.(net.Listener)
-		if _, exists := desiredTCP[port]; !exists {
-			e.logger.WithField("port", port).Info("[Relay] Closing removed TCP forwarder listener")
+		if _, exists := desiredTCP[listenKey]; !exists {
+			e.logger.WithField("addr", listenKey).Info("[Relay] Closing removed TCP forwarder listener")
 			_ = ln.Close()
-			e.tcpForwarderMap.Delete(port)
+			e.tcpForwarderMap.Delete(listenKey)
 		}
 		return true
 	})
-	for lPort, cfg := range desiredTCP {
-		if _, exists := e.tcpForwarderMap.Load(lPort); !exists {
-			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": cfg.targetPort}).Info("[Relay] Binding new TCP forwarder listener")
-			_ = e.startTCPForwarderListener(cfg.listenIP, lPort, cfg.targetPort)
+	for listenKey, cfg := range desiredTCP {
+		if _, exists := e.tcpForwarderMap.Load(listenKey); !exists {
+			e.logger.WithFields(log.Fields{"addr": listenKey, "targetPort": cfg.targetPort}).Info("[Relay] Binding new TCP forwarder listener")
+			_ = e.startTCPForwarderListener(cfg.listenIP, cfg.listenPort, cfg.targetPort)
 		}
 	}
 
 	// 2. Reconcile UDP listeners
 	e.udpForwarderMap.Range(func(key, val any) bool {
-		port := key.(int)
-		if _, exists := desiredUDP[port]; !exists {
-			e.logger.WithField("port", port).Info("[Relay] Closing removed UDP forwarder listener")
+		listenKey, _ := key.(string)
+		if _, exists := desiredUDP[listenKey]; !exists {
+			e.logger.WithField("addr", listenKey).Info("[Relay] Closing removed UDP forwarder listener")
 			if entry, ok := val.(*udpForwarderEntry); ok && entry != nil {
 				if entry.cancel != nil {
 					entry.cancel()
@@ -1742,15 +1759,15 @@ func (e *Engine) UpdateForwarders(newRules []routing.ForwarderRule) error {
 			} else if uConn, ok := val.(*net.UDPConn); ok && uConn != nil {
 				_ = uConn.Close()
 			}
-			e.udpForwarderMap.Delete(port)
+			e.udpForwarderMap.Delete(listenKey)
 		}
 		return true
 	})
-	for lPort, cfg := range desiredUDP {
-		if _, exists := e.udpForwarderMap.Load(lPort); !exists {
-			e.logger.WithFields(log.Fields{"listenPort": lPort, "targetPort": cfg.targetPort, "gaming": cfg.rule.GamingMode}).Info("[Relay] Binding new UDP forwarder listener")
+	for listenKey, cfg := range desiredUDP {
+		if _, exists := e.udpForwarderMap.Load(listenKey); !exists {
+			e.logger.WithFields(log.Fields{"addr": listenKey, "targetPort": cfg.targetPort, "gaming": cfg.rule.GamingMode}).Info("[Relay] Binding new UDP forwarder listener")
 			ruleCopy := cfg.rule
-			_ = e.startUDPForwarderListener(cfg.listenIP, lPort, cfg.targetPort, &ruleCopy)
+			_ = e.startUDPForwarderListener(cfg.listenIP, cfg.listenPort, cfg.targetPort, &ruleCopy)
 		}
 	}
 
@@ -2217,13 +2234,25 @@ func (e *Engine) serveExitStream(stream net.Conn) {
 	switch proto {
 	case routing.RouteProtoTCP:
 		fwdRule := e.findForwarderRule(targetPort)
-		routing.HandleExitTCPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, fwdRule)
+		targetIP := e.cfg.TargetIP
+		if fwdRule != nil && strings.TrimSpace(fwdRule.TargetIP) != "" {
+			targetIP = strings.TrimSpace(fwdRule.TargetIP)
+		}
+		routing.HandleExitTCPForward(stream, targetIP, targetPort, e.Stats, fwdRule)
 	case routing.RouteProtoUDP:
 		fwdRule := e.findForwarderRule(targetPort)
-		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, false, fwdRule)
+		targetIP := e.cfg.TargetIP
+		if fwdRule != nil && strings.TrimSpace(fwdRule.TargetIP) != "" {
+			targetIP = strings.TrimSpace(fwdRule.TargetIP)
+		}
+		routing.HandleExitUDPForward(stream, targetIP, targetPort, e.Stats, false, fwdRule)
 	case routing.RouteProtoUDPGaming:
 		fwdRule := e.findForwarderRule(targetPort)
-		routing.HandleExitUDPForward(stream, e.cfg.TargetIP, targetPort, e.Stats, true, fwdRule)
+		targetIP := e.cfg.TargetIP
+		if fwdRule != nil && strings.TrimSpace(fwdRule.TargetIP) != "" {
+			targetIP = strings.TrimSpace(fwdRule.TargetIP)
+		}
+		routing.HandleExitUDPForward(stream, targetIP, targetPort, e.Stats, true, fwdRule)
 	case routing.RouteProtoTUN:
 		e.runL3StreamDuplex(stream)
 	case routing.RouteProtoProbe:

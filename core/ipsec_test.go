@@ -1,6 +1,9 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,5 +32,65 @@ func TestIPsecProcessSasStats_ActiveThreshold(t *testing.T) {
 	})
 	if _, exists := c.lastSasStats["user1"]; exists {
 		t.Fatalf("expected disconnected user1 to be pruned from lastSasStats")
+	}
+}
+
+func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
+	bundle := "-----BEGIN CERTIFICATE-----\nLEAFDATA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nINTERMEDIATEDATA\n-----END CERTIFICATE-----\n"
+	leaf, chain := splitLeafAndChainPEM(bundle)
+	if !strings.Contains(leaf, "LEAFDATA") || strings.Contains(leaf, "INTERMEDIATEDATA") {
+		t.Fatalf("unexpected leaf PEM: %s", leaf)
+	}
+	if !strings.Contains(chain, "INTERMEDIATEDATA") || strings.Contains(chain, "LEAFDATA") {
+		t.Fatalf("unexpected chain PEM: %s", chain)
+	}
+
+	c := NewIPsecCore(IPsecConfig{
+		Tag:        "ipsec-10-500",
+		Mode:       "ikev2",
+		PSK:        `my"secret\psk`,
+		AuthMethod: "psk",
+		Domain:     "vpn.example.com",
+		CertMode:   "file",
+	})
+	secrets := c.generateSecrets()
+	if !strings.Contains(secrets, `secret = "my\"secret\\psk"`) {
+		t.Fatalf("expected escaped PSK in secrets, got:\n%s", secrets)
+	}
+
+	// Verify IPv6 parsing in swanctl --list-sas output
+	sas := parseSwanctlSasText("ipsec-10-500: #1, ESTABLISHED, IKEv2\n  remote 'user_abcd1234' @ 2001:db8::1[4500]\n  bytes_in=12345, bytes_out=67890\n")
+	if len(sas) != 1 || sas[0].Username != "user_abcd1234" || sas[0].RemoteIP != "2001:db8::1" || sas[0].InBytes != 12345 || sas[0].OutBytes != 67890 {
+		t.Fatalf("unexpected parsed IPv6 SA: %+v", sas)
+	}
+
+	// Verify tagged chap-secrets upsert and removal leaves other tags intact
+	chapPath := filepath.Join(t.TempDir(), "chap-secrets")
+	if err := upsertTaggedChapSecrets(chapPath, "tag1", "\"u1\" * \"p1\" *\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertTaggedChapSecrets(chapPath, "tag2", "\"u2\" * \"p2\" *\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeTaggedChapSecrets(chapPath, "tag1"); err != nil {
+		t.Fatal(err)
+	}
+	rem, err := os.ReadFile(chapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rem), "u1") || !strings.Contains(string(rem), "u2") {
+		t.Fatalf("expected tag1 removed and tag2 preserved, got:\n%s", string(rem))
+	}
+
+	// Verify computeIPsecTCPMSS bounds
+	if mss := computeIPsecTCPMSS(1360); mss != 1320 {
+		t.Fatalf("expected MSS 1320 for MTU 1360, got %d", mss)
+	}
+	if mss := computeIPsecTCPMSS(1280); mss != 1240 {
+		t.Fatalf("expected MSS 1240 for MTU 1280, got %d", mss)
+	}
+	if mss := computeIPsecTCPMSS(400); mss != 536 {
+		t.Fatalf("expected floor MSS 536, got %d", mss)
 	}
 }

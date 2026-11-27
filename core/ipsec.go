@@ -101,12 +101,12 @@ func (c *IPsecCore) getDNS() string {
 	return "8.8.8.8,1.1.1.1"
 }
 
-// getMTU returns the configured MTU or default 1400.
+// getMTU returns the configured MTU or default 1360.
 func (c *IPsecCore) getMTU() int {
 	if c.MTU > 0 {
 		return c.MTU
 	}
-	return 1400
+	return 1360
 }
 
 // Start initializes strongSwan and xl2tpd.
@@ -117,6 +117,10 @@ func (c *IPsecCore) Start() error {
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.default.send_redirects=0").Run()
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.all.accept_redirects=0").Run()
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.default.accept_redirects=0").Run()
+
+	if c.Mode == "l2tp" {
+		_ = os.Remove(fmt.Sprintf("/tmp/archnet-ppp-%s.map", c.Tag))
+	}
 
 	// Setup NAT
 	if err := c.setupNAT(); err != nil {
@@ -167,9 +171,10 @@ func (c *IPsecCore) Stop() {
 		c.stopXl2tpd()
 		os.Remove(fmt.Sprintf("/etc/xl2tpd/%s.conf", c.Tag))
 		os.Remove(fmt.Sprintf("/etc/ppp/options.xl2tpd.%s", c.Tag))
-		os.Remove("/etc/ppp/chap-secrets")
+		_ = removeTaggedChapSecrets("/etc/ppp/chap-secrets", c.Tag)
 		os.Remove(fmt.Sprintf("/etc/ppp/ip-up.d/%s", c.Tag))
 		os.Remove(fmt.Sprintf("/etc/ppp/ip-down.d/%s", c.Tag))
+		os.Remove(fmt.Sprintf("/tmp/archnet-ppp-%s.map", c.Tag))
 		os.Remove(fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag))
 		os.Remove(fmt.Sprintf("/run/xl2tpd-%s.control", c.Tag))
 	}
@@ -340,20 +345,29 @@ func (c *IPsecCore) writeConfigs() error {
 		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/options.xl2tpd.%s", c.Tag), []byte(c.generatePPPOptions()), 0644); err != nil {
 			return err
 		}
-		if err := os.WriteFile("/etc/ppp/chap-secrets", []byte(c.generateChapSecrets()), 0600); err != nil {
+		if err := upsertTaggedChapSecrets("/etc/ppp/chap-secrets", c.Tag, c.generateChapSecrets()); err != nil {
 			return err
 		}
-		// PPP ip-up script: logs which ppp interface belongs to which user
+		// PPP ip-up script: tracks active ppp interface -> user + remote IP (removes stale entries first)
 		ipUpScript := fmt.Sprintf(`#!/bin/sh
 # Written by ArchNet IPsecCore tag=%s
-echo "$PEERNAME $IFNAME" >> /tmp/archnet-ppp-%s.map
+MAP="/tmp/archnet-ppp-%s.map"
+if [ -f "$MAP" ]; then
+  grep -v -E "^($PEERNAME[[:space:]]|[[:graph:]]+[[:space:]]+$IFNAME([[:space:]]|$))" "$MAP" > "${MAP}.tmp" 2>/dev/null || true
+  mv "${MAP}.tmp" "$MAP" 2>/dev/null || true
+fi
+echo "$PEERNAME $IFNAME ${IPREMOTE:-}" >> "$MAP"
 `, c.Tag, c.Tag)
 		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/ip-up.d/%s", c.Tag), []byte(ipUpScript), 0755); err != nil {
 			return err
 		}
-		// PPP ip-down script: removes mapping
+		// PPP ip-down script: removes mapping by interface name
 		ipDownScript := fmt.Sprintf(`#!/bin/sh
-sed -i "/^$PEERNAME $IFNAME$/d" /tmp/archnet-ppp-%s.map 2>/dev/null
+MAP="/tmp/archnet-ppp-%s.map"
+if [ -f "$MAP" ]; then
+  grep -v -E "[[:space:]]+$IFNAME([[:space:]]|$)" "$MAP" > "${MAP}.tmp" 2>/dev/null || true
+  mv "${MAP}.tmp" "$MAP" 2>/dev/null || true
+fi
 `, c.Tag)
 		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/ip-down.d/%s", c.Tag), []byte(ipDownScript), 0755); err != nil {
 			return err
@@ -365,41 +379,41 @@ sed -i "/^$PEERNAME $IFNAME$/d" /tmp/archnet-ppp-%s.map 2>/dev/null
 
 // generateIKEv2SwanctlConf generates IKEv2 swanctl.conf.
 func (c *IPsecCore) generateIKEv2SwanctlConf() string {
-	// Server (local) auth selection based on CertMode:
-	// 1. "http"/"file" + domain → pubkey + eap-mschapv2 (iPhone/iOS compatible)
-	// 2. "self" → pubkey with self-signed cert (Android only)
-	// 3. "none"/"" or PSK auth → PSK server auth
+	// Server (local) auth selection based on CertMode & AuthMethod:
+	// 1. "http"/"dns"/"file" + domain → pubkey with cert (respecting c.AuthMethod: eap-mschapv2 or psk)
+	// 2. "self" → pubkey with self-signed cert
+	// 3. "none"/"" → PSK server auth (or self-signed pubkey fallback for EAP)
 	localAuth := "auth = psk\n            id = %any"
-	remoteAuth := c.AuthMethod
+	remoteAuth := strings.ToLower(strings.TrimSpace(c.AuthMethod))
+	if remoteAuth == "" {
+		remoteAuth = "eap-mschapv2"
+	}
 
 	certName := c.Domain + ".pem"
 	switch c.CertMode {
-	case "http", "dns":
-		// Let's Encrypt / ACME: use trusted cert with domain identity
+	case "http", "dns", "file":
 		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", certName)
-		if _, err := os.Stat(certPath); err == nil {
+		if _, err := os.Stat(certPath); err == nil && c.Domain != "" {
 			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s\n            id = %s", certName, c.Domain)
-			remoteAuth = "eap-mschapv2"
-			log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Using trusted cert for IKEv2")
-		}
-	case "file":
-		// Inline cert from panel
-		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", certName)
-		if _, err := os.Stat(certPath); err == nil {
-			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s\n            id = %s", certName, c.Domain)
-			remoteAuth = "eap-mschapv2"
-			log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Using file cert for IKEv2")
+			log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain, "cert_mode": c.CertMode}).Info("Using configured cert for IKEv2")
+		} else {
+			log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain, "cert_mode": c.CertMode}).Warn("IKEv2 cert missing on disk; falling back to self-signed or PSK")
+			if strings.HasPrefix(remoteAuth, "eap") {
+				selfCertName := fmt.Sprintf("server-%s.pem", c.Tag)
+				selfPath := fmt.Sprintf("/etc/swanctl/x509/%s", selfCertName)
+				if _, sErr := os.Stat(selfPath); sErr == nil {
+					localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s", selfCertName)
+				}
+			}
 		}
 	case "self":
-		// Self-signed cert (Android strongSwan only, not iOS)
 		selfCertName := fmt.Sprintf("server-%s.pem", c.Tag)
 		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", selfCertName)
 		if _, err := os.Stat(certPath); err == nil {
 			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s", selfCertName)
 		}
 	default:
-		// "none" or "" → PSK mode (or EAP with self-signed fallback)
-		if strings.HasPrefix(c.AuthMethod, "eap") {
+		if strings.HasPrefix(remoteAuth, "eap") {
 			selfCertName := fmt.Sprintf("server-%s.pem", c.Tag)
 			certPath := fmt.Sprintf("/etc/swanctl/x509/%s", selfCertName)
 			if _, err := os.Stat(certPath); err == nil {
@@ -408,10 +422,16 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 		}
 	}
 
+	eapLine := ""
+	if strings.HasPrefix(remoteAuth, "eap") {
+		eapLine = "\n            eap_id = %any"
+	}
+
 	r := strings.NewReplacer(
 		"{{TAG}}", c.Tag,
 		"{{LOCAL_AUTH}}", localAuth,
 		"{{REMOTE_AUTH}}", remoteAuth,
+		"{{EAP_ID_LINE}}", eapLine,
 		"{{SUBNET}}", c.getSubnet(),
 		"{{DNS}}", c.getDNS(),
 	)
@@ -419,7 +439,7 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 	return r.Replace(`connections {
     {{TAG}} {
         version = 2
-        proposals = aes256gcm16-sha384-ecp256,aes256gcm16-sha256-modp2048,aes128gcm16-sha256-ecp256,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp1024,default
+        proposals = aes256gcm16-sha384-ecp256,aes256gcm16-sha256-modp2048,aes128gcm16-sha256-ecp256,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048,aes256-sha1-modp1024,default
         rekey_time = 0s
         pools = pool-{{TAG}}
         fragmentation = force
@@ -429,8 +449,7 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
             {{LOCAL_AUTH}}
         }
         remote {
-            auth = {{REMOTE_AUTH}}
-            eap_id = %any
+            auth = {{REMOTE_AUTH}}{{EAP_ID_LINE}}
         }
         children {
             {{TAG}}-child {
@@ -485,12 +504,19 @@ func (c *IPsecCore) ensureServerCert() error {
 		}
 	}
 
-	// Create self-signed certificate
+	// Create self-signed certificate (include Domain SAN if configured)
+	cn := serverIP
+	var dnsNames []string
+	if strings.TrimSpace(c.Domain) != "" {
+		cn = strings.TrimSpace(c.Domain)
+		dnsNames = []string{cn}
+	}
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			CommonName: serverIP,
+			CommonName: cn,
 		},
+		DNSNames:              dnsNames,
 		IPAddresses:           []net.IP{net.ParseIP(serverIP)},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
@@ -605,7 +631,36 @@ func (c *IPsecCore) installLetsEncryptCert() error {
 	return nil
 }
 
-// installFileCert writes inline certificate content from the panel to strongSwan directories.
+// splitLeafAndChainPEM splits a PEM bundle into the first (leaf) certificate and any remaining CA chain certificates.
+func splitLeafAndChainPEM(raw string) (leafPEM string, chainPEM string) {
+	rest := []byte(raw)
+	var leaf, chain strings.Builder
+	count := 0
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		encoded := pem.EncodeToMemory(block)
+		if count == 0 {
+			leaf.Write(encoded)
+		} else {
+			chain.Write(encoded)
+		}
+		count++
+	}
+	if count == 0 {
+		return raw, ""
+	}
+	return leaf.String(), chain.String()
+}
+
+// installFileCert writes inline certificate content from the panel to strongSwan directories,
+// splitting leaf vs intermediate CA certificates so strongSwan serves the full chain.
 func (c *IPsecCore) installFileCert() error {
 	if c.Domain == "" {
 		return fmt.Errorf("no domain configured for file cert")
@@ -614,17 +669,24 @@ func (c *IPsecCore) installFileCert() error {
 		return fmt.Errorf("cert_mode is 'file' but cert_file or key_file is empty")
 	}
 
+	leafCert, chainCert := splitLeafAndChainPEM(c.IPsecConfig.CertFile)
 	certDst := fmt.Sprintf("/etc/swanctl/x509/%s.pem", c.Domain)
 	keyDst := fmt.Sprintf("/etc/swanctl/private/%s.pem", c.Domain)
 
-	if err := os.WriteFile(certDst, []byte(c.IPsecConfig.CertFile), 0644); err != nil {
+	if err := os.WriteFile(certDst, []byte(leafCert), 0644); err != nil {
 		return fmt.Errorf("failed to write cert: %w", err)
+	}
+	if chainCert != "" {
+		chainDst := fmt.Sprintf("/etc/swanctl/x509ca/%s-chain.pem", c.Domain)
+		if err := os.WriteFile(chainDst, []byte(chainCert), 0644); err != nil {
+			return fmt.Errorf("failed to write cert chain: %w", err)
+		}
 	}
 	if err := os.WriteFile(keyDst, []byte(c.IPsecConfig.KeyFile), 0600); err != nil {
 		return fmt.Errorf("failed to write key: %w", err)
 	}
 
-	log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain}).Info("Installed file certificate for IKEv2")
+	log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain, "hasChain": chainCert != ""}).Info("Installed file certificate for IKEv2")
 	return nil
 }
 
@@ -705,12 +767,70 @@ proxyarp
 `, dnsLines, mtu, mtu)
 }
 
+func escapeQuotedSecret(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
+func upsertTaggedChapSecrets(path, tag, body string) error {
+	beginMarker := fmt.Sprintf("# BEGIN ARCHNET %s", tag)
+	endMarker := fmt.Sprintf("# END ARCHNET %s", tag)
+	existingBytes, _ := os.ReadFile(path)
+	cleaned := stripTaggedSection(string(existingBytes), beginMarker, endMarker)
+	var sb strings.Builder
+	if strings.TrimSpace(cleaned) != "" {
+		sb.WriteString(strings.TrimRight(cleaned, "\n"))
+		sb.WriteString("\n")
+	}
+	sb.WriteString(beginMarker)
+	sb.WriteString("\n")
+	sb.WriteString(strings.TrimRight(body, "\n"))
+	sb.WriteString("\n")
+	sb.WriteString(endMarker)
+	sb.WriteString("\n")
+	return os.WriteFile(path, []byte(sb.String()), 0600)
+}
+
+func removeTaggedChapSecrets(path, tag string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	beginMarker := fmt.Sprintf("# BEGIN ARCHNET %s", tag)
+	endMarker := fmt.Sprintf("# END ARCHNET %s", tag)
+	cleaned := stripTaggedSection(string(data), beginMarker, endMarker)
+	if strings.TrimSpace(cleaned) == "" {
+		return os.Remove(path)
+	}
+	return os.WriteFile(path, []byte(strings.TrimRight(cleaned, "\n")+"\n"), 0600)
+}
+
+func stripTaggedSection(content, beginMarker, endMarker string) string {
+	var out []string
+	skipping := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == beginMarker {
+			skipping = true
+			continue
+		}
+		if trimmed == endMarker {
+			skipping = false
+			continue
+		}
+		if !skipping {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // generateChapSecrets generates PPP CHAP secrets.
 func (c *IPsecCore) generateChapSecrets() string {
 	var sb strings.Builder
-	sb.WriteString("# Generated by ArchNet IPsecCore\n")
 	for _, user := range c.users {
-		sb.WriteString(fmt.Sprintf("\"%s\" * \"%s\" *\n", user.Username, user.Password))
+		sb.WriteString(fmt.Sprintf("\"%s\" * \"%s\" *\n", escapeQuotedSecret(user.Username), escapeQuotedSecret(user.Password)))
 	}
 	return sb.String()
 }
@@ -727,15 +847,15 @@ func (c *IPsecCore) generateSecrets() string {
 	}
 	sb.WriteString(fmt.Sprintf("    ike-%s {\n", c.Tag))
 	sb.WriteString("        id = %any\n")
-	sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", psk))
+	sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", escapeQuotedSecret(psk)))
 	sb.WriteString("    }\n")
 
 	// EAP secrets for each user (IKEv2 only)
 	if c.Mode == "ikev2" {
 		for _, user := range c.users {
 			sb.WriteString(fmt.Sprintf("    eap-%s-%d {\n", c.Tag, user.UID))
-			sb.WriteString(fmt.Sprintf("        id = \"%s\"\n", user.Username))
-			sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", user.Password))
+			sb.WriteString(fmt.Sprintf("        id = \"%s\"\n", escapeQuotedSecret(user.Username)))
+			sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", escapeQuotedSecret(user.Password)))
 			sb.WriteString("    }\n")
 		}
 	}
@@ -823,12 +943,28 @@ func (c *IPsecCore) SetTProxyConfig(port int, subnet string, bypassUDP bool, dro
 	c.DropICMPUnreachable = dropICMP
 }
 
+func computeIPsecTCPMSS(mtu int) int {
+	if mtu <= 0 {
+		mtu = 1360
+	}
+	mss := mtu - 40
+	if mss < 536 {
+		mss = 536
+	}
+	if mss > 1460 {
+		mss = 1460
+	}
+	return mss
+}
+
 // setupNAT configures TPROXY or MASQUERADE for the VPN subnet
 func (c *IPsecCore) setupNAT() error {
 	subnet := c.getSubnet()
 
 	tproxySubnet := c.TProxySubnet
-	if tproxySubnet == "" { tproxySubnet = c.getSubnet() }
+	if tproxySubnet == "" {
+		tproxySubnet = c.getSubnet()
+	}
 
 	// Forwarding & Input rules for VPN subnet
 	// Use -I 1 so they take precedence over UFW or firewall DROP rules
@@ -849,12 +985,48 @@ func (c *IPsecCore) setupNAT() error {
 		}
 	}
 
+	// Clamp TCP MSS for the IPsec subnet to prevent PMTU blackholes over NAT-T / tunneled setups
+	// Apply both explicit safe MSS floor and dynamic --clamp-mss-to-pmtu so lower-MTU relay tunnels never blackhole
+	tcpmss := computeIPsecTCPMSS(c.getMTU())
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C PREROUTING -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I PREROUTING 1 -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
+	}
+
 	if c.DropICMPUnreachable {
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+		// Preserve Path MTU Discovery (ICMP fragmentation-needed) before dropping port-unreachable
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -s %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -s %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet))
 		}
-		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -d %s -p icmp --icmp-type destination-unreachable -j DROP", subnet)); err != nil {
-			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -d %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -d %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -I FORWARD 1 -d %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C FORWARD -s %s -p icmp --icmp-type port-unreachable -j DROP", subnet)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A FORWARD -s %s -p icmp --icmp-type port-unreachable -j DROP", subnet))
+		}
+		if err := execCommand(fmt.Sprintf("iptables -w 5 -C OUTPUT -d %s -p icmp --icmp-type port-unreachable -j DROP", subnet)); err != nil {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -A OUTPUT -d %s -p icmp --icmp-type port-unreachable -j DROP", subnet))
+		}
+	}
+
+	if c.TProxyPort > 0 {
+		tproxyAvailable := execCommand("iptables -w 5 -t mangle -m TPROXY -h") == nil ||
+			execCommand("modprobe xt_TPROXY") == nil
+
+		if !tproxyAvailable {
+			log.WithField("tag", c.Tag).Warn("TPROXY module not available, falling back to MASQUERADE for IPsec NAT")
+			c.TProxyPort = 0
 		}
 	}
 
@@ -912,14 +1084,22 @@ func (c *IPsecCore) setupNAT() error {
 // teardownNAT removes NAT/TPROXY rules for the VPN subnet
 func (c *IPsecCore) teardownNAT() {
 	subnet := c.getSubnet()
+	tcpmss := computeIPsecTCPMSS(c.getMTU())
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D INPUT -s %s -j ACCEPT", subnet))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -j ACCEPT", subnet))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -d %s -j ACCEPT", subnet))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
 
 	if c.DropICMPUnreachable {
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -d %s -p icmp --icmp-type destination-unreachable -j DROP", subnet))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -d %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -p icmp --icmp-type port-unreachable -j DROP", subnet))
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -D OUTPUT -d %s -p icmp --icmp-type port-unreachable -j DROP", subnet))
 	}
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t nat -D POSTROUTING -s %s -j MASQUERADE", subnet))
@@ -960,7 +1140,7 @@ type parsedSA struct {
 }
 
 var (
-	reRemote   = regexp.MustCompile(`remote\s+'([^']+)'\s+@\s+([0-9.]+)`)
+	reRemote   = regexp.MustCompile(`remote\s+'([^']+)'\s+@\s+([0-9a-fA-F:.]+)`)
 	reInBytes  = regexp.MustCompile(`bytes_i(?:n)?=(\d+)`)
 	reOutBytes = regexp.MustCompile(`bytes_o(?:ut)?=(\d+)`)
 	reBytesAlt = regexp.MustCompile(`(\d+)\s+bytes_i.*?(\d+)\s+bytes_o`)
@@ -975,9 +1155,13 @@ func (c *IPsecCore) parseSasOutput() []parsedSA {
 	if err != nil {
 		return nil
 	}
+	return parseSwanctlSasText(string(output))
+}
+
+func parseSwanctlSasText(output string) []parsedSA {
 	var result []parsedSA
 	var current *parsedSA
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if m := reRemote.FindStringSubmatch(line); len(m) == 3 {
 			if current != nil {
@@ -1093,11 +1277,19 @@ func (c *IPsecCore) parseL2TPOnlineUsers() []parsedSA {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	for _, line := range lines {
 		parts := strings.Fields(line)
-		if len(parts) != 2 {
+		if len(parts) < 2 {
 			continue
 		}
 		username := parts[0]
 		iface := parts[1]
+		remoteIP := ""
+		if len(parts) >= 3 {
+			remoteIP = parts[2]
+		}
+		// Skip stale interface entries that no longer exist in sysfs
+		if _, statErr := os.Stat(fmt.Sprintf("/sys/class/net/%s", iface)); statErr != nil {
+			continue
+		}
 
 		// Read rx/tx bytes from sysfs
 		rxBytes := readSysfsInt64(fmt.Sprintf("/sys/class/net/%s/statistics/rx_bytes", iface))
@@ -1105,7 +1297,7 @@ func (c *IPsecCore) parseL2TPOnlineUsers() []parsedSA {
 
 		result = append(result, parsedSA{
 			Username: username,
-			RemoteIP: "",
+			RemoteIP: remoteIP,
 			InBytes:  rxBytes, // rx on server = upload from user
 			OutBytes: txBytes, // tx on server = download for user
 		})
