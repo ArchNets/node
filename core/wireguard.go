@@ -556,16 +556,35 @@ func (w *WireGuardCore) updatePeers() error {
 }
 
 // assignIP assigns an IP address to a user based on their ID (SubscriptionId).
+func (w *WireGuardCore) assignIP(id int) string {
+	return assignWGPoolIP(w.Address, id)
+}
+
+// computeWGTCPMSS computes a safe TCP MSS clamp value accounting for WireGuard/AmneziaWG
+// S4 transport prefix overhead so inner packets do not fragment on 1500-byte paths.
+func computeWGTCPMSS(mtu, s4 int) int {
+	effectiveMTU := mtu
+	if maxSafe := 1440 - s4; s4 > 0 && effectiveMTU > maxSafe && maxSafe > 576 {
+		effectiveMTU = maxSafe
+	}
+	tcpmss := effectiveMTU - 80
+	if tcpmss <= 0 {
+		tcpmss = 1240
+	}
+	return tcpmss
+}
+
+// assignWGPoolIP assigns an IP address to a user based on their ID (SubscriptionId).
 // Matches Backend's CalculateWireGuardIP logic:
 // - 10.0.x.x expands to 10.0.0.0/13 (~260,000 hosts across 10.0-10.7) for backward-compatibility.
 // - Specific subnets (e.g. 10.8.0.1/16, 172.16.0.1/16, 192.168.10.1/24) stay strictly inside their CIDR.
 // Constraints: Even IPs only (2, 4, ..., 254), giving 127 usable hosts per /24 block.
-func (w *WireGuardCore) assignIP(id int) string {
+func assignWGPoolIP(address string, id int) string {
 	if id <= 0 {
 		return ""
 	}
 
-	first := strings.TrimSpace(strings.Split(w.Address, ",")[0])
+	first := strings.TrimSpace(strings.Split(address, ",")[0])
 	baseIP, ipnet, err := net.ParseCIDR(first)
 	if err != nil {
 		baseIP = net.ParseIP(first)

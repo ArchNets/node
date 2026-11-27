@@ -78,7 +78,7 @@ func (c *AmneziaWGController) Start() error {
 		// But let's assume if type AmneziaWG is selected, admin sets interface name correctly or we default.
 	}
 
-	mtu := 1420 // Default
+	mtu := 1280 // Default matches server & client AmneziaWG templates (leaves headroom for S4 + padding)
 	if c.info.Protocol != nil && c.info.Protocol.WireguardMTU > 0 {
 		mtu = c.info.Protocol.WireguardMTU
 	}

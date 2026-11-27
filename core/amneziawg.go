@@ -206,10 +206,26 @@ func (w *AmneziaWGCore) Start() error {
 		return fmt.Errorf("failed to create interface: %w", err)
 	}
 
-	// Configure the interface
+	// Configure the interface; if kernel mode fails (e.g. older host kernel module lacking AWG 3.x),
+	// automatically fall back to the embedded userspace amneziawg-go engine.
 	if err := w.configureInterface(); err != nil {
-		w.deleteInterface() // Cleanup on failure
-		return fmt.Errorf("failed to configure interface: %w", err)
+		if w.userspace == nil {
+			log.WithFields(log.Fields{
+				"interface": w.InterfaceName,
+				"kernelErr": err.Error(),
+			}).Warn("AmneziaWG kernel configuration failed, falling back to embedded userspace amneziawg-go engine")
+			_ = w.deleteInterface()
+			if uErr := w.createUserspaceInterface(); uErr != nil {
+				return fmt.Errorf("failed to configure kernel interface (%v) and userspace fallback (%v)", err, uErr)
+			}
+			if cErr := w.configureInterface(); cErr != nil {
+				_ = w.deleteInterface()
+				return fmt.Errorf("failed to configure userspace fallback interface: %w", cErr)
+			}
+		} else {
+			w.deleteInterface() // Cleanup on failure
+			return fmt.Errorf("failed to configure interface: %w", err)
+		}
 	}
 
 	// Setup NAT/Masquerading
@@ -336,7 +352,7 @@ func (w *AmneziaWGCore) AddUsers(users []panel.UserInfo) error {
 				}
 				sb.WriteString("public_key=")
 				sb.WriteString(hex.EncodeToString(pk[:]))
-				sb.WriteString("\nallowed_ip=")
+				sb.WriteString("\nreplace_allowed_ips=true\nallowed_ip=")
 				sb.WriteString(p.assignedIP)
 				sb.WriteString("/32\npersistent_keepalive_interval=25\n")
 			}
@@ -639,9 +655,8 @@ func (w *AmneziaWGCore) configureInterface() error {
 			return fmt.Errorf("failed to bring up userspace amneziawg-go device: %w", err)
 		}
 	} else {
-		// 1. Set basic config (listen-port and private-key)
-		cmd := fmt.Sprintf("echo %s | awg set %s listen-port %d private-key /dev/stdin", w.PrivateKey.String(), w.InterfaceName, w.Port)
-		if err := execShellCommand(cmd); err != nil {
+		// 1. Set basic config (listen-port and private-key) without shell interpolation
+		if err := execCommandWithStdin(w.PrivateKey.String()+"\n", "awg", "set", w.InterfaceName, "listen-port", strconv.Itoa(w.Port), "private-key", "/dev/stdin"); err != nil {
 			return fmt.Errorf("failed to set basic config: %w", err)
 		}
 
@@ -783,22 +798,16 @@ func (w *AmneziaWGCore) createInterface() error {
 			log.WithField("interface", w.InterfaceName).
 				Warn("AmneziaWG kernel module loaded, but 'awg' CLI not found; falling back to embedded userspace engine")
 			_ = execCommand(fmt.Sprintf("ip link delete %s", w.InterfaceName))
-			u, uErr := createAWGUserspace(w.InterfaceName, w.MTU)
-			if uErr != nil {
-				return fmt.Errorf("failed to start embedded amneziawg-go userspace fallback: %w", uErr)
-			}
-			w.userspace = u
+			return w.createUserspaceInterface()
 		}
 	} else {
 		log.WithFields(log.Fields{
 			"interface": w.InterfaceName,
 			"kernelErr": err.Error(),
 		}).Info("AmneziaWG kernel module unavailable, starting embedded userspace amneziawg-go engine")
-		u, uErr := createAWGUserspace(w.InterfaceName, w.MTU)
-		if uErr != nil {
+		if uErr := w.createUserspaceInterface(); uErr != nil {
 			return fmt.Errorf("failed to create interface via kernel (%v) and userspace amneziawg-go (%v)", err, uErr)
 		}
-		w.userspace = u
 	}
 
 	if err := execCommand("sysctl -w net.ipv4.ip_forward=1"); err != nil {
@@ -814,6 +823,22 @@ func (w *AmneziaWGCore) createInterface() error {
 	return nil
 }
 
+func (w *AmneziaWGCore) createUserspaceInterface() error {
+	u, uErr := createAWGUserspace(w.InterfaceName, w.MTU)
+	if uErr != nil {
+		return uErr
+	}
+	w.userspace = u
+	if err := execCommand("sysctl -w net.ipv4.ip_forward=1"); err != nil {
+		log.WithError(err).Warn("Failed to enable IP forwarding")
+	}
+	if err := execCommand(fmt.Sprintf("ip link set %s mtu %d", w.InterfaceName, w.MTU)); err != nil {
+		_ = w.deleteInterface()
+		return fmt.Errorf("failed to set MTU: %w", err)
+	}
+	return nil
+}
+
 func (w *AmneziaWGCore) deleteInterface() error {
 	if w.userspace != nil {
 		w.userspace.close()
@@ -823,11 +848,15 @@ func (w *AmneziaWGCore) deleteInterface() error {
 	return execCommand(cmd)
 }
 
-func execShellCommand(cmd string) error {
-	command := exec.Command("sh", "-c", cmd)
+func execCommandWithStdin(stdin string, name string, args ...string) error {
+	execMu.Lock()
+	defer execMu.Unlock()
+
+	command := exec.Command(name, args...)
+	command.Stdin = strings.NewReader(stdin)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("command failed: %s, output: %s", err, string(output))
+		return fmt.Errorf("command failed: %s %v, output: %s", name, args, string(output))
 	}
 	return nil
 }
@@ -1178,93 +1207,7 @@ func (w *AmneziaWGCore) SetLimiter(l *limiter.Limiter) {
 }
 
 func (w *AmneziaWGCore) assignIP(id int) string {
-	if id <= 0 {
-		return ""
-	}
-	first := strings.TrimSpace(strings.Split(w.Address, ",")[0])
-	baseIP, ipnet, err := net.ParseCIDR(first)
-	if err != nil {
-		baseIP = net.ParseIP(first)
-	}
-	if baseIP == nil {
-		baseIP = net.ParseIP("10.0.0.1")
-	}
-	baseIP = baseIP.To4()
-	if baseIP == nil {
-		return ""
-	}
-
-	prefix := 16
-	if ipnet != nil && ipnet.Mask != nil {
-		if ones, bits := ipnet.Mask.Size(); bits == 32 && ones > 0 {
-			prefix = ones
-		}
-	}
-
-	subId := int64(id)
-	// Legacy 10.0.x.x expansion: 10.0.0.0/13 covering 10.0 - 10.7 (260,096 subscribers)
-	if baseIP[0] == 10 && baseIP[1] == 0 && prefix >= 13 {
-		const hostCount = 8 * 256 * 127
-		slot := (subId - 1) % hostCount
-		dIndex := slot % 127
-		upper := slot / 127
-		cOffset := upper % 256
-		bOffset := upper / 256
-		byteD := int(dIndex*2) + 2
-		return fmt.Sprintf("10.%d.%d.%d", bOffset, cOffset, byteD)
-	}
-
-	netIP := baseIP
-	if ipnet != nil && ipnet.Mask != nil {
-		if masked := baseIP.Mask(ipnet.Mask).To4(); masked != nil {
-			netIP = masked
-		}
-	} else if prefix == 16 {
-		netIP = net.IPv4(baseIP[0], baseIP[1], 0, 0).To4()
-	}
-
-	// /24 .. /30: only last octet varies inside the masked network
-	if prefix >= 24 {
-		hosts := int64(127)
-		if prefix > 24 {
-			if prefix > 30 {
-				prefix = 30
-			}
-			hosts = int64(1<<(32-prefix))/2 - 1
-			if hosts < 1 {
-				hosts = 1
-			}
-		}
-		slot := (subId - 1) % hosts
-		byteD := int(netIP[3]) + int(slot*2) + 2
-		return fmt.Sprintf("%d.%d.%d.%d", netIP[0], netIP[1], netIP[2], byteD)
-	}
-
-	// /16 .. /23: only byte 2 and byte 3 vary inside the masked network
-	if prefix >= 16 {
-		cBlocks := int64(1 << (24 - prefix))
-		hostCount := cBlocks * 127
-		slot := (subId - 1) % hostCount
-		dIndex := slot % 127
-		cOffset := slot / 127
-		byteD := int(dIndex*2) + 2
-		return fmt.Sprintf("%d.%d.%d.%d", netIP[0], netIP[1], int(netIP[2])+int(cOffset), byteD)
-	}
-
-	// /8 .. /15: byte 1, byte 2, and byte 3 vary inside the masked network
-	if prefix < 8 {
-		prefix = 8
-	}
-	bBlocks := int64(1 << (16 - prefix))
-	hostCount := bBlocks * 256 * 127
-	slot := (subId - 1) % hostCount
-	dIndex := slot % 127
-	upper := slot / 127
-	cOffset := upper % 256
-	bOffset := upper / 256
-	byteD := int(dIndex*2) + 2
-
-	return fmt.Sprintf("%d.%d.%d.%d", netIP[0], int(netIP[1])+int(bOffset), cOffset, byteD)
+	return assignWGPoolIP(w.Address, id)
 }
 
 func (w *AmneziaWGCore) setupNAT() error {
@@ -1300,10 +1243,7 @@ func (w *AmneziaWGCore) setupNAT() error {
 		}
 	}
 
-	tcpmss := w.MTU - 80
-	if tcpmss <= 0 {
-		tcpmss = 1240
-	}
+	tcpmss := computeWGTCPMSS(w.MTU, w.S4)
 
 	// Always add TCPMSS clamping rules to prevent MTU blackholing:
 	// 1. In PREROUTING so incoming TCP SYN packets are clamped BEFORE TProxy redirects them to Xray!
@@ -1431,10 +1371,7 @@ func (w *AmneziaWGCore) teardownNAT() {
 		defaultIface = "eth0"
 	}
 
-	tcpmss := w.MTU - 80
-	if tcpmss <= 0 {
-		tcpmss = 1240
-	}
+	tcpmss := computeWGTCPMSS(w.MTU, w.S4)
 
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D PREROUTING -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -i %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", w.InterfaceName, tcpmss))

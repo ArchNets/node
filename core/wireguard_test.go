@@ -327,4 +327,13 @@ func TestAmneziaWGUAPIConfigAndDump(t *testing.T) {
 	if len(online) != 1 || online[0].UID != 202 || online[0].IP != "5.52.57.98" {
 		t.Fatalf("expected online peer UID=202 IP=5.52.57.98, got %+v (dump:\n%s)", online, dump)
 	}
+	if got := awgCore.assignIP(1); got != "10.0.0.2" {
+		t.Fatalf("expected assignIP(1) = 10.0.0.2, got %s", got)
+	}
+	if got := computeWGTCPMSS(1420, 40); got != 1320 {
+		t.Fatalf("expected computeWGTCPMSS(1420, 40) = 1320, got %d", got)
+	}
+	if got := computeWGTCPMSS(1280, 40); got != 1200 {
+		t.Fatalf("expected computeWGTCPMSS(1280, 40) = 1200, got %d", got)
+	}
 }
