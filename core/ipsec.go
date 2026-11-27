@@ -261,14 +261,28 @@ func (c *IPsecCore) GetTrafficAndReset() map[int]*UserTraffic {
 	return result
 }
 
-// GetOnlineUsers returns currently connected users via swanctl.
+// GetOnlineUsers returns currently connected users via swanctl that transferred > 8 KB within the active window.
 func (c *IPsecCore) GetOnlineUsers() []panel.OnlineUser {
 	var online []panel.OnlineUser
 	sas := c.parseSasOutput()
+	now := time.Now()
+
+	c.trafficMu.Lock()
+	activeUsernames := make(map[string]bool)
+	for uname, st := range c.lastSasStats {
+		if st != nil && !st.LastDataTime.IsZero() && now.Sub(st.LastDataTime) <= ipsecOnlineActiveWindow {
+			activeUsernames[uname] = true
+		}
+	}
+	c.trafficMu.Unlock()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	seen := make(map[int]bool)
 	for _, sa := range sas {
+		if !activeUsernames[sa.Username] {
+			continue
+		}
 		for _, user := range c.users {
 			if sa.Username == user.Username && !seen[user.UID] {
 				seen[user.UID] = true
@@ -918,9 +932,18 @@ func (c *IPsecCore) teardownNAT() {
 	}
 }
 
+const (
+	ipsecOnlineActiveWindow    = 90 * time.Second
+	ipsecOnlineActivityWindow  = 10 * time.Second
+	ipsecOnlineMinPayloadBytes = 8192
+)
+
 type sasStats struct {
-	InBytes  int64
-	OutBytes int64
+	InBytes      int64
+	OutBytes     int64
+	WindowStart  time.Time
+	WindowBytes  int64
+	LastDataTime time.Time
 }
 
 type ipsecStatsCollector struct {
@@ -988,9 +1011,10 @@ func (c *IPsecCore) parseSasOutput() []parsedSA {
 
 func (c *IPsecCore) collectStats() {
 	sas := c.parseSasOutput()
-	if len(sas) == 0 {
-		return
-	}
+	c.processSasStats(sas)
+}
+
+func (c *IPsecCore) processSasStats(sas []parsedSA) {
 	c.mu.RLock()
 	usernameToUID := make(map[string]int)
 	for _, user := range c.users {
@@ -998,16 +1022,20 @@ func (c *IPsecCore) collectStats() {
 	}
 	c.mu.RUnlock()
 
+	now := time.Now()
 	c.trafficMu.Lock()
 	defer c.trafficMu.Unlock()
+
+	present := make(map[string]bool, len(sas))
 	for _, sa := range sas {
+		present[sa.Username] = true
 		uid, ok := usernameToUID[sa.Username]
 		if !ok {
 			continue
 		}
 		last, exists := c.lastSasStats[sa.Username]
 		if !exists {
-			last = &sasStats{}
+			last = &sasStats{WindowStart: now}
 			c.lastSasStats[sa.Username] = last
 		}
 		var dlDelta, ulDelta int64
@@ -1023,14 +1051,32 @@ func (c *IPsecCore) collectStats() {
 		}
 		last.InBytes = sa.InBytes
 		last.OutBytes = sa.OutBytes
-		if dlDelta == 0 && ulDelta == 0 {
+
+		totalDelta := dlDelta + ulDelta
+		if totalDelta == 0 {
 			continue
 		}
+		if now.Sub(last.WindowStart) > ipsecOnlineActivityWindow {
+			last.WindowStart = now
+			last.WindowBytes = 0
+		}
+		last.WindowBytes += totalDelta
+		if last.WindowBytes > ipsecOnlineMinPayloadBytes {
+			last.LastDataTime = now
+		}
+
 		if c.traffic[uid] == nil {
 			c.traffic[uid] = &UserTraffic{}
 		}
 		c.traffic[uid].Download += dlDelta
 		c.traffic[uid].Upload += ulDelta
+	}
+
+	// Clean up stale stats for disconnected SAs
+	for uname := range c.lastSasStats {
+		if !present[uname] {
+			delete(c.lastSasStats, uname)
+		}
 	}
 }
 

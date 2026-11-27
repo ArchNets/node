@@ -156,6 +156,30 @@ func (c *Controller) userListMonitor() (err error) {
 	return nil
 }
 
+const onlineMinTrafficBytes = 8192 // Ignore Clash url-test probes & idle keepalives
+
+func filterOnlineUsersByTraffic(onlineDevice []panel.OnlineUser, userTraffic []panel.UserTraffic) []panel.OnlineUser {
+	if len(onlineDevice) == 0 || len(userTraffic) == 0 {
+		return nil
+	}
+	activeUID := make(map[int]struct{}, len(userTraffic))
+	for _, traffic := range userTraffic {
+		if traffic.Upload+traffic.Download > onlineMinTrafficBytes {
+			activeUID[traffic.UID] = struct{}{}
+		}
+	}
+	if len(activeUID) == 0 {
+		return nil
+	}
+	var result []panel.OnlineUser
+	for _, online := range onlineDevice {
+		if _, ok := activeUID[online.UID]; ok {
+			result = append(result, online)
+		}
+	}
+	return result
+}
+
 func (c *Controller) reportUserTrafficTask() (err error) {
 	var reportmin = 0
 	if c.info.TrafficReportThreshold > 0 {
@@ -192,22 +216,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	} else {
 		onlineDevice := *onlineDevicePtr
 		// always report online users, even if empty, to clear backend state
-		var result []panel.OnlineUser
-		if len(onlineDevice) > 0 {
-			// only report user has traffic > 0 bytes to filter out ping tests
-			var nocountUID = make(map[int]struct{})
-			for _, traffic := range userTraffic {
-				total := traffic.Upload + traffic.Download
-				if total <= 0 {
-					nocountUID[traffic.UID] = struct{}{}
-				}
-			}
-			for _, online := range onlineDevice {
-				if _, ok := nocountUID[online.UID]; !ok {
-					result = append(result, online)
-				}
-			}
-		}
+		result := filterOnlineUsersByTraffic(onlineDevice, userTraffic)
 		// Compute the indexed protocol name:
 		protocolName := c.getIndexedProtocolName()
 		// Report even if result is empty to notify backend of disconnections

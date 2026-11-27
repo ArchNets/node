@@ -186,3 +186,20 @@ func TestNodeStart_ShadowTLSFailureDoesNotAbortOthers(t *testing.T) {
 		t.Fatalf("expected node.Start() to succeed (ignoring ShadowTLS failure), got: %v", err)
 	}
 }
+
+func TestFilterOnlineUsersByTraffic(t *testing.T) {
+	online := []panel.OnlineUser{
+		{UID: 1, IP: "1.1.1.1"}, // 0 bytes (omitted from userTraffic) -> must NOT report
+		{UID: 2, IP: "2.2.2.2"}, // 2 KB url-test probe -> must NOT report
+		{UID: 3, IP: "3.3.3.3"}, // 20 KB real traffic -> MUST report
+	}
+	traffic := []panel.UserTraffic{
+		{UID: 2, Upload: 500, Download: 1500},
+		{UID: 3, Upload: 4000, Download: 16000},
+	}
+
+	got := filterOnlineUsersByTraffic(online, traffic)
+	if len(got) != 1 || got[0].UID != 3 || got[0].IP != "3.3.3.3" {
+		t.Fatalf("expected only UID 3 (> 8KB) to be reported online, got %+v", got)
+	}
+}
