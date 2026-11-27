@@ -25,6 +25,7 @@ type Controller struct {
 	onlineIpReportPeriodic  *task.Task
 	serviceProbePeriodic    *task.Task
 	isPrimaryReporter       bool // true if this controller is responsible for reporting status/online users
+	lastTrafficTotals       map[int]int64
 }
 
 // NewController return a Node controller with default parameters.

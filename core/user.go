@@ -101,6 +101,35 @@ func (vc *XrayCore) DelUsers(users []panel.UserInfo, tag string, nodeInfo *panel
 	return nil
 }
 
+// GetUserTrafficSnapshot returns current un-reset upload+download byte totals per UID for online activity detection.
+func (vc *XrayCore) GetUserTrafficSnapshot(tag string) map[int]int64 {
+	if vc == nil || vc.dispatcher == nil {
+		return nil
+	}
+	vc.users.mapLock.RLock()
+	defer vc.users.mapLock.RUnlock()
+	v, ok := vc.dispatcher.Counter.Load(tag)
+	if !ok {
+		return nil
+	}
+	c := v.(*counter.TrafficCounter)
+	snap := make(map[int]int64)
+	c.Counters.Range(func(key, value interface{}) bool {
+		email := key.(string)
+		uid := vc.users.uidMap[email]
+		if uid <= 0 {
+			return true
+		}
+		traffic := value.(*counter.TrafficStorage)
+		total := traffic.UpCounter.Load() + traffic.DownCounter.Load()
+		if total > 0 {
+			snap[uid] = total
+		}
+		return true
+	})
+	return snap
+}
+
 func (vc *XrayCore) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
 	if vc == nil || vc.dispatcher == nil {
 		return nil, nil
@@ -115,7 +144,8 @@ func (vc *XrayCore) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.Use
 			traffic := value.(*counter.TrafficStorage)
 			up := traffic.UpCounter.Load()
 			down := traffic.DownCounter.Load()
-			if up+down > int64(mintraffic*1000) {
+			total := up + down
+			if total > 0 && total >= int64(mintraffic) {
 				traffic.UpCounter.Store(0)
 				traffic.DownCounter.Store(0)
 				if vc.users.uidMap[email] == 0 {

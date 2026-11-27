@@ -158,22 +158,41 @@ func (c *Controller) userListMonitor() (err error) {
 
 const onlineMinTrafficBytes = 8192 // Ignore Clash url-test probes & idle keepalives
 
-func filterOnlineUsersByTraffic(onlineDevice []panel.OnlineUser, userTraffic []panel.UserTraffic) []panel.OnlineUser {
-	if len(onlineDevice) == 0 || len(userTraffic) == 0 {
-		return nil
+func computeTickTrafficDeltas(snap map[int]int64, reported []panel.UserTraffic, prevTotals map[int]int64) (map[int]int64, map[int]int64) {
+	reportedDelta := make(map[int]int64, len(reported))
+	for _, t := range reported {
+		reportedDelta[t.UID] = t.Upload + t.Download
 	}
-	activeUID := make(map[int]struct{}, len(userTraffic))
-	for _, traffic := range userTraffic {
-		if traffic.Upload+traffic.Download > onlineMinTrafficBytes {
-			activeUID[traffic.UID] = struct{}{}
+
+	tickDeltas := make(map[int]int64, len(snap)+len(reportedDelta))
+	nextTotals := make(map[int]int64, len(snap))
+
+	for uid, drained := range reportedDelta {
+		tickDeltas[uid] = drained
+		nextTotals[uid] = 0
+	}
+	for uid, curr := range snap {
+		if _, wasDrained := reportedDelta[uid]; wasDrained {
+			continue
 		}
+		prev := prevTotals[uid]
+		delta := curr - prev
+		if delta < 0 {
+			delta = curr
+		}
+		tickDeltas[uid] = delta
+		nextTotals[uid] = curr
 	}
-	if len(activeUID) == 0 {
+	return tickDeltas, nextTotals
+}
+
+func filterOnlineUsersByTraffic(onlineDevice []panel.OnlineUser, tickDeltas map[int]int64) []panel.OnlineUser {
+	if len(onlineDevice) == 0 || len(tickDeltas) == 0 {
 		return nil
 	}
 	var result []panel.OnlineUser
 	for _, online := range onlineDevice {
-		if _, ok := activeUID[online.UID]; ok {
+		if tickDeltas[online.UID] > onlineMinTrafficBytes {
 			result = append(result, online)
 		}
 	}
@@ -185,7 +204,10 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	if c.info.TrafficReportThreshold > 0 {
 		reportmin = c.info.TrafficReportThreshold
 	}
+	snap := c.server.GetUserTrafficSnapshot(c.tag)
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
+	tickDeltas, nextTotals := computeTickTrafficDeltas(snap, userTraffic, c.lastTrafficTotals)
+	c.lastTrafficTotals = nextTotals
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(c.getIndexedProtocolName(), &userTraffic)
 		if err != nil {
@@ -216,7 +238,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	} else {
 		onlineDevice := *onlineDevicePtr
 		// always report online users, even if empty, to clear backend state
-		result := filterOnlineUsersByTraffic(onlineDevice, userTraffic)
+		result := filterOnlineUsersByTraffic(onlineDevice, tickDeltas)
 		// Compute the indexed protocol name:
 		protocolName := c.getIndexedProtocolName()
 		// Report even if result is empty to notify backend of disconnections

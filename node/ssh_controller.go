@@ -241,19 +241,12 @@ func (c *SSHController) reportTask() error {
 		}
 	}
 
-	// Get online users from SSH core
+	// Get online users from SSH core (already filtered for > 8 KB payload within the 90s active window,
+	// independent of TrafficReportThreshold).
 	onlineUsers := c.sshCore.GetOnlineUsers()
-
-	// Filter out users with no real payload traffic (ignore url-test / keepalive probes <= 8 KB)
 	var result []panel.OnlineUser
-	trafficUIDs := make(map[int]bool)
-	for _, t := range userTraffic {
-		if t.Upload+t.Download > 8192 {
-			trafficUIDs[t.UID] = true
-		}
-	}
 	for _, online := range onlineUsers {
-		if trafficUIDs[online.UID] {
+		if online.IP != "" {
 			result = append(result, online)
 		}
 	}
