@@ -587,7 +587,7 @@ func (w *WireGuardCore) assignIP(id int) string {
 
 	subId := int64(id)
 	// Legacy 10.0.x.x expansion: 10.0.0.0/13 covering 10.0 - 10.7 (260,096 subscribers)
-	if baseIP[0] == 10 && baseIP[1] == 0 {
+	if baseIP[0] == 10 && baseIP[1] == 0 && prefix >= 13 {
 		const hostCount = 8 * 256 * 127
 		slot := (subId - 1) % hostCount
 		dIndex := slot % 127
@@ -598,29 +598,57 @@ func (w *WireGuardCore) assignIP(id int) string {
 		return fmt.Sprintf("10.%d.%d.%d", bOffset, cOffset, byteD)
 	}
 
-	// For /24 or smaller: only byte 3 varies
+	netIP := baseIP
+	if ipnet != nil && ipnet.Mask != nil {
+		if masked := baseIP.Mask(ipnet.Mask).To4(); masked != nil {
+			netIP = masked
+		}
+	} else if prefix == 16 {
+		netIP = net.IPv4(baseIP[0], baseIP[1], 0, 0).To4()
+	}
+
+	// /24 .. /30: only last octet varies inside the masked network
 	if prefix >= 24 {
-		slot := (subId - 1) % 127
-		byteD := int(slot*2) + 2
-		return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], baseIP[1], baseIP[2], byteD)
+		hosts := int64(127)
+		if prefix > 24 {
+			if prefix > 30 {
+				prefix = 30
+			}
+			hosts = int64(1<<(32-prefix))/2 - 1
+			if hosts < 1 {
+				hosts = 1
+			}
+		}
+		slot := (subId - 1) % hosts
+		byteD := int(netIP[3]) + int(slot*2) + 2
+		return fmt.Sprintf("%d.%d.%d.%d", netIP[0], netIP[1], netIP[2], byteD)
 	}
 
-	// For /16 .. /23: bound bOffset within prefix host space
-	bShift := 16 - prefix
-	if bShift < 0 {
-		bShift = 0
+	// /16 .. /23: only byte 2 and byte 3 vary inside the masked network
+	if prefix >= 16 {
+		cBlocks := int64(1 << (24 - prefix))
+		hostCount := cBlocks * 127
+		slot := (subId - 1) % hostCount
+		dIndex := slot % 127
+		cOffset := slot / 127
+		byteD := int(dIndex*2) + 2
+		return fmt.Sprintf("%d.%d.%d.%d", netIP[0], netIP[1], int(netIP[2])+int(cOffset), byteD)
 	}
-	bBlocks := int64(1 << bShift)
+
+	// /8 .. /15: byte 1, byte 2, and byte 3 vary inside the masked network
+	if prefix < 8 {
+		prefix = 8
+	}
+	bBlocks := int64(1 << (16 - prefix))
 	hostCount := bBlocks * 256 * 127
-
 	slot := (subId - 1) % hostCount
 	dIndex := slot % 127
 	upper := slot / 127
 	cOffset := upper % 256
-	bOffset := (upper / 256) % bBlocks
+	bOffset := upper / 256
 	byteD := int(dIndex*2) + 2
 
-	return fmt.Sprintf("%d.%d.%d.%d", baseIP[0], int(baseIP[1])+int(bOffset), cOffset, byteD)
+	return fmt.Sprintf("%d.%d.%d.%d", netIP[0], int(netIP[1])+int(bOffset), cOffset, byteD)
 }
 
 // collectStats collects traffic statistics from WireGuard

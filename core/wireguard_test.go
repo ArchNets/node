@@ -98,6 +98,21 @@ func TestWireGuardAssignIPAndPoolSubnet(t *testing.T) {
 		t.Fatalf("expected 192.168.10.1/24 to stay strictly in 192.168.10.x, got %q", got)
 	}
 
+	coreSlash20 := &WireGuardCore{Address: "10.8.16.1/20"}
+	if got := coreSlash20.assignIP(33455); got != "10.8.23.108" {
+		t.Fatalf("expected 10.8.16.1/20 to stay strictly inside 10.8.16.0/20, got %q", got)
+	}
+
+	coreSlash14 := &WireGuardCore{Address: "10.13.0.1/14"}
+	if got := coreSlash14.assignIP(33455); got != "10.13.7.108" {
+		t.Fatalf("expected 10.13.0.1/14 to stay strictly inside 10.12.0.0/14, got %q", got)
+	}
+
+	coreSlash25 := &WireGuardCore{Address: "192.168.10.129/25"}
+	if got := coreSlash25.assignIP(70); got != "192.168.10.142" {
+		t.Fatalf("expected 192.168.10.129/25 to stay strictly inside .128/25, got %q", got)
+	}
+
 	subnetTests := []struct {
 		address string
 		want    string
