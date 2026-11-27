@@ -411,9 +411,22 @@ func TestSSHCoreGetOnlineUsers(t *testing.T) {
 	// Give time for session to be registered
 	time.Sleep(100 * time.Millisecond)
 
+	// Idle pooled SSH session with 0 payload must NOT count as online
+	if online = sshCore.GetOnlineUsers(); len(online) != 0 {
+		t.Errorf("Expected 0 online users for idle SSH session, got %d", len(online))
+	}
+
+	// Small url-test probe (< 8 KB) must still NOT mark user online
+	sshCore.addTraffic(1, 2048, true)
+	if online = sshCore.GetOnlineUsers(); len(online) != 0 {
+		t.Errorf("Expected 0 online users below 8KB payload threshold, got %d", len(online))
+	}
+
+	// Real payload (> 8 KB) marks active SSH session online
+	sshCore.addTraffic(1, 16384, true)
 	online = sshCore.GetOnlineUsers()
 	if len(online) != 1 {
-		t.Errorf("Expected 1 online user, got %d", len(online))
+		t.Errorf("Expected 1 online user after real payload, got %d", len(online))
 	}
 	if len(online) > 0 && online[0].UID != 1 {
 		t.Errorf("Expected user 1 online, got user %d", online[0].UID)

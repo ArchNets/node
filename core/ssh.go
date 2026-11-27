@@ -23,6 +23,18 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	sshOnlineActiveWindow    = 90 * time.Second
+	sshOnlineActivityWindow  = 10 * time.Second
+	sshOnlineMinPayloadBytes = 8192 // Ignore Clash url-test probes & idle SSH pools
+)
+
+type sshActivityState struct {
+	windowStart  time.Time
+	windowBytes  int64
+	lastDataTime time.Time
+}
+
 // SSHCore manages the SSH tunnel server
 type SSHCore struct {
 	Tag          string
@@ -32,14 +44,15 @@ type SSHCore struct {
 	listener     net.Listener
 	users        *SSHUserMap
 	limiterRef   *limiter.Limiter
-	sessions     sync.Map // map[string]*SSHSession - key: "uid:ip"
+	sessions     sync.Map // map[string]*SSHSession - key: "uid:ip:ptr"
 	pendingConns sync.Map // map[net.Conn]struct{}
 	running      atomic.Bool
 	wg           sync.WaitGroup
 
-	// Traffic accounting
-	trafficMu sync.RWMutex
-	traffic   map[int]*UserTraffic // key: uid
+	// Traffic accounting & active payload tracking
+	trafficMu   sync.RWMutex
+	traffic     map[int]*UserTraffic       // key: uid
+	activity    map[int]*sshActivityState  // key: uid
 }
 
 // SSHUserMap stores user credentials for authentication
@@ -79,7 +92,8 @@ func NewSSHCore(tag string, port int, hostKeyPath string, udpgwAddr string) (*SS
 			idToUUID: make(map[int]string),
 			users:    make(map[string]string),
 		},
-		traffic: make(map[int]*UserTraffic),
+		traffic:  make(map[int]*UserTraffic),
+		activity: make(map[int]*sshActivityState),
 	}
 
 	// Load or generate host key
@@ -270,8 +284,9 @@ func (s *SSHCore) handleConnection(netConn net.Conn) {
 		ip = sshConn.Permissions.Extensions["ip"]
 	}
 
-	// Track session
-	sessionKey := fmt.Sprintf("%d:%s", uid, ip)
+	// Track session with a unique connection pointer so closing one pooled connection
+	// does not evict another active connection from the same (uid, ip).
+	sessionKey := fmt.Sprintf("%d:%s:%p", uid, ip, sshConn)
 	session := &SSHSession{
 		UID:         uid,
 		IP:          ip,
@@ -443,7 +458,7 @@ func (s *SSHCore) copyWithAccounting(dst io.Writer, src io.Reader, uid int, isDo
 	}
 }
 
-// addTraffic adds traffic to user's counter
+// addTraffic adds traffic to user's counter and tracks active payload windows
 func (s *SSHCore) addTraffic(uid int, bytes int64, isDownload bool) {
 	s.trafficMu.Lock()
 	defer s.trafficMu.Unlock()
@@ -456,6 +471,23 @@ func (s *SSHCore) addTraffic(uid int, bytes int64, isDownload bool) {
 		s.traffic[uid].Download += bytes
 	} else {
 		s.traffic[uid].Upload += bytes
+	}
+
+	if bytes > 0 {
+		now := time.Now()
+		st := s.activity[uid]
+		if st == nil {
+			st = &sshActivityState{windowStart: now}
+			s.activity[uid] = st
+		}
+		if now.Sub(st.windowStart) > sshOnlineActivityWindow {
+			st.windowStart = now
+			st.windowBytes = 0
+		}
+		st.windowBytes += bytes
+		if st.windowBytes > sshOnlineMinPayloadBytes {
+			st.lastDataTime = now
+		}
 	}
 }
 
@@ -494,13 +526,19 @@ func (s *SSHCore) AddUsers(users []panel.UserInfo) {
 // DelUsers removes users from the SSH server
 func (s *SSHCore) DelUsers(users []panel.UserInfo) {
 	s.users.mu.Lock()
-	defer s.users.mu.Unlock()
-
 	for _, user := range users {
 		delete(s.users.uuidToID, user.Uuid)
 		delete(s.users.idToUUID, user.Id)
 		delete(s.users.users, user.Uuid)
 	}
+	s.users.mu.Unlock()
+
+	s.trafficMu.Lock()
+	for _, user := range users {
+		delete(s.activity, user.Id)
+		delete(s.traffic, user.Id)
+	}
+	s.trafficMu.Unlock()
 
 	log.WithFields(log.Fields{
 		"tag":   s.Tag,
@@ -508,11 +546,31 @@ func (s *SSHCore) DelUsers(users []panel.UserInfo) {
 	}).Info("SSH users removed")
 }
 
-// GetOnlineUsers returns list of currently connected users
+// GetOnlineUsers returns list of currently connected users that transferred real payload (> 8 KB) within the active window
 func (s *SSHCore) GetOnlineUsers() []panel.OnlineUser {
 	var online []panel.OnlineUser
+	now := time.Now()
+
+	s.trafficMu.RLock()
+	activeUIDs := make(map[int]bool)
+	for uid, st := range s.activity {
+		if st != nil && !st.lastDataTime.IsZero() && now.Sub(st.lastDataTime) <= sshOnlineActiveWindow {
+			activeUIDs[uid] = true
+		}
+	}
+	s.trafficMu.RUnlock()
+
+	seen := make(map[string]bool)
 	s.sessions.Range(func(key, value interface{}) bool {
 		if session, ok := value.(*SSHSession); ok {
+			if !activeUIDs[session.UID] {
+				return true
+			}
+			dedup := fmt.Sprintf("%d:%s", session.UID, session.IP)
+			if seen[dedup] {
+				return true
+			}
+			seen[dedup] = true
 			online = append(online, panel.OnlineUser{
 				UID: session.UID,
 				IP:  session.IP,
