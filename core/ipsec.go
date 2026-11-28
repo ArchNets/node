@@ -385,12 +385,24 @@ func (c *IPsecCore) writeSecretsFiles() error {
 	return nil
 }
 
+func compactCmdOutput(out []byte) string {
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return ""
+	}
+	s := strings.Join(fields, " ")
+	if len(s) > 220 {
+		return s[:220] + "..."
+	}
+	return s
+}
+
 func (c *IPsecCore) reloadSecretsOnly() error {
 	if _, err := os.Stat("/var/run/charon.vici"); err != nil {
 		return c.reloadStrongSwan()
 	}
 	if out, err := exec.Command("swanctl", "--load-creds").CombinedOutput(); err != nil {
-		log.WithField("output", string(out)).Warn("swanctl --load-creds failed, falling back to full reload")
+		log.WithField("output", compactCmdOutput(out)).Warn("swanctl --load-creds failed, falling back to full reload")
 		return c.reloadStrongSwan()
 	}
 	return nil
@@ -1099,7 +1111,7 @@ func (c *IPsecCore) reloadStrongSwan() error {
 	}
 
 	if out, err := exec.Command("swanctl", "--load-all").CombinedOutput(); err != nil {
-		return fmt.Errorf("swanctl --load-all failed: %s, output: %s", err, string(out))
+		return fmt.Errorf("swanctl --load-all failed: %s, output: %s", err, compactCmdOutput(out))
 	}
 	return nil
 }

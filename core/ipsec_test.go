@@ -63,6 +63,10 @@ func TestIPsecProcessSasStats_ActiveThreshold(t *testing.T) {
 	if c.users[2].DeviceLimit != 3 {
 		t.Fatalf("expected DeviceLimit=3 after UpdateUserLimits, got %d", c.users[2].DeviceLimit)
 	}
+
+	if got := compactCmdOutput([]byte("line1\n  line2\tline3\n")); got != "line1 line2 line3" {
+		t.Fatalf("unexpected compactCmdOutput: %q", got)
+	}
 }
 
 func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {

@@ -3,9 +3,12 @@
 package transport
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -124,16 +127,31 @@ func socketPreHandshakeControl(network, address string, c syscall.RawConn) error
 	return nil
 }
 
-// ensureLinuxKernelTCPTuning applies best-effort high-BDP sysctl parameters when running with root privileges.
-// Matches WaterWall 1.5.2's 128 MiB buffer ceilings, 250k backlog, and sets tcp_no_metrics_save=1 so temporary
-// border congestion does not degrade TCP throughput permanently.
+// ensureLinuxKernelTCPTuning applies RAM-scaled high-BDP sysctl parameters when running with root privileges.
 func ensureLinuxKernelTCPTuning() {
 	kernelTuneOnce.Do(func() {
+		bufMax := "134217728"
+		conntrackTarget := 262144
+		var si unix.Sysinfo_t
+		if err := unix.Sysinfo(&si); err == nil && si.Totalram > 0 {
+			totalBytes := uint64(si.Totalram) * uint64(si.Unit)
+			switch {
+			case totalBytes <= 1500*1024*1024:
+				bufMax = "16777216" // <= 1.5 GiB RAM: cap TCP buffers at 16 MiB to prevent kernel slab OOM
+				conntrackTarget = 65536
+			case totalBytes <= 4800*1024*1024:
+				bufMax = "67108864" // <= 4.5 GiB RAM: 64 MiB buffer ceiling
+				conntrackTarget = 131072
+			}
+		}
+
+		tcpRmem := fmt.Sprintf("4096 87380 %s", bufMax)
+		tcpWmem := fmt.Sprintf("4096 65536 %s", bufMax)
 		sysctls := map[string]string{
-			"/proc/sys/net/core/rmem_max":                  "134217728",
-			"/proc/sys/net/core/wmem_max":                  "134217728",
-			"/proc/sys/net/ipv4/tcp_rmem":                  "4096 87380 134217728",
-			"/proc/sys/net/ipv4/tcp_wmem":                  "4096 65536 134217728",
+			"/proc/sys/net/core/rmem_max":                  bufMax,
+			"/proc/sys/net/core/wmem_max":                  bufMax,
+			"/proc/sys/net/ipv4/tcp_rmem":                  tcpRmem,
+			"/proc/sys/net/ipv4/tcp_wmem":                  tcpWmem,
 			"/proc/sys/net/core/netdev_max_backlog":         "250000",
 			"/proc/sys/net/core/somaxconn":                 "65535",
 			"/proc/sys/net/ipv4/tcp_no_metrics_save":        "1",
@@ -145,12 +163,17 @@ func ensureLinuxKernelTCPTuning() {
 		for path, val := range sysctls {
 			_ = os.WriteFile(path, []byte(val+"\n"), 0644)
 		}
-		// Also execute sysctl -w for environments where /proc/sys is mounted or verified via sysctl
+		// Raise nf_conntrack_max if kernel default (e.g. 8192 on 1GB VPS) is too small for VPN load
+		if raw, err := os.ReadFile("/proc/sys/net/netfilter/nf_conntrack_max"); err == nil {
+			if cur, convErr := strconv.Atoi(strings.TrimSpace(string(raw))); convErr == nil && cur > 0 && cur < conntrackTarget {
+				_ = os.WriteFile("/proc/sys/net/netfilter/nf_conntrack_max", []byte(strconv.Itoa(conntrackTarget)+"\n"), 0644)
+			}
+		}
 		commands := []string{
-			"net.core.rmem_max=134217728",
-			"net.core.wmem_max=134217728",
-			"net.ipv4.tcp_rmem=4096 87380 134217728",
-			"net.ipv4.tcp_wmem=4096 65536 134217728",
+			"net.core.rmem_max=" + bufMax,
+			"net.core.wmem_max=" + bufMax,
+			"net.ipv4.tcp_rmem=" + tcpRmem,
+			"net.ipv4.tcp_wmem=" + tcpWmem,
 			"net.ipv4.tcp_window_scaling=1",
 			"net.ipv4.tcp_no_metrics_save=1",
 			"fs.pipe-max-size=1048576",
