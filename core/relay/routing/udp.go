@@ -44,10 +44,15 @@ func putUDPFrameBuffer(b []byte) {
 const (
 	UDPSessionIdleTime       = 60 * time.Second
 	UDPGamingSessionIdleTime = 5 * time.Minute
+	UDPLongSessionIdleTime   = 5 * time.Minute
 )
 
-func udpSessionIdleTimeout(gamingMode bool) time.Duration {
-	if gamingMode {
+func isLongIdleUDPPort(targetPort int) bool {
+	return targetPort == 500 || targetPort == 4500 || targetPort == 1701
+}
+
+func udpSessionIdleTimeout(gamingMode bool, targetPort int) time.Duration {
+	if gamingMode || isLongIdleUDPPort(targetPort) {
 		return UDPGamingSessionIdleTime
 	}
 	return UDPSessionIdleTime
@@ -331,9 +336,10 @@ func StartUDPListenerLoop(
 	}
 	var sessionsMu sync.Mutex
 	sessions := make(map[string]*UDPSession)
+	inflight := make(map[string]struct{})
 	loopCtx, loopCancel := context.WithCancel(ctx)
 
-	idleTimeout := udpSessionIdleTimeout(gamingMode)
+	idleTimeout := udpSessionIdleTimeout(gamingMode, targetPort)
 	// Session idle reaper
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
@@ -401,11 +407,22 @@ func StartUDPListenerLoop(
 			key := clientAddr.String()
 			sessionsMu.Lock()
 			sess, exists := sessions[key]
+			_, claiming := inflight[key]
+			if !exists && !claiming {
+				inflight[key] = struct{}{}
+			}
 			sessionsMu.Unlock()
 
 			if !exists {
+				if claiming {
+					// Another goroutine is already claiming a stream for this clientAddr; skip duplicate claim
+					continue
+				}
 				stream, claimErr := claimStreamFn(3 * time.Second)
 				if claimErr != nil {
+					sessionsMu.Lock()
+					delete(inflight, key)
+					sessionsMu.Unlock()
 					log.WithFields(log.Fields{
 						"targetPort": targetPort,
 						"client":     clientAddr.String(),
@@ -423,6 +440,9 @@ func StartUDPListenerLoop(
 					proto = RouteProtoUDPGaming
 				}
 				if err := WriteRoutingHeader(stream, proto, uint16(targetPort)); err != nil {
+					sessionsMu.Lock()
+					delete(inflight, key)
+					sessionsMu.Unlock()
 					_ = stream.Close()
 					continue
 				}
@@ -430,6 +450,9 @@ func StartUDPListenerLoop(
 				if gamingMode {
 					_, _ = rand.Read(sessKey[:])
 					if _, err := stream.Write(sessKey[:]); err != nil {
+						sessionsMu.Lock()
+						delete(inflight, key)
+						sessionsMu.Unlock()
 						_ = stream.Close()
 						continue
 					}
@@ -472,6 +495,7 @@ func StartUDPListenerLoop(
 				twin := sess.StreamTwin
 
 				sessionsMu.Lock()
+				delete(inflight, key)
 				sessions[key] = sess
 				sessionsMu.Unlock()
 
@@ -482,7 +506,7 @@ func StartUDPListenerLoop(
 					var lenBuf [2]byte
 					frameBuf := make([]byte, 65536)
 					for {
-						_ = st.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+						_ = st.SetReadDeadline(time.Now().Add(idleTimeout))
 						if _, err := io.ReadFull(st, lenBuf[:]); err != nil {
 							return
 						}
@@ -874,6 +898,7 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 
 	var exitDedup udpSeqDeduplicator
 	var exitSeq atomic.Uint32
+	idleTimeout := udpSessionIdleTimeout(gamingMode, int(targetPort))
 	done := make(chan struct{}, 2)
 
 	go func() {
@@ -881,7 +906,7 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		var lenBuf [2]byte
 		payload := make([]byte, 65536)
 		for {
-			_ = stream.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+			_ = stream.SetReadDeadline(time.Now().Add(idleTimeout))
 			if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
 				return
 			}
@@ -916,7 +941,7 @@ func HandleExitUDPForward(stream net.Conn, targetIP string, targetPort uint16, s
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 65536)
 		for {
-			_ = udpConn.SetReadDeadline(time.Now().Add(UDPSessionIdleTime))
+			_ = udpConn.SetReadDeadline(time.Now().Add(idleTimeout))
 			readOffset := 2
 			if gamingMode {
 				readOffset = 6 // [2B length][4B seq]

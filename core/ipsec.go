@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -49,13 +50,15 @@ type IPsecCore struct {
 	TProxyBypassUDP     bool
 	DropICMPUnreachable bool
 
-	mu    sync.RWMutex
-	users map[int]*IPsecUser // key: subscription ID
+	mu          sync.RWMutex
+	users       map[int]*IPsecUser    // key: subscription ID
+	usersByName map[string]*IPsecUser // key: EAP/CHAP username
 
 	// Traffic accounting
 	trafficMu      sync.Mutex
 	traffic        map[int]*UserTraffic
 	lastSasStats   map[string]*sasStats
+	cachedOnline   []panel.OnlineUser
 	statsCollector *ipsecStatsCollector
 }
 
@@ -79,6 +82,7 @@ func NewIPsecCore(cfg IPsecConfig) *IPsecCore {
 	return &IPsecCore{
 		IPsecConfig:  cfg,
 		users:        make(map[int]*IPsecUser),
+		usersByName:  make(map[string]*IPsecUser),
 		traffic:      make(map[int]*UserTraffic),
 		lastSasStats: make(map[string]*sasStats),
 	}
@@ -125,6 +129,8 @@ func (c *IPsecCore) Start() error {
 
 	if c.Mode == "l2tp" {
 		_ = os.Remove(fmt.Sprintf("/tmp/archnet-ppp-%s.map", c.Tag))
+	} else {
+		c.writeCharonTuningConf()
 	}
 
 	// Setup NAT
@@ -192,11 +198,28 @@ func (c *IPsecCore) Stop() {
 	}).Info("IPsec core stopped")
 }
 
+// writeCharonTuningConf tunes strongSwan charon hash tables and worker threads for many concurrent users.
+func (c *IPsecCore) writeCharonTuningConf() {
+	const dir = "/etc/strongswan.d/charon"
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	tuning := `# Managed by ArchNet IPsecCore for high-concurrency IPsec scaling
+charon {
+    threads = 32
+    ikesa_table_size = 128
+    ikesa_table_segments = 16
+    half_open_timeout = 30
+    dos_protection = yes
+}
+`
+	_ = os.WriteFile(filepath.Join(dir, "archnet-tuning.conf"), []byte(tuning), 0644)
+}
 // AddUsers parses ServiceId JSON and adds users.
 func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	if len(users) == 0 {
+		return
+	}
 	type VPNIdentity struct {
 		IKEv2 *struct {
 			Username string `json:"username"`
@@ -204,6 +227,7 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 		} `json:"ikev2,omitempty"`
 	}
 
+	c.mu.Lock()
 	for _, user := range users {
 		if user.ServiceId == "" {
 			continue
@@ -215,21 +239,25 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 
 		// The backend puts creds in "ikev2" key even for l2tp
 		if identity.IKEv2 != nil && identity.IKEv2.Username != "" {
-			c.users[user.Id] = &IPsecUser{
+			u := &IPsecUser{
 				UID:      user.Id,
 				UUID:     user.Uuid,
 				Username: identity.IKEv2.Username,
 				Password: identity.IKEv2.Password,
 			}
+			c.users[user.Id] = u
+			c.usersByName[u.Username] = u
 		}
 	}
+	err := c.writeSecretsFiles()
+	c.mu.Unlock()
 
-	if err := c.writeConfigs(); err != nil {
-		log.WithError(err).Error("Failed to write ipsec configs after adding users")
+	if err != nil {
+		log.WithError(err).Error("Failed to write ipsec secrets after adding users")
 		return
 	}
-	if err := c.reloadStrongSwan(); err != nil {
-		log.WithError(err).Error("Failed to reload strongSwan after adding users")
+	if err := c.reloadSecretsOnly(); err != nil {
+		log.WithError(err).Error("Failed to reload strongSwan secrets after adding users")
 	}
 
 	log.WithFields(log.Fields{
@@ -238,27 +266,68 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 	}).Info("IPsec users added")
 }
 
-// DelUsers removes users.
+// DelUsers removes users and immediately terminates any active sessions belonging to them.
 func (c *IPsecCore) DelUsers(users []panel.UserInfo) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, user := range users {
-		delete(c.users, user.Id)
-	}
-
-	if err := c.writeConfigs(); err != nil {
-		log.WithError(err).Error("Failed to write ipsec configs after deleting users")
+	if len(users) == 0 {
 		return
 	}
-	if err := c.reloadStrongSwan(); err != nil {
-		log.WithError(err).Error("Failed to reload strongSwan after deleting users")
+	removedNames := make(map[string]bool)
+
+	c.mu.Lock()
+	for _, user := range users {
+		if existing, ok := c.users[user.Id]; ok && existing != nil {
+			removedNames[existing.Username] = true
+			delete(c.usersByName, existing.Username)
+		}
+		delete(c.users, user.Id)
+	}
+	err := c.writeSecretsFiles()
+	c.mu.Unlock()
+
+	if err != nil {
+		log.WithError(err).Error("Failed to write ipsec secrets after deleting users")
+		return
+	}
+	if err := c.reloadSecretsOnly(); err != nil {
+		log.WithError(err).Error("Failed to reload strongSwan secrets after deleting users")
+	}
+
+	if len(removedNames) > 0 {
+		c.terminateUserSessions(removedNames)
 	}
 
 	log.WithFields(log.Fields{
 		"tag":   c.Tag,
 		"count": len(users),
 	}).Info("IPsec users removed")
+}
+
+// terminateUserSessions disconnects active IKEv2 SAs or L2TP PPP interfaces for removed/disabled users.
+func (c *IPsecCore) terminateUserSessions(usernames map[string]bool) {
+	if len(usernames) == 0 {
+		return
+	}
+	if c.Mode == "l2tp" {
+		mapFile := fmt.Sprintf("/tmp/archnet-ppp-%s.map", c.Tag)
+		data, err := os.ReadFile(mapFile)
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 && usernames[parts[0]] {
+				_ = exec.Command("ip", "link", "set", parts[1], "down").Run()
+			}
+		}
+		return
+	}
+
+	sas := c.parseSasOutput()
+	for _, sa := range sas {
+		if usernames[sa.Username] && sa.SAId != "" {
+			_ = exec.Command("swanctl", "--terminate", "--ike-id", sa.SAId).Run()
+		}
+	}
 }
 
 // GetTrafficAndReset returns traffic and resets counters.
@@ -271,39 +340,52 @@ func (c *IPsecCore) GetTrafficAndReset() map[int]*UserTraffic {
 	return result
 }
 
-// GetOnlineUsers returns currently connected users via swanctl that transferred > 8 KB within the active window.
+// GetOnlineUsers returns currently connected users cached from the 10s stats collector (> 8 KB within active window).
 func (c *IPsecCore) GetOnlineUsers() []panel.OnlineUser {
-	var online []panel.OnlineUser
-	sas := c.parseSasOutput()
-	now := time.Now()
-
 	c.trafficMu.Lock()
-	activeUsernames := make(map[string]bool)
-	for uname, st := range c.lastSasStats {
-		if st != nil && !st.LastDataTime.IsZero() && now.Sub(st.LastDataTime) <= ipsecOnlineActiveWindow {
-			activeUsernames[uname] = true
-		}
+	if c.cachedOnline != nil {
+		out := make([]panel.OnlineUser, len(c.cachedOnline))
+		copy(out, c.cachedOnline)
+		c.trafficMu.Unlock()
+		return out
 	}
 	c.trafficMu.Unlock()
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	seen := make(map[int]bool)
-	for _, sa := range sas {
-		if !activeUsernames[sa.Username] {
-			continue
-		}
-		for _, user := range c.users {
-			if sa.Username == user.Username && !seen[user.UID] {
-				seen[user.UID] = true
-				online = append(online, panel.OnlineUser{
-					UID: user.UID,
-					IP:  sa.RemoteIP,
-				})
-			}
+	// Initial fallback before first collector tick
+	c.collectStats()
+	c.trafficMu.Lock()
+	defer c.trafficMu.Unlock()
+	out := make([]panel.OnlineUser, len(c.cachedOnline))
+	copy(out, c.cachedOnline)
+	return out
+}
+
+func (c *IPsecCore) writeSecretsFiles() error {
+	if err := os.MkdirAll("/etc/swanctl/conf.d", 0755); err != nil {
+		return err
+	}
+	secrets := c.generateSecrets()
+	secretsPath := fmt.Sprintf("/etc/swanctl/conf.d/%s-secrets.conf", c.Tag)
+	if err := os.WriteFile(secretsPath, []byte(secrets), 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", secretsPath, err)
+	}
+	if c.Mode == "l2tp" {
+		if err := upsertTaggedChapSecrets("/etc/ppp/chap-secrets", c.Tag, c.generateChapSecrets()); err != nil {
+			return err
 		}
 	}
-	return online
+	return nil
+}
+
+func (c *IPsecCore) reloadSecretsOnly() error {
+	if _, err := os.Stat("/var/run/charon.vici"); err != nil {
+		return c.reloadStrongSwan()
+	}
+	if out, err := exec.Command("swanctl", "--load-secrets").CombinedOutput(); err != nil {
+		log.WithField("output", string(out)).Warn("swanctl --load-secrets failed, falling back to full reload")
+		return c.reloadStrongSwan()
+	}
+	return nil
 }
 
 // writeConfigs generates appropriate configs based on mode.
@@ -807,6 +889,8 @@ ipcp-accept-remote
 auth
 mtu %d
 mru %d
+lcp-echo-interval 30
+lcp-echo-failure 4
 nodefaultroute
 lock
 proxyarp
@@ -1100,8 +1184,11 @@ func (c *IPsecCore) setupNAT() error {
 			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -F %s", chainName))
 		}
 
-		// Skip traffic destined to VPN subnet itself
-		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet))
+		// Skip traffic destined to VPN subnet(s) themselves
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, subnet))
+		if tproxySubnet != "" && tproxySubnet != subnet {
+			_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -d %s -j RETURN", chainName, tproxySubnet))
+		}
 
 		// TPROXY capture rules for TCP and UDP
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -A %s -p tcp -j TPROXY --on-port %d --tproxy-mark 1", chainName, c.TProxyPort))
@@ -1189,6 +1276,8 @@ type ipsecStatsCollector struct {
 }
 
 type parsedSA struct {
+	SAKey    string
+	SAId     string
 	Username string
 	RemoteIP string
 	InBytes  int64
@@ -1196,7 +1285,11 @@ type parsedSA struct {
 }
 
 var (
+	reSAHeader = regexp.MustCompile(`^([A-Za-z0-9_.:-]+):\s+#(\d+),`)
 	reRemote   = regexp.MustCompile(`remote\s+'([^']+)'\s+@\s+([0-9a-fA-F:.]+)`)
+	reEAPUser  = regexp.MustCompile(`EAP:\s+'([^']+)'`)
+	reInLine   = regexp.MustCompile(`^\s*in\s+[0-9a-fA-F]+,\s*(\d+)\s+bytes`)
+	reOutLine  = regexp.MustCompile(`^\s*out\s+[0-9a-fA-F]+,\s*(\d+)\s+bytes`)
 	reInBytes  = regexp.MustCompile(`bytes_i(?:n)?=(\d+)`)
 	reOutBytes = regexp.MustCompile(`bytes_o(?:ut)?=(\d+)`)
 	reBytesAlt = regexp.MustCompile(`(\d+)\s+bytes_i.*?(\d+)\s+bytes_o`)
@@ -1219,17 +1312,41 @@ func parseSwanctlSasText(output string) []parsedSA {
 	var current *parsedSA
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
-		if m := reRemote.FindStringSubmatch(line); len(m) == 3 {
+		if m := reSAHeader.FindStringSubmatch(line); len(m) == 3 {
 			if current != nil {
 				result = append(result, *current)
 			}
 			current = &parsedSA{
-				Username: m[1],
-				RemoteIP: m[2],
+				SAKey: m[1] + ":#" + m[2],
+				SAId:  m[2],
+			}
+			continue
+		}
+		if m := reRemote.FindStringSubmatch(line); len(m) == 3 {
+			if current == nil {
+				current = &parsedSA{SAKey: m[1] + "@" + m[2]}
+			}
+			current.Username = m[1]
+			current.RemoteIP = m[2]
+			if em := reEAPUser.FindStringSubmatch(line); len(em) == 2 {
+				current.Username = em[1]
+			}
+			if current.SAKey == "" {
+				current.SAKey = current.Username + "@" + current.RemoteIP
 			}
 			continue
 		}
 		if current == nil {
+			continue
+		}
+		if m := reInLine.FindStringSubmatch(line); len(m) == 2 {
+			v, _ := strconv.ParseInt(m[1], 10, 64)
+			current.InBytes += v
+			continue
+		}
+		if m := reOutLine.FindStringSubmatch(line); len(m) == 2 {
+			v, _ := strconv.ParseInt(m[1], 10, 64)
+			current.OutBytes += v
 			continue
 		}
 		if m := reInBytes.FindStringSubmatch(line); len(m) == 2 {
@@ -1256,9 +1373,16 @@ func (c *IPsecCore) collectStats() {
 
 func (c *IPsecCore) processSasStats(sas []parsedSA) {
 	c.mu.RLock()
-	usernameToUID := make(map[string]int)
-	for _, user := range c.users {
-		usernameToUID[user.Username] = user.UID
+	usernameToUID := make(map[string]int, len(c.usersByName))
+	for uname, u := range c.usersByName {
+		if u != nil {
+			usernameToUID[uname] = u.UID
+		}
+	}
+	if len(usernameToUID) == 0 && len(c.users) > 0 {
+		for _, user := range c.users {
+			usernameToUID[user.Username] = user.UID
+		}
 	}
 	c.mu.RUnlock()
 
@@ -1267,16 +1391,23 @@ func (c *IPsecCore) processSasStats(sas []parsedSA) {
 	defer c.trafficMu.Unlock()
 
 	present := make(map[string]bool, len(sas))
+	onlineSeen := make(map[int]bool)
+	onlineList := make([]panel.OnlineUser, 0, len(sas))
+
 	for _, sa := range sas {
-		present[sa.Username] = true
+		statKey := sa.SAKey
+		if statKey == "" {
+			statKey = sa.Username + "@" + sa.RemoteIP
+		}
+		present[statKey] = true
 		uid, ok := usernameToUID[sa.Username]
 		if !ok {
 			continue
 		}
-		last, exists := c.lastSasStats[sa.Username]
+		last, exists := c.lastSasStats[statKey]
 		if !exists {
 			last = &sasStats{WindowStart: now}
-			c.lastSasStats[sa.Username] = last
+			c.lastSasStats[statKey] = last
 		}
 		var dlDelta, ulDelta int64
 		if sa.OutBytes >= last.OutBytes {
@@ -1293,29 +1424,38 @@ func (c *IPsecCore) processSasStats(sas []parsedSA) {
 		last.OutBytes = sa.OutBytes
 
 		totalDelta := dlDelta + ulDelta
-		if totalDelta == 0 {
-			continue
-		}
-		if now.Sub(last.WindowStart) > ipsecOnlineActivityWindow {
-			last.WindowStart = now
-			last.WindowBytes = 0
-		}
-		last.WindowBytes += totalDelta
-		if last.WindowBytes > ipsecOnlineMinPayloadBytes {
-			last.LastDataTime = now
+		if totalDelta > 0 {
+			if now.Sub(last.WindowStart) > ipsecOnlineActivityWindow {
+				last.WindowStart = now
+				last.WindowBytes = 0
+			}
+			last.WindowBytes += totalDelta
+			if last.WindowBytes > ipsecOnlineMinPayloadBytes {
+				last.LastDataTime = now
+			}
+
+			if c.traffic[uid] == nil {
+				c.traffic[uid] = &UserTraffic{}
+			}
+			c.traffic[uid].Download += dlDelta
+			c.traffic[uid].Upload += ulDelta
 		}
 
-		if c.traffic[uid] == nil {
-			c.traffic[uid] = &UserTraffic{}
+		if !last.LastDataTime.IsZero() && now.Sub(last.LastDataTime) <= ipsecOnlineActiveWindow && !onlineSeen[uid] {
+			onlineSeen[uid] = true
+			onlineList = append(onlineList, panel.OnlineUser{
+				UID: uid,
+				IP:  sa.RemoteIP,
+			})
 		}
-		c.traffic[uid].Download += dlDelta
-		c.traffic[uid].Upload += ulDelta
 	}
 
+	c.cachedOnline = onlineList
+
 	// Clean up stale stats for disconnected SAs
-	for uname := range c.lastSasStats {
-		if !present[uname] {
-			delete(c.lastSasStats, uname)
+	for sk := range c.lastSasStats {
+		if !present[sk] {
+			delete(c.lastSasStats, sk)
 		}
 	}
 }
