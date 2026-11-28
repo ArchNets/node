@@ -118,6 +118,12 @@ func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
 	if strings.Contains(pppOpts, "\nlock\n") || strings.HasPrefix(pppOpts, "lock\n") {
 		t.Fatalf("expected PPP options not to contain unsupported 'lock' option, got:\n%s", pppOpts)
 	}
+	if !strings.Contains(pppOpts, "\nnologfd\n") {
+		t.Fatalf("expected PPP options to include nologfd, got:\n%s", pppOpts)
+	}
+	if xl2tpdServiceUnit("ipsec-8-1701") != "archnet-xl2tpd-ipsec-8-1701" {
+		t.Fatalf("unexpected xl2tpdServiceUnit: %s", xl2tpdServiceUnit("ipsec-8-1701"))
+	}
 
 	// Verify IPv6 parsing in swanctl --list-sas output + real strongSwan 5.9.x EAP + in/out bytes format
 	sas := parseSwanctlSasText("ipsec-10-500: #1, ESTABLISHED, IKEv2\n  remote 'user_abcd1234' @ 2001:db8::1[4500]\n  bytes_in=12345, bytes_out=67890\n")

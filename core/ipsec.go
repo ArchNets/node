@@ -930,6 +930,7 @@ mtu %d
 mru %d
 lcp-echo-interval 30
 lcp-echo-failure 4
+nologfd
 nodefaultroute
 `, dnsLines, mtu, mtu)
 }
@@ -1116,20 +1117,55 @@ func (c *IPsecCore) reloadStrongSwan() error {
 	return nil
 }
 
+func xl2tpdServiceUnit(tag string) string {
+	return "archnet-xl2tpd-" + tag
+}
+
 // restartXl2tpd stops any running xl2tpd instance for this tag and starts a new one.
+// When systemd-run is available, xl2tpd runs inside its own transient unit so verbose
+// xl2tpd/pppd syslog messages do not flood `journalctl -u archnets`.
 func (c *IPsecCore) restartXl2tpd() {
 	c.stopXl2tpd()
 	confPath := fmt.Sprintf("/etc/xl2tpd/%s.conf", c.Tag)
 	pidFile := fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag)
 	controlFile := fmt.Sprintf("/run/xl2tpd-%s.control", c.Tag)
-	cmd := exec.Command("xl2tpd", "-c", confPath, "-p", pidFile, "-C", controlFile)
+	xlPath, err := exec.LookPath("xl2tpd")
+	if err != nil || xlPath == "" {
+		xlPath = "/usr/sbin/xl2tpd"
+	}
+
+	if _, sErr := exec.LookPath("systemd-run"); sErr == nil {
+		unit := xl2tpdServiceUnit(c.Tag)
+		_ = exec.Command("systemctl", "reset-failed", unit).Run()
+		cmd := exec.Command("systemd-run",
+			"--unit="+unit,
+			"--quiet",
+			"--description=ArchNet xl2tpd "+c.Tag,
+			"--property=Restart=on-failure",
+			"--property=RestartSec=3",
+			"--property=KillMode=control-group",
+			xlPath, "-D", "-c", confPath, "-p", pidFile, "-C", controlFile,
+		)
+		if out, err := cmd.CombinedOutput(); err == nil {
+			return
+		} else {
+			log.WithField("output", compactCmdOutput(out)).Warn("systemd-run xl2tpd failed, falling back to direct start")
+		}
+	}
+
+	cmd := exec.Command(xlPath, "-c", confPath, "-p", pidFile, "-C", controlFile)
 	if err := cmd.Start(); err != nil {
 		log.WithError(err).Error("Failed to start xl2tpd")
 	}
 }
 
-// stopXl2tpd stops the xl2tpd instance for this tag by reading its PID file.
+// stopXl2tpd stops the xl2tpd instance for this tag via its transient systemd unit and PID file.
 func (c *IPsecCore) stopXl2tpd() {
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		unit := xl2tpdServiceUnit(c.Tag)
+		_ = exec.Command("systemctl", "stop", unit).Run()
+		_ = exec.Command("systemctl", "reset-failed", unit).Run()
+	}
 	pidFile := fmt.Sprintf("/run/xl2tpd-%s.pid", c.Tag)
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
