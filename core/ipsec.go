@@ -31,9 +31,11 @@ type IPsecConfig struct {
 	L2TPSharedSecret string // L2TP shared secret
 	AuthMethod       string // "eap-mschapv2" or "psk"
 	Domain           string // SNI domain for cert (e.g. "ik1.archlio.com")
-	CertMode         string // "none", "file", "http", "self"
-	CertFile         string // Inline cert content (for cert_mode=file)
-	KeyFile          string // Inline key content (for cert_mode=file)
+	CertMode         string // "none", "file", "path", "http", "dns", "self"
+	CertFile         string // Inline cert content (for cert_mode=file) or disk path (for cert_mode=path)
+	KeyFile          string // Inline key content (for cert_mode=file) or disk path (for cert_mode=path)
+	CertPath         string // Resolved certificate file path on disk (from EnsureNodeCertificate)
+	KeyPath          string // Resolved private key file path on disk (from EnsureNodeCertificate)
 	DNS              string // DNS servers for VPN clients (e.g. "8.8.8.8,1.1.1.1")
 	Subnet           string // IP pool subnet (e.g. "10.10.0.0/16")
 	MTU              int    // MTU for L2TP PPP links
@@ -391,7 +393,7 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 
 	certName := c.Domain + ".pem"
 	switch c.CertMode {
-	case "http", "dns", "file":
+	case "http", "dns", "file", "path":
 		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", certName)
 		if _, err := os.Stat(certPath); err == nil && c.Domain != "" {
 			localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s\n            id = %s", certName, c.Domain)
@@ -407,6 +409,12 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 			}
 		}
 	case "self":
+		if c.Domain != "" {
+			if _, err := os.Stat(fmt.Sprintf("/etc/swanctl/x509/%s", certName)); err == nil {
+				localAuth = fmt.Sprintf("auth = pubkey\n            certs = %s\n            id = %s", certName, c.Domain)
+				break
+			}
+		}
 		selfCertName := fmt.Sprintf("server-%s.pem", c.Tag)
 		certPath := fmt.Sprintf("/etc/swanctl/x509/%s", selfCertName)
 		if _, err := os.Stat(certPath); err == nil {
@@ -567,13 +575,25 @@ func (c *IPsecCore) setupCertificate() error {
 		}
 	}
 
+	// If EnsureNodeCertificate already provisioned/located cert & key files on disk, install them directly
+	if c.CertPath != "" && c.KeyPath != "" {
+		if err := c.installCertFromDisk(c.CertPath, c.KeyPath); err == nil {
+			return nil
+		} else if c.CertMode != "http" && c.CertMode != "dns" {
+			return err
+		}
+	}
+
 	switch c.CertMode {
 	case "http", "dns":
-		// Let's Encrypt / ACME cert from standard certbot path
+		// Legacy Certbot path fallback if EnsureNodeCertificate was not used
 		return c.installLetsEncryptCert()
 	case "file":
 		// Inline cert content from panel API
 		return c.installFileCert()
+	case "path":
+		// Direct filesystem paths from panel
+		return c.installCertFromDisk(c.CertFile, c.KeyFile)
 	case "self":
 		// Self-signed certificate
 		return c.ensureServerCert()
@@ -584,6 +604,48 @@ func (c *IPsecCore) setupCertificate() error {
 		}
 		return nil // PSK mode, no cert needed
 	}
+}
+
+func (c *IPsecCore) installCertFromDisk(certSrcPath, keySrcPath string) error {
+	if certSrcPath == "" || keySrcPath == "" {
+		return fmt.Errorf("cert path or key path is empty")
+	}
+	certBytes, err := os.ReadFile(certSrcPath)
+	if err != nil {
+		return fmt.Errorf("failed to read cert file %s: %w", certSrcPath, err)
+	}
+	keyBytes, err := os.ReadFile(keySrcPath)
+	if err != nil {
+		return fmt.Errorf("failed to read key file %s: %w", keySrcPath, err)
+	}
+	return c.installPEMBundle(string(certBytes), string(keyBytes))
+}
+
+func (c *IPsecCore) installPEMBundle(certPEM, keyPEM string) error {
+	baseName := c.Domain
+	if baseName == "" {
+		baseName = "server-" + c.Tag
+	}
+
+	leafCert, chainCert := splitLeafAndChainPEM(certPEM)
+	certDst := fmt.Sprintf("/etc/swanctl/x509/%s.pem", baseName)
+	keyDst := fmt.Sprintf("/etc/swanctl/private/%s.pem", baseName)
+
+	if err := os.WriteFile(certDst, []byte(leafCert), 0644); err != nil {
+		return fmt.Errorf("failed to write cert: %w", err)
+	}
+	if chainCert != "" {
+		chainDst := fmt.Sprintf("/etc/swanctl/x509ca/%s-chain.pem", baseName)
+		if err := os.WriteFile(chainDst, []byte(chainCert), 0644); err != nil {
+			return fmt.Errorf("failed to write cert chain: %w", err)
+		}
+	}
+	if err := os.WriteFile(keyDst, []byte(keyPEM), 0600); err != nil {
+		return fmt.Errorf("failed to write key: %w", err)
+	}
+
+	log.WithFields(log.Fields{"tag": c.Tag, "domain": baseName, "cert_mode": c.CertMode, "hasChain": chainCert != ""}).Info("Installed certificate for IKEv2")
+	return nil
 }
 
 // installLetsEncryptCert copies Let's Encrypt certificates into strongSwan directories.
@@ -668,26 +730,7 @@ func (c *IPsecCore) installFileCert() error {
 	if c.IPsecConfig.CertFile == "" || c.IPsecConfig.KeyFile == "" {
 		return fmt.Errorf("cert_mode is 'file' but cert_file or key_file is empty")
 	}
-
-	leafCert, chainCert := splitLeafAndChainPEM(c.IPsecConfig.CertFile)
-	certDst := fmt.Sprintf("/etc/swanctl/x509/%s.pem", c.Domain)
-	keyDst := fmt.Sprintf("/etc/swanctl/private/%s.pem", c.Domain)
-
-	if err := os.WriteFile(certDst, []byte(leafCert), 0644); err != nil {
-		return fmt.Errorf("failed to write cert: %w", err)
-	}
-	if chainCert != "" {
-		chainDst := fmt.Sprintf("/etc/swanctl/x509ca/%s-chain.pem", c.Domain)
-		if err := os.WriteFile(chainDst, []byte(chainCert), 0644); err != nil {
-			return fmt.Errorf("failed to write cert chain: %w", err)
-		}
-	}
-	if err := os.WriteFile(keyDst, []byte(c.IPsecConfig.KeyFile), 0600); err != nil {
-		return fmt.Errorf("failed to write key: %w", err)
-	}
-
-	log.WithFields(log.Fields{"tag": c.Tag, "domain": c.Domain, "hasChain": chainCert != ""}).Info("Installed file certificate for IKEv2")
-	return nil
+	return c.installPEMBundle(c.IPsecConfig.CertFile, c.IPsecConfig.KeyFile)
 }
 
 // generateL2TPSwanctlConf generates IKEv1 Transport mode swanctl.conf for L2TP.

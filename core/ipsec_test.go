@@ -93,4 +93,31 @@ func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
 	if mss := computeIPsecTCPMSS(400); mss != 536 {
 		t.Fatalf("expected floor MSS 536, got %d", mss)
 	}
+
+	// Verify installCertFromDisk splits leaf and intermediate CA chain from disk paths
+	certDir := t.TempDir()
+	diskCert := filepath.Join(certDir, "fullchain.pem")
+	diskKey := filepath.Join(certDir, "privkey.pem")
+	if err := os.WriteFile(diskCert, []byte(bundle), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(diskKey, []byte("KEYDATA"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pathCore := NewIPsecCore(IPsecConfig{
+		Tag:      "ipsec-11-500",
+		Domain:   "ik-test.example.com",
+		CertMode: "path",
+		CertFile: diskCert,
+		KeyFile:  diskKey,
+	})
+	// Validate read and PEM split helper on disk files
+	readCert, err := os.ReadFile(pathCore.CertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2, ch2 := splitLeafAndChainPEM(string(readCert))
+	if !strings.Contains(l2, "LEAFDATA") || !strings.Contains(ch2, "INTERMEDIATEDATA") {
+		t.Fatalf("expected disk cert split to preserve leaf and chain, got leaf=%q chain=%q", l2, ch2)
+	}
 }

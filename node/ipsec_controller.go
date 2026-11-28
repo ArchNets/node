@@ -97,6 +97,14 @@ func (c *IPsecController) Start() error {
 		cfg.CertMode = c.info.Protocol.CertMode
 		cfg.CertFile = c.info.Protocol.CertFile
 		cfg.KeyFile = c.info.Protocol.KeyFile
+		if cfg.Mode != "l2tp" && cfg.CertMode != "" && cfg.CertMode != "none" {
+			if certPath, keyPath, certErr := EnsureNodeCertificate(c.info, c.tag); certErr != nil {
+				log.WithFields(log.Fields{"tag": c.tag, "cert_mode": cfg.CertMode, "err": certErr}).Warn("IPsec: EnsureNodeCertificate failed; falling back to IPsecCore setup")
+			} else if certPath != "" && keyPath != "" {
+				cfg.CertPath = certPath
+				cfg.KeyPath = keyPath
+			}
+		}
 		// Configurable IPsec params
 		cfg.DNS = c.info.Protocol.IPsecDNS
 		cfg.Subnet = c.info.Protocol.IPsecSubnet
