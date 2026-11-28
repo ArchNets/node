@@ -87,6 +87,12 @@ func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
 		t.Fatalf("expected iOS proposal aes256gcm16-sha256-ecp256 in IKEv2 swanctl conf, got:\n%s", ikeConf)
 	}
 
+	l2tpCore := NewIPsecCore(IPsecConfig{Tag: "ipsec-10-1701", Mode: "l2tp", L2TPSharedSecret: "l2tpsecret"})
+	l2tpConf := l2tpCore.generateL2TPSwanctlConf()
+	if !strings.Contains(l2tpConf, "local_ts = dynamic[udp/1701]") || !strings.Contains(l2tpConf, "remote_ts = dynamic[udp]") {
+		t.Fatalf("expected L2TP transport selectors local=dynamic[udp/1701] remote=dynamic[udp], got:\n%s", l2tpConf)
+	}
+
 	// Verify IPv6 parsing in swanctl --list-sas output + real strongSwan 5.9.x EAP + in/out bytes format
 	sas := parseSwanctlSasText("ipsec-10-500: #1, ESTABLISHED, IKEv2\n  remote 'user_abcd1234' @ 2001:db8::1[4500]\n  bytes_in=12345, bytes_out=67890\n")
 	if len(sas) != 1 || sas[0].Username != "user_abcd1234" || sas[0].RemoteIP != "2001:db8::1" || sas[0].InBytes != 12345 || sas[0].OutBytes != 67890 || sas[0].SAId != "1" {

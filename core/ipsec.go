@@ -836,7 +836,7 @@ func (c *IPsecCore) generateL2TPSwanctlConf() string {
         children {
             %s-l2tp {
                 local_ts = dynamic[udp/1701]
-                remote_ts = dynamic[udp/1701]
+                remote_ts = dynamic[udp]
                 mode = transport
                 esp_proposals = aes256-sha1,aes128-sha1,3des-sha1,default
                 dpd_action = clear
