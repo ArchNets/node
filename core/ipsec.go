@@ -971,15 +971,18 @@ func (c *IPsecCore) generateSecrets() string {
 	var sb strings.Builder
 	sb.WriteString("secrets {\n")
 
-	// IKE PSK
-	psk := c.PSK
-	if c.Mode == "l2tp" && c.L2TPSharedSecret != "" {
-		psk = c.L2TPSharedSecret
+	// IKE PSK (only needed for L2TP or IKEv2 PSK mode; omitting for EAP-MSCHAPv2 prevents
+	// colliding id=%any secrets when IKEv2 and L2TP coexist on the same server)
+	if c.Mode == "l2tp" || strings.EqualFold(c.AuthMethod, "psk") {
+		psk := c.PSK
+		if c.Mode == "l2tp" && c.L2TPSharedSecret != "" {
+			psk = c.L2TPSharedSecret
+		}
+		sb.WriteString(fmt.Sprintf("    ike-%s {\n", c.Tag))
+		sb.WriteString("        id = %any\n")
+		sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", escapeQuotedSecret(psk)))
+		sb.WriteString("    }\n")
 	}
-	sb.WriteString(fmt.Sprintf("    ike-%s {\n", c.Tag))
-	sb.WriteString("        id = %any\n")
-	sb.WriteString(fmt.Sprintf("        secret = \"%s\"\n", escapeQuotedSecret(psk)))
-	sb.WriteString("    }\n")
 
 	// EAP secrets for each user (IKEv2 only)
 	if c.Mode == "ikev2" {

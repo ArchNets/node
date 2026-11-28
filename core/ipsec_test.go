@@ -69,6 +69,16 @@ func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
 	if !strings.Contains(secrets, `secret = "my\"secret\\psk"`) {
 		t.Fatalf("expected escaped PSK in secrets, got:\n%s", secrets)
 	}
+
+	eapCore := NewIPsecCore(IPsecConfig{
+		Tag:        "ipsec-10-500",
+		Mode:       "ikev2",
+		PSK:        "should-not-emit-for-eap",
+		AuthMethod: "eap-mschapv2",
+	})
+	if eapSecrets := eapCore.generateSecrets(); strings.Contains(eapSecrets, "ike-ipsec-10-500") {
+		t.Fatalf("expected EAP-MSCHAPv2 IKEv2 not to emit id=%%any ike PSK secret, got:\n%s", eapSecrets)
+	}
 	ikeConf := c.generateIKEv2SwanctlConf()
 	if !strings.Contains(ikeConf, "mobike = no") {
 		t.Fatalf("expected mobike = no in IKEv2 swanctl conf, got:\n%s", ikeConf)
