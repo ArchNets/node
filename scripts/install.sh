@@ -306,7 +306,8 @@ install_base() {
             ;;
         debian|ubuntu)
             need_install_apt wget curl unzip tar cron socat ca-certificates pv \
-                wireguard-tools strongswan strongswan-swanctl xl2tpd openvpn
+                wireguard-tools charon-systemd strongswan-swanctl strongswan-pki \
+                libstrongswan-standard-plugins libstrongswan-extra-plugins xl2tpd openvpn
             update-ca-certificates >/dev/null 2>&1 || true
             if [[ "$WITH_AWG" == true ]]; then
                 install_amneziawg || warn "Continuing without AmneziaWG kernel module (embedded userspace fallback will be used)"
@@ -635,9 +636,22 @@ setup_strongswan() {
         return
     fi
 
+    # On Debian/Ubuntu 24.04+, strongswan-swanctl requires charon-systemd to provide strongswan.service
+    if [[ "$RELEASE" == "debian" || "$RELEASE" == "ubuntu" ]]; then
+        if ! systemctl cat strongswan.service >/dev/null 2>&1 && \
+           ! systemctl cat strongswan-swanctl.service >/dev/null 2>&1 && \
+           ! systemctl cat strongswan-starter.service >/dev/null 2>&1; then
+            need_install_apt charon-systemd strongswan-swanctl strongswan-pki \
+                libstrongswan-standard-plugins libstrongswan-extra-plugins || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+    fi
+
     local svc
-    for svc in strongswan-swanctl strongswan-starter strongswan; do
-        if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
+    for svc in strongswan strongswan-swanctl strongswan-starter; do
+        if systemctl cat "${svc}.service" >/dev/null 2>&1 || \
+           systemctl list-unit-files 2>/dev/null | grep -qE "^${svc}\.service"; then
+            systemctl unmask "$svc" >/dev/null 2>&1 || true
             systemctl enable "$svc" >/dev/null 2>&1 || true
             systemctl start "$svc" >/dev/null 2>&1 || true
             ok "strongSwan service '${svc}' enabled and started"
@@ -711,7 +725,7 @@ install_systemd_unit() {
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=archnets Service
-After=network.target nss-lookup.target strongswan-swanctl.service strongswan-starter.service strongswan.service
+After=network.target nss-lookup.target strongswan.service strongswan-swanctl.service strongswan-starter.service
 Wants=network.target
 
 [Service]
@@ -731,7 +745,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    # Do NOT call 'systemctl stop' here: if run inside archnets.service's cgroup (e.g. Reverse Terminal),
+    # stopping the service kills this installer process mid-update with SIGTERM ("Terminated").
     systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
 }
 
@@ -799,8 +814,8 @@ resolve_version() {
 
 download_release() {
     local version="$1"
+    local dest="${2:-${INSTALL_DIR}/archnets-node-linux.zip}"
     local url="https://github.com/${REPO}/releases/download/${version}/archnets-node-linux-${ARCH}.zip"
-    local dest="${INSTALL_DIR}/archnets-node-linux.zip"
 
     info "Downloading ${url}"
     if ! curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$dest" "$url" || [[ ! -s "$dest" ]]; then
@@ -847,20 +862,30 @@ first_install_wizard() {
 }
 
 install_node() {
-    local version
+    local version tmp_stage running_in_service_cgroup=false
     version="$(resolve_version "$VERSION_ARG")"
     [[ -n "$version" ]] || die "Failed to detect archnets version (GitHub API limit?). Try again later or specify a version manually."
     info "Installing archnets ${version}"
 
-    rm -rf "$INSTALL_DIR"
+    if grep -q "${SERVICE_NAME}\.service" /proc/self/cgroup 2>/dev/null; then
+        running_in_service_cgroup=true
+    fi
+
+    tmp_stage=$(mktemp -d)
+    download_release "$version" "${tmp_stage}/archnets-node-linux.zip"
+    unzip -o -q "${tmp_stage}/archnets-node-linux.zip" -d "$tmp_stage" || {
+        rm -rf "$tmp_stage"
+        die "Failed to unpack release archive"
+    }
+    rm -f "${tmp_stage}/archnets-node-linux.zip"
+    chmod +x "${tmp_stage}/node" 2>/dev/null || true
+
     mkdir -p "$INSTALL_DIR"
+    # Replace node binary atomically (unlinking old inode avoids ETXTBSY while running)
+    install -m 755 "${tmp_stage}/node" "${INSTALL_DIR}/node"
+    cp -af "${tmp_stage}/." "$INSTALL_DIR"/
+    rm -rf "$tmp_stage"
     cd "$INSTALL_DIR" || die "Cannot enter ${INSTALL_DIR}"
-
-    download_release "$version"
-
-    unzip -o -q archnets-node-linux.zip || die "Failed to unpack release archive"
-    rm -f archnets-node-linux.zip
-    chmod +x node
 
     mkdir -p "$CONFIG_DIR"
     cp geoip.dat geosite.dat "$CONFIG_DIR"/ 2>/dev/null || true
@@ -874,6 +899,13 @@ install_node() {
     install_logrotate
     ok "archnets ${version} installed and enabled at boot"
 
+    # Management CLI
+    if curl -fsL -o /usr/bin/node "$MGMT_SCRIPT_URL"; then
+        chmod +x /usr/bin/node
+    else
+        warn "Failed to download management script from ${MGMT_SCRIPT_URL}"
+    fi
+
     local first_install=false
     if [[ ! -f "${CONFIG_DIR}/config.yml" ]]; then
         if [[ -n "$API_HOST_ARG" && -n "$SERVER_ID_ARG" && -n "$SECRET_KEY_ARG" ]]; then
@@ -885,20 +917,24 @@ install_node() {
             first_install=true
         fi
     else
-        service_ctl start
-        sleep 2
-        if check_status; then
-            ok "${SERVICE_NAME} restarted successfully"
+        if [[ "$running_in_service_cgroup" == true && "$RELEASE" != "alpine" ]]; then
+            # Running inside archnets.service cgroup (e.g. Reverse Terminal): schedule detached restart
+            # so this command finishes cleanly without killing itself mid-output.
+            if command -v systemd-run >/dev/null 2>&1; then
+                systemd-run --on-active=1s --unit="${SERVICE_NAME}-self-restart" systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+            else
+                nohup setsid bash -c "sleep 1 && systemctl restart ${SERVICE_NAME}" >/dev/null 2>&1 </dev/null &
+            fi
+            ok "${SERVICE_NAME} binary updated; scheduled detached service restart in 1s"
         else
-            err "${SERVICE_NAME} may have failed to start. Run 'node log' to view logs."
+            service_ctl restart
+            sleep 2
+            if check_status; then
+                ok "${SERVICE_NAME} restarted successfully"
+            else
+                err "${SERVICE_NAME} may have failed to start. Run 'node log' to view logs."
+            fi
         fi
-    fi
-
-    # Management CLI
-    if curl -fsL -o /usr/bin/node "$MGMT_SCRIPT_URL"; then
-        chmod +x /usr/bin/node
-    else
-        warn "Failed to download management script from ${MGMT_SCRIPT_URL}"
     fi
 
     cd "$CUR_DIR" || true
@@ -928,6 +964,8 @@ main() {
     fi
 
     if [[ "$UPDATE_MODE" == true ]]; then
+        step "Ensuring strongSwan service"
+        setup_strongswan
         step "Updating archnets node"
         install_node
         echo ""

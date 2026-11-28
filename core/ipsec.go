@@ -920,7 +920,7 @@ func (c *IPsecCore) reloadStrongSwan() error {
 	//   - strongswan-swanctl : swanctl-managed (Debian/Ubuntu strongswan-swanctl pkg)
 	//   - strongswan         : generic alias on some distros
 	//   - ipsec start        : legacy SysV fallback
-	serviceNames := []string{"strongswan-starter", "strongswan-swanctl", "strongswan"}
+	serviceNames := []string{"strongswan", "strongswan-swanctl", "strongswan-starter"}
 	started := false
 	for _, svc := range serviceNames {
 		if err := exec.Command("systemctl", "start", svc).Run(); err == nil {
