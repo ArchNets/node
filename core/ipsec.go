@@ -532,7 +532,8 @@ func (c *IPsecCore) generateIKEv2SwanctlConf() string {
 	return r.Replace(`connections {
     {{TAG}} {
         version = 2
-        proposals = aes256gcm16-sha384-ecp256,aes256gcm16-sha256-modp2048,aes128gcm16-sha256-ecp256,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048,aes256-sha1-modp1024,default
+        mobike = no
+        proposals = aes256gcm16-sha256-ecp256,aes256gcm16-sha384-ecp256,aes256gcm16-sha256-modp2048,aes128gcm16-sha256-ecp256,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048,aes256-sha1-modp1024,default
         rekey_time = 0s
         pools = pool-{{TAG}}
         fragmentation = force
@@ -1143,6 +1144,12 @@ func (c *IPsecCore) setupNAT() error {
 	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet)); err != nil {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I FORWARD 1 -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
 	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C POSTROUTING -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I POSTROUTING 1 -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	}
+	if err := execCommand(fmt.Sprintf("iptables -w 5 -t mangle -C POSTROUTING -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet)); err != nil {
+		_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -I POSTROUTING 1 -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
+	}
 
 	if c.DropICMPUnreachable {
 		// Preserve Path MTU Discovery (ICMP fragmentation-needed) before dropping port-unreachable
@@ -1237,6 +1244,8 @@ func (c *IPsecCore) teardownNAT() {
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
 	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D FORWARD -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D POSTROUTING -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", subnet, tcpmss))
+	_ = execCommand(fmt.Sprintf("iptables -w 5 -t mangle -D POSTROUTING -d %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", subnet))
 
 	if c.DropICMPUnreachable {
 		_ = execCommand(fmt.Sprintf("iptables -w 5 -D FORWARD -s %s -p icmp --icmp-type fragmentation-needed -j ACCEPT", subnet))

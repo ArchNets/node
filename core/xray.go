@@ -252,14 +252,18 @@ func ensureLogDir(path string) {
 }
 
 func getCore(c *conf.Conf, dnsConfig *dns.Config, outBoundConfig []*core.OutboundHandlerConfig, routeConfig *router.Config, serverconfig *panel.ServerConfigResponse) *core.Instance {
-	// Ensure log directory exists before initializing Xray logger
-	ensureLogDir(c.LogConfig.Access)
+	// Log Config — default empty AccessLog to "none" so production nodes do not flood journald/stdout
+	// with per-connection access logs unless explicitly configured (e.g. a file path or "stdout").
+	accessLog := strings.TrimSpace(c.LogConfig.Access)
+	if accessLog == "" {
+		accessLog = "none"
+	}
+	ensureLogDir(accessLog)
 	ensureLogDir(c.LogConfig.Output)
 
-	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,
-		AccessLog: c.LogConfig.Access,
+		AccessLog: accessLog,
 		ErrorLog:  c.LogConfig.Output,
 	}
 	// Inbound config

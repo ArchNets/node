@@ -69,6 +69,13 @@ func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
 	if !strings.Contains(secrets, `secret = "my\"secret\\psk"`) {
 		t.Fatalf("expected escaped PSK in secrets, got:\n%s", secrets)
 	}
+	ikeConf := c.generateIKEv2SwanctlConf()
+	if !strings.Contains(ikeConf, "mobike = no") {
+		t.Fatalf("expected mobike = no in IKEv2 swanctl conf, got:\n%s", ikeConf)
+	}
+	if !strings.Contains(ikeConf, "aes256gcm16-sha256-ecp256") {
+		t.Fatalf("expected iOS proposal aes256gcm16-sha256-ecp256 in IKEv2 swanctl conf, got:\n%s", ikeConf)
+	}
 
 	// Verify IPv6 parsing in swanctl --list-sas output + real strongSwan 5.9.x EAP + in/out bytes format
 	sas := parseSwanctlSasText("ipsec-10-500: #1, ESTABLISHED, IKEv2\n  remote 'user_abcd1234' @ 2001:db8::1[4500]\n  bytes_in=12345, bytes_out=67890\n")
