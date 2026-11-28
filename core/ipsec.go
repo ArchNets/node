@@ -389,8 +389,8 @@ func (c *IPsecCore) reloadSecretsOnly() error {
 	if _, err := os.Stat("/var/run/charon.vici"); err != nil {
 		return c.reloadStrongSwan()
 	}
-	if out, err := exec.Command("swanctl", "--load-secrets").CombinedOutput(); err != nil {
-		log.WithField("output", string(out)).Warn("swanctl --load-secrets failed, falling back to full reload")
+	if out, err := exec.Command("swanctl", "--load-creds").CombinedOutput(); err != nil {
+		log.WithField("output", string(out)).Warn("swanctl --load-creds failed, falling back to full reload")
 		return c.reloadStrongSwan()
 	}
 	return nil
@@ -919,7 +919,6 @@ mru %d
 lcp-echo-interval 30
 lcp-echo-failure 4
 nodefaultroute
-proxyarp
 `, dnsLines, mtu, mtu)
 }
 
