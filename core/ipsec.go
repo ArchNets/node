@@ -893,7 +893,6 @@ mru %d
 lcp-echo-interval 30
 lcp-echo-failure 4
 nodefaultroute
-lock
 proxyarp
 `, dnsLines, mtu, mtu)
 }

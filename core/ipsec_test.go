@@ -92,6 +92,10 @@ func TestIPsecSplitLeafAndChainPEM_And_Config(t *testing.T) {
 	if !strings.Contains(l2tpConf, "local_ts = dynamic[udp/1701]") || !strings.Contains(l2tpConf, "remote_ts = dynamic[udp]") {
 		t.Fatalf("expected L2TP transport selectors local=dynamic[udp/1701] remote=dynamic[udp], got:\n%s", l2tpConf)
 	}
+	pppOpts := l2tpCore.generatePPPOptions()
+	if strings.Contains(pppOpts, "\nlock\n") || strings.HasPrefix(pppOpts, "lock\n") {
+		t.Fatalf("expected PPP options not to contain unsupported 'lock' option, got:\n%s", pppOpts)
+	}
 
 	// Verify IPv6 parsing in swanctl --list-sas output + real strongSwan 5.9.x EAP + in/out bytes format
 	sas := parseSwanctlSasText("ipsec-10-500: #1, ESTABLISHED, IKEv2\n  remote 'user_abcd1234' @ 2001:db8::1[4500]\n  bytes_in=12345, bytes_out=67890\n")
