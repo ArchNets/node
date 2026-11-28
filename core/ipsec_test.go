@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/archnets/node/api/panel"
 )
 
 func TestIPsecProcessSasStats_ActiveThreshold(t *testing.T) {
@@ -44,6 +46,22 @@ func TestIPsecProcessSasStats_ActiveThreshold(t *testing.T) {
 	})
 	if _, exists := c.lastSasStats["ipsec-test:#1"]; exists {
 		t.Fatalf("expected disconnected user1 to be pruned from lastSasStats")
+	}
+
+	// Verify excess DeviceLimit selection keeps newest SAs and returns oldest ones for termination
+	excess := findExcessDeviceSAs([]parsedSA{
+		{SAKey: "ipsec-test:#10", SAId: "10", Username: "user2"},
+		{SAKey: "ipsec-test:#4", SAId: "4", Username: "user2"},
+		{SAKey: "ipsec-test:#7", SAId: "7", Username: "user2"},
+	}, map[string]int{"user2": 1})
+	if len(excess) != 2 || excess[0].SAId != "4" || excess[1].SAId != "7" {
+		t.Fatalf("expected oldest SAs #4 and #7 to be evicted for DeviceLimit=1, got %+v", excess)
+	}
+
+	// Verify UpdateUserLimits updates DeviceLimit without dropping the user
+	c.UpdateUserLimits([]panel.UserInfo{{Id: 2, DeviceLimit: 3}})
+	if c.users[2].DeviceLimit != 3 {
+		t.Fatalf("expected DeviceLimit=3 after UpdateUserLimits, got %d", c.users[2].DeviceLimit)
 	}
 }
 

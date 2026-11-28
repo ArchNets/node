@@ -203,13 +203,14 @@ func (c *IPsecController) userListMonitor() error {
 	}
 
 	deleted, added := diffUserList(c.userList, newUsers)
-	if len(deleted) > 0 {
-		c.ipsecCore.DelUsers(deleted)
-		c.limiter.UpdateUser(c.tag, nil, deleted)
+	genDel, genAdd, limDel, limAdd := splitTunnelUserDiff(deleted, added)
+	if len(genDel) > 0 || len(genAdd) > 0 {
+		c.ipsecCore.SyncUsers(genAdd, genDel)
+		c.limiter.UpdateUser(c.tag, genAdd, genDel)
 	}
-	if len(added) > 0 {
-		c.ipsecCore.AddUsers(added)
-		c.limiter.UpdateUser(c.tag, added, nil)
+	if len(limDel) > 0 || len(limAdd) > 0 {
+		c.ipsecCore.UpdateUserLimits(limAdd)
+		c.limiter.UpdateUser(c.tag, limAdd, limDel)
 	}
 	c.userList = newUsers
 

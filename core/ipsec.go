@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,10 +65,11 @@ type IPsecCore struct {
 
 // IPsecUser represents a user's IKEv2/L2TP credentials.
 type IPsecUser struct {
-	UID      int
-	UUID     string
-	Username string
-	Password string
+	UID         int
+	UUID        string
+	Username    string
+	Password    string
+	DeviceLimit int
 }
 
 // NewIPsecCore creates a new IPsec core manager.
@@ -215,9 +217,9 @@ charon {
 `
 	_ = os.WriteFile(filepath.Join(dir, "archnet-tuning.conf"), []byte(tuning), 0644)
 }
-// AddUsers parses ServiceId JSON and adds users.
-func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
-	if len(users) == 0 {
+// SyncUsers atomically applies user deletions and additions in one batched write & reload.
+func (c *IPsecCore) SyncUsers(added, deleted []panel.UserInfo) {
+	if len(added) == 0 && len(deleted) == 0 {
 		return
 	}
 	type VPNIdentity struct {
@@ -227,8 +229,17 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 		} `json:"ikev2,omitempty"`
 	}
 
+	removedNames := make(map[string]bool)
+
 	c.mu.Lock()
-	for _, user := range users {
+	for _, user := range deleted {
+		if existing, ok := c.users[user.Id]; ok && existing != nil {
+			removedNames[existing.Username] = true
+			delete(c.usersByName, existing.Username)
+		}
+		delete(c.users, user.Id)
+	}
+	for _, user := range added {
 		if user.ServiceId == "" {
 			continue
 		}
@@ -236,70 +247,67 @@ func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
 		if err := json.Unmarshal([]byte(user.ServiceId), &identity); err != nil {
 			continue
 		}
-
 		// The backend puts creds in "ikev2" key even for l2tp
 		if identity.IKEv2 != nil && identity.IKEv2.Username != "" {
 			u := &IPsecUser{
-				UID:      user.Id,
-				UUID:     user.Uuid,
-				Username: identity.IKEv2.Username,
-				Password: identity.IKEv2.Password,
+				UID:         user.Id,
+				UUID:        user.Uuid,
+				Username:    identity.IKEv2.Username,
+				Password:    identity.IKEv2.Password,
+				DeviceLimit: user.DeviceLimit,
 			}
 			c.users[user.Id] = u
 			c.usersByName[u.Username] = u
+			// If same username was re-added in the same diff batch (e.g. password rotation), do not kick unless credentials changed
+			delete(removedNames, u.Username)
 		}
 	}
 	err := c.writeSecretsFiles()
 	c.mu.Unlock()
 
 	if err != nil {
-		log.WithError(err).Error("Failed to write ipsec secrets after adding users")
+		log.WithError(err).Error("Failed to write ipsec secrets during user sync")
 		return
 	}
-	if err := c.reloadSecretsOnly(); err != nil {
-		log.WithError(err).Error("Failed to reload strongSwan secrets after adding users")
-	}
-
-	log.WithFields(log.Fields{
-		"tag":   c.Tag,
-		"count": len(users),
-	}).Info("IPsec users added")
-}
-
-// DelUsers removes users and immediately terminates any active sessions belonging to them.
-func (c *IPsecCore) DelUsers(users []panel.UserInfo) {
-	if len(users) == 0 {
-		return
-	}
-	removedNames := make(map[string]bool)
-
-	c.mu.Lock()
-	for _, user := range users {
-		if existing, ok := c.users[user.Id]; ok && existing != nil {
-			removedNames[existing.Username] = true
-			delete(c.usersByName, existing.Username)
+	// L2TP user auth uses /etc/ppp/chap-secrets read dynamically per login; strongSwan PSK does not change per user
+	if c.Mode != "l2tp" {
+		if err := c.reloadSecretsOnly(); err != nil {
+			log.WithError(err).Error("Failed to reload strongSwan secrets during user sync")
 		}
-		delete(c.users, user.Id)
 	}
-	err := c.writeSecretsFiles()
-	c.mu.Unlock()
-
-	if err != nil {
-		log.WithError(err).Error("Failed to write ipsec secrets after deleting users")
-		return
-	}
-	if err := c.reloadSecretsOnly(); err != nil {
-		log.WithError(err).Error("Failed to reload strongSwan secrets after deleting users")
-	}
-
 	if len(removedNames) > 0 {
 		c.terminateUserSessions(removedNames)
 	}
 
 	log.WithFields(log.Fields{
-		"tag":   c.Tag,
-		"count": len(users),
-	}).Info("IPsec users removed")
+		"tag":     c.Tag,
+		"added":   len(added),
+		"deleted": len(deleted),
+	}).Info("IPsec users synced")
+}
+
+// UpdateUserLimits updates in-memory DeviceLimit metadata without rewriting secrets or dropping active sessions.
+func (c *IPsecCore) UpdateUserLimits(users []panel.UserInfo) {
+	if len(users) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for _, u := range users {
+		if existing, ok := c.users[u.Id]; ok && existing != nil {
+			existing.DeviceLimit = u.DeviceLimit
+		}
+	}
+	c.mu.Unlock()
+}
+
+// AddUsers parses ServiceId JSON and adds users.
+func (c *IPsecCore) AddUsers(users []panel.UserInfo) {
+	c.SyncUsers(users, nil)
+}
+
+// DelUsers removes users and immediately terminates any active sessions belonging to them.
+func (c *IPsecCore) DelUsers(users []panel.UserInfo) {
+	c.SyncUsers(nil, users)
 }
 
 // terminateUserSessions disconnects active IKEv2 SAs or L2TP PPP interfaces for removed/disabled users.
@@ -414,7 +422,7 @@ func (c *IPsecCore) writeConfigs() error {
 	// Write secrets
 	secrets := c.generateSecrets()
 	secretsPath := fmt.Sprintf("/etc/swanctl/conf.d/%s-secrets.conf", c.Tag)
-	if err := os.WriteFile(secretsPath, []byte(secrets), 0644); err != nil {
+	if err := writeFileAtomic(secretsPath, []byte(secrets), 0600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", secretsPath, err)
 	}
 
@@ -435,25 +443,43 @@ func (c *IPsecCore) writeConfigs() error {
 		if err := upsertTaggedChapSecrets("/etc/ppp/chap-secrets", c.Tag, c.generateChapSecrets()); err != nil {
 			return err
 		}
-		// PPP ip-up script: tracks active ppp interface -> user + remote IP (removes stale entries first)
+		// PPP ip-up script: flock-protected multi-device map (only deduplicates by $IFNAME so multi-device logins stay tracked)
 		ipUpScript := fmt.Sprintf(`#!/bin/sh
 # Written by ArchNet IPsecCore tag=%s
 MAP="/tmp/archnet-ppp-%s.map"
-if [ -f "$MAP" ]; then
-  grep -v -E "^($PEERNAME[[:space:]]|[[:graph:]]+[[:space:]]+$IFNAME([[:space:]]|$))" "$MAP" > "${MAP}.tmp" 2>/dev/null || true
+LOCK="${MAP}.lock"
+update_map() {
+  if [ -f "$MAP" ]; then
+    grep -v -E "[[:space:]]+$IFNAME([[:space:]]|$)" "$MAP" > "${MAP}.tmp" 2>/dev/null || true
+  else
+    : > "${MAP}.tmp"
+  fi
+  echo "$PEERNAME $IFNAME ${IPREMOTE:-}" >> "${MAP}.tmp"
   mv "${MAP}.tmp" "$MAP" 2>/dev/null || true
+}
+if command -v flock >/dev/null 2>&1; then
+  (flock -w 5 9 || exit 0; update_map) 9>"$LOCK"
+else
+  update_map
 fi
-echo "$PEERNAME $IFNAME ${IPREMOTE:-}" >> "$MAP"
 `, c.Tag, c.Tag)
 		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/ip-up.d/%s", c.Tag), []byte(ipUpScript), 0755); err != nil {
 			return err
 		}
-		// PPP ip-down script: removes mapping by interface name
+		// PPP ip-down script: flock-protected removal by interface name
 		ipDownScript := fmt.Sprintf(`#!/bin/sh
 MAP="/tmp/archnet-ppp-%s.map"
-if [ -f "$MAP" ]; then
-  grep -v -E "[[:space:]]+$IFNAME([[:space:]]|$)" "$MAP" > "${MAP}.tmp" 2>/dev/null || true
-  mv "${MAP}.tmp" "$MAP" 2>/dev/null || true
+LOCK="${MAP}.lock"
+remove_map() {
+  if [ -f "$MAP" ]; then
+    grep -v -E "[[:space:]]+$IFNAME([[:space:]]|$)" "$MAP" > "${MAP}.tmp" 2>/dev/null || true
+    mv "${MAP}.tmp" "$MAP" 2>/dev/null || true
+  fi
+}
+if command -v flock >/dev/null 2>&1; then
+  (flock -w 5 9 || exit 0; remove_map) 9>"$LOCK"
+else
+  remove_map
 fi
 `, c.Tag)
 		if err := os.WriteFile(fmt.Sprintf("/etc/ppp/ip-down.d/%s", c.Tag), []byte(ipDownScript), 0755); err != nil {
@@ -903,6 +929,34 @@ func escapeQuotedSecret(s string) string {
 	return s
 }
 
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return os.WriteFile(path, data, perm)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
 func upsertTaggedChapSecrets(path, tag, body string) error {
 	beginMarker := fmt.Sprintf("# BEGIN ARCHNET %s", tag)
 	endMarker := fmt.Sprintf("# END ARCHNET %s", tag)
@@ -919,7 +973,7 @@ func upsertTaggedChapSecrets(path, tag, body string) error {
 	sb.WriteString("\n")
 	sb.WriteString(endMarker)
 	sb.WriteString("\n")
-	return os.WriteFile(path, []byte(sb.String()), 0600)
+	return writeFileAtomic(path, []byte(sb.String()), 0600)
 }
 
 func removeTaggedChapSecrets(path, tag string) error {
@@ -933,7 +987,7 @@ func removeTaggedChapSecrets(path, tag string) error {
 	if strings.TrimSpace(cleaned) == "" {
 		return os.Remove(path)
 	}
-	return os.WriteFile(path, []byte(strings.TrimRight(cleaned, "\n")+"\n"), 0600)
+	return writeFileAtomic(path, []byte(strings.TrimRight(cleaned, "\n")+"\n"), 0600)
 }
 
 func stripTaggedSection(content, beginMarker, endMarker string) string {
@@ -1379,27 +1433,78 @@ func parseSwanctlSasText(output string) []parsedSA {
 
 func (c *IPsecCore) collectStats() {
 	sas := c.parseSasOutput()
-	c.processSasStats(sas)
+	excess := c.processSasStats(sas)
+	for _, sa := range excess {
+		if sa.SAId == "" {
+			continue
+		}
+		if c.Mode == "l2tp" {
+			_ = exec.Command("ip", "link", "set", sa.SAId, "down").Run()
+		} else {
+			_ = exec.Command("swanctl", "--terminate", "--ike-id", sa.SAId).Run()
+		}
+		log.WithFields(log.Fields{
+			"tag":      c.Tag,
+			"username": sa.Username,
+			"sa_id":    sa.SAId,
+		}).Info("IPsec: terminated excess session above DeviceLimit")
+	}
 }
 
-func (c *IPsecCore) processSasStats(sas []parsedSA) {
+func findExcessDeviceSAs(sas []parsedSA, deviceLimits map[string]int) []parsedSA {
+	if len(deviceLimits) == 0 || len(sas) == 0 {
+		return nil
+	}
+	byUser := make(map[string][]parsedSA)
+	for _, sa := range sas {
+		if limit := deviceLimits[sa.Username]; limit > 0 {
+			byUser[sa.Username] = append(byUser[sa.Username], sa)
+		}
+	}
+	var excess []parsedSA
+	for uname, list := range byUser {
+		limit := deviceLimits[uname]
+		if len(list) <= limit {
+			continue
+		}
+		sort.Slice(list, func(i, j int) bool {
+			ni, errI := strconv.Atoi(strings.TrimPrefix(list[i].SAId, "ppp"))
+			nj, errJ := strconv.Atoi(strings.TrimPrefix(list[j].SAId, "ppp"))
+			if errI == nil && errJ == nil && ni != nj {
+				return ni < nj
+			}
+			return list[i].SAKey < list[j].SAKey
+		})
+		// Keep the newest `limit` sessions; terminate oldest excess sessions
+		excess = append(excess, list[:len(list)-limit]...)
+	}
+	return excess
+}
+
+func (c *IPsecCore) processSasStats(sas []parsedSA) []parsedSA {
 	c.mu.RLock()
 	usernameToUID := make(map[string]int, len(c.usersByName))
+	deviceLimits := make(map[string]int, len(c.usersByName))
 	for uname, u := range c.usersByName {
 		if u != nil {
 			usernameToUID[uname] = u.UID
+			if u.DeviceLimit > 0 {
+				deviceLimits[uname] = u.DeviceLimit
+			}
 		}
 	}
 	if len(usernameToUID) == 0 && len(c.users) > 0 {
 		for _, user := range c.users {
 			usernameToUID[user.Username] = user.UID
+			if user.DeviceLimit > 0 {
+				deviceLimits[user.Username] = user.DeviceLimit
+			}
 		}
 	}
 	c.mu.RUnlock()
 
 	now := time.Now()
 	c.trafficMu.Lock()
-	defer c.trafficMu.Unlock()
 
 	present := make(map[string]bool, len(sas))
 	onlineSeen := make(map[int]bool)
@@ -1469,6 +1574,9 @@ func (c *IPsecCore) processSasStats(sas []parsedSA) {
 			delete(c.lastSasStats, sk)
 		}
 	}
+	c.trafficMu.Unlock()
+
+	return findExcessDeviceSAs(sas, deviceLimits)
 }
 
 // parseL2TPOnlineUsers reads the PPP user-to-interface map and collects
@@ -1503,6 +1611,8 @@ func (c *IPsecCore) parseL2TPOnlineUsers() []parsedSA {
 		txBytes := readSysfsInt64(fmt.Sprintf("/sys/class/net/%s/statistics/tx_bytes", iface))
 
 		result = append(result, parsedSA{
+			SAKey:    c.Tag + ":" + iface,
+			SAId:     iface,
 			Username: username,
 			RemoteIP: remoteIP,
 			InBytes:  rxBytes, // rx on server = upload from user
