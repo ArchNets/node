@@ -113,12 +113,15 @@ func (c *IPsecCore) getMTU() int {
 
 // Start initializes strongSwan and xl2tpd.
 func (c *IPsecCore) Start() error {
-	// Enable IP forwarding and redirect settings for IPsec/L2TP
+	// Enable IP forwarding, disable redirects, and allow XFRM/IPsec policy processing on loopback (lo)
+	// so tunneled IPsec traffic arriving via 127.0.0.1 (Entry->Exit relay forwarder) can encrypt replies back out.
 	_ = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").Run()
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.all.send_redirects=0").Run()
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.default.send_redirects=0").Run()
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.all.accept_redirects=0").Run()
 	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.default.accept_redirects=0").Run()
+	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.lo.disable_xfrm=0").Run()
+	_ = exec.Command("sysctl", "-w", "net.ipv4.conf.lo.disable_policy=0").Run()
 
 	if c.Mode == "l2tp" {
 		_ = os.Remove(fmt.Sprintf("/tmp/archnet-ppp-%s.map", c.Tag))
@@ -920,6 +923,15 @@ func (c *IPsecCore) reloadStrongSwan() error {
 	//   - strongswan-swanctl : alias on some distros
 	//   - strongswan-starter : classic strongSwan (charon-starter)
 	//   - ipsec start        : legacy SysV fallback
+	// Ensure legacy strongswan-starter does not hold UDP 500/4500 when charon-systemd (strongswan.service) is used.
+	if _, statErr := os.Stat("/lib/systemd/system/strongswan.service"); statErr == nil {
+		_ = exec.Command("systemctl", "disable", "--now", "strongswan-starter").Run()
+		_ = exec.Command("pkill", "-9", "-x", "starter").Run()
+	} else if _, statErr := os.Stat("/usr/lib/systemd/system/strongswan.service"); statErr == nil {
+		_ = exec.Command("systemctl", "disable", "--now", "strongswan-starter").Run()
+		_ = exec.Command("pkill", "-9", "-x", "starter").Run()
+	}
+
 	serviceNames := []string{"strongswan", "strongswan-swanctl", "strongswan-starter"}
 	started := false
 	for _, svc := range serviceNames {
