@@ -21,3 +21,7 @@ func FormatPortConflictError(port int, bindErr error) error {
 func ReclaimPortIfOrphanedNode(port int) bool {
 	return false
 }
+
+func ReclaimIdleIPsecPort(port int) bool {
+	return false
+}

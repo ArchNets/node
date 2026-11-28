@@ -1617,6 +1617,13 @@ func (e *Engine) startUDPForwarderListener(listenIP string, listenPort, targetPo
 	}
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
+		if transport.ReclaimPortIfOrphanedNode(listenPort) || transport.ReclaimIdleIPsecPort(listenPort) {
+			e.logger.WithField("port", listenPort).Warn("Reclaimed idle/orphaned process holding UDP forwarder port, retrying bind...")
+			time.Sleep(300 * time.Millisecond)
+			udpConn, err = net.ListenUDP("udp", udpAddr)
+		}
+	}
+	if err != nil {
 		conflictErr := transport.FormatPortConflictError(listenPort, err)
 		e.logger.WithFields(log.Fields{
 			"port": listenPort,

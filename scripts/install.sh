@@ -307,7 +307,8 @@ install_base() {
         debian|ubuntu)
             need_install_apt wget curl unzip tar cron socat ca-certificates pv \
                 wireguard-tools charon-systemd strongswan-swanctl strongswan-pki \
-                libstrongswan-standard-plugins libstrongswan-extra-plugins xl2tpd openvpn
+                libstrongswan-standard-plugins libstrongswan-extra-plugins \
+                libcharon-extauth-plugins libcharon-extra-plugins xl2tpd openvpn
             update-ca-certificates >/dev/null 2>&1 || true
             if [[ "$WITH_AWG" == true ]]; then
                 install_amneziawg || warn "Continuing without AmneziaWG kernel module (embedded userspace fallback will be used)"
@@ -630,21 +631,34 @@ install_amneziawg() {
 # ------------------------------------------------------------------------------
 setup_strongswan() {
     if [[ "$RELEASE" == "alpine" ]]; then
-        rc-update add strongswan default 2>/dev/null || true
-        service strongswan start 2>/dev/null || true
-        ok "strongSwan enabled (OpenRC)"
+        rc-update del strongswan default 2>/dev/null || true
+        service strongswan stop 2>/dev/null || true
+        ok "strongSwan ready (on-demand via archnets)"
         return
     fi
 
-    # On Debian/Ubuntu 24.04+, strongswan-swanctl requires charon-systemd to provide strongswan.service
+    # On Debian/Ubuntu 24.04+, strongswan-swanctl requires charon-systemd + extauth plugins for EAP-MSCHAPv2
     if [[ "$RELEASE" == "debian" || "$RELEASE" == "ubuntu" ]]; then
         if ! systemctl cat strongswan.service >/dev/null 2>&1 && \
            ! systemctl cat strongswan-swanctl.service >/dev/null 2>&1 && \
            ! systemctl cat strongswan-starter.service >/dev/null 2>&1; then
             need_install_apt charon-systemd strongswan-swanctl strongswan-pki \
-                libstrongswan-standard-plugins libstrongswan-extra-plugins || true
+                libstrongswan-standard-plugins libstrongswan-extra-plugins \
+                libcharon-extauth-plugins libcharon-extra-plugins || true
             systemctl daemon-reload >/dev/null 2>&1 || true
         fi
+    fi
+
+    # Keep strongSwan/xl2tpd stopped & disabled unless archnets IPsecCore actually starts them
+    # (prevents idle charon/xl2tpd from stealing UDP 500/4500/1701 on Entry relay servers).
+    if ! ls /etc/swanctl/conf.d/ipsec-*.conf >/dev/null 2>&1 && \
+       ! ls /etc/xl2tpd/ipsec-*.conf >/dev/null 2>&1; then
+        for svc in strongswan strongswan-swanctl strongswan-starter xl2tpd; do
+            systemctl disable --now "$svc" >/dev/null 2>&1 || true
+        done
+        pkill -x xl2tpd >/dev/null 2>&1 || true
+        ok "strongSwan installed (on-demand; UDP 500/4500/1701 kept free for relay forwarders)"
+        return
     fi
 
     local svc

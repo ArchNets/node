@@ -916,13 +916,14 @@ func (c *IPsecCore) reloadStrongSwan() error {
 
 	// Ensure strongSwan daemon (charon) is running.
 	// Service name varies by distro/package:
+	//   - strongswan         : charon-systemd (Ubuntu 24.04 / Debian swanctl)
+	//   - strongswan-swanctl : alias on some distros
 	//   - strongswan-starter : classic strongSwan (charon-starter)
-	//   - strongswan-swanctl : swanctl-managed (Debian/Ubuntu strongswan-swanctl pkg)
-	//   - strongswan         : generic alias on some distros
 	//   - ipsec start        : legacy SysV fallback
 	serviceNames := []string{"strongswan", "strongswan-swanctl", "strongswan-starter"}
 	started := false
 	for _, svc := range serviceNames {
+		_ = exec.Command("systemctl", "unmask", svc).Run()
 		if err := exec.Command("systemctl", "start", svc).Run(); err == nil {
 			started = true
 			log.WithField("service", svc).Info("strongSwan service started")

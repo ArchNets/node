@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -132,4 +133,36 @@ func ReclaimPortIfOrphanedNode(port int) bool {
 		return true
 	}
 	return false
+}
+
+// ReclaimIdleIPsecPort stops idle system strongSwan/xl2tpd daemons holding UDP 500/4500/1701
+// when this server has no active ArchNet IPsec/L2TP protocol configured (e.g. an Iran Entry server
+// forwarding IPsec traffic to an Exit server).
+func ReclaimIdleIPsecPort(port int) bool {
+	if port != 500 && port != 4500 && port != 1701 {
+		return false
+	}
+	swanConfs, _ := filepath.Glob("/etc/swanctl/conf.d/ipsec-*.conf")
+	xlConfs, _ := filepath.Glob("/etc/xl2tpd/ipsec-*.conf")
+	if len(swanConfs) > 0 || len(xlConfs) > 0 {
+		return false
+	}
+
+	reclaimed := false
+	for _, svc := range []string{"strongswan", "strongswan-swanctl", "strongswan-starter", "xl2tpd"} {
+		_ = exec.Command("systemctl", "disable", "--now", svc).Run()
+	}
+	if port == 500 || port == 4500 {
+		for _, proc := range []string{"starter", "charon", "charon-systemd"} {
+			if exec.Command("pkill", "-9", "-x", proc).Run() == nil {
+				reclaimed = true
+			}
+		}
+	}
+	if port == 1701 {
+		if exec.Command("pkill", "-9", "-x", "xl2tpd").Run() == nil {
+			reclaimed = true
+		}
+	}
+	return reclaimed
 }
